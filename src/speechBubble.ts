@@ -1,7 +1,6 @@
 export type BubblePayload =
   | { type: "thinking" }
   | { type: "expression"; expression: string }
-  | { type: "stream"; text: string; expression?: string }
   | { type: "say"; text: string; expression?: string }
   | { type: "tts"; state: "start" | "end" | "error" }
   | { type: "error"; text: string }
@@ -89,10 +88,10 @@ export function createSpeechBubble(
     followRaf = requestAnimationFrame(tick);
   };
 
-  const show = (text: string, kind: "say" | "thinking" | "error" | "stream") => {
+  const show = (text: string, kind: "say" | "thinking" | "error") => {
     clearHide();
     el.hidden = false;
-    el.dataset.kind = kind === "stream" ? "say" : kind;
+    el.dataset.kind = kind;
     el.textContent = text;
     placeAboveHead();
     startFollow();
@@ -124,10 +123,6 @@ export function createSpeechBubble(
     if (payload.type === "error") {
       show(payload.text.slice(0, 160), "error");
       scheduleHide();
-      return;
-    }
-    if (payload.type === "stream") {
-      show(payload.text, "stream");
       return;
     }
     show(payload.text, "say");

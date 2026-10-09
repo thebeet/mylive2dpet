@@ -8,8 +8,29 @@ function fillTemplate(text, vars) {
 }
 
 /**
+ * @param {{ longTermMemory?: string, sessionSummary?: string, recentDialogue?: string }} memory
+ */
+function formatMemorySections(memory = {}) {
+  const blocks = [];
+  if (memory.longTermMemory) {
+    blocks.push(`# 长期记忆\n${memory.longTermMemory}`);
+  }
+  if (memory.sessionSummary) {
+    blocks.push(`# 会话摘要\n${memory.sessionSummary}`);
+  }
+  if (memory.recentDialogue) {
+    blocks.push(`# 近期对话\n${memory.recentDialogue}`);
+  }
+  if (blocks.length === 0) return "";
+  blocks.push(
+    `# 记忆使用说明\n可参考以上记忆保持话题连贯，但必须以当前截图为准；不要复述已过时的画面细节，不要为了呼应记忆而编造截图中没有的内容。`,
+  );
+  return blocks.join("\n\n");
+}
+
+/**
  * @param {object} character
- * @param {{ expressions?: string[] }} [extras]
+ * @param {{ expressions?: string[], memory?: { longTermMemory?: string, sessionSummary?: string, recentDialogue?: string } }} [extras]
  */
 function buildSystemPrompt(character = {}, extras = {}) {
   const petName = character.name || "Setsuna";
@@ -27,6 +48,7 @@ function buildSystemPrompt(character = {}, extras = {}) {
   const personality = fillTemplate(character.personality, vars);
   const scenario = fillTemplate(character.scenario, vars);
   const rules = fillTemplate(character.rules, vars);
+  const memoryBlock = formatMemorySections(extras.memory || {});
 
   return [
     `# 角色`,
@@ -46,28 +68,27 @@ function buildSystemPrompt(character = {}, extras = {}) {
     ``,
     rules.trim(),
     ``,
+    memoryBlock,
+    ``,
     `# Live2D Expressions`,
-    `你说话时会驱动 Live2D 表情。第一行必须是下列表情名之一（精确匹配、区分大小写）：`,
+    `你说话时会驱动 Live2D 表情。expression 必须是下列之一（精确匹配、区分大小写）：`,
     expressions.join(", "),
-    `若不确定，第一行写 neutral。`,
+    `若不确定，expression 用 neutral。`,
     ``,
     `# 输入说明`,
-    `用户消息会附带一张当前桌面截图（JPG）。请根据截图内容，用设定中的语气说 1～2 句。`,
+    `用户消息会附带当前本地时间，以及一张当前桌面截图（JPG）。请根据截图内容，用设定中的语气说 1～2 句；需要时可自然参考时间（昼夜、周末等），不要机械报时。`,
     ``,
-    `# 输出格式（必须严格遵守，便于流式显示）`,
-    `不要输出 JSON、不要 Markdown、不要代码块、不要前缀说明。`,
-    `一共两段，用一个换行隔开：`,
-    `第 1 行：表情名（仅一行，不要其它字符）`,
-    `第 2 行起：要对用户说的中文台词（1～2 句）`,
+    `# 输出格式（必须严格遵守）`,
+    `只输出一个 JSON 对象，不要 Markdown、不要代码块、不要其它说明文字。`,
+    `字段：`,
+    `- expression: string，表情名`,
+    `- response: string，要对用户说的中文台词（1～2 句）`,
     ``,
     `正确示例：`,
-    `smile`,
-    `前辈还在写代码呢，终端比人还忙。`,
-    ``,
-    `错误示例：用 JSON、把表情和台词写在同一行、先说话再写表情。`,
+    `{"expression":"smile","response":"前辈还在写代码呢，终端比人还忙。"}`,
   ]
     .filter((line, i, arr) => !(line === "" && arr[i - 1] === ""))
     .join("\n");
 }
 
-module.exports = { buildSystemPrompt, fillTemplate };
+module.exports = { buildSystemPrompt, fillTemplate, formatMemorySections };

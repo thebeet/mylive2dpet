@@ -1,6 +1,6 @@
 const path = require("path");
 
-const PROJECT_ROOT = path.join(__dirname, "../..");
+const PROJECT_ROOT = path.join(__dirname, "../../..");
 
 /**
  * 相对项目根目录解析路径；已是绝对路径则原样返回。

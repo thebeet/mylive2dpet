@@ -4,6 +4,7 @@ const { buildSystemPrompt } = require("./prompt");
 const { loadExpressionNames } = require("./live2dCatalog");
 const { extractChatPayload } = require("./parseChatText");
 const { captureFullscreenToJpg } = require("./screenshot");
+const memory = require("./memory");
 
 function normalizeEndpoint(endpoint) {
   const base = String(endpoint || "").replace(/\/+$/, "");
@@ -34,24 +35,97 @@ async function applyProxy(proxy) {
   });
 }
 
-function extractDeltaText(delta) {
-  if (!delta) return "";
-  if (typeof delta.content === "string") return delta.content;
-  if (Array.isArray(delta.content)) {
-    return delta.content
-      .map((part) => (typeof part === "string" ? part : part?.text || ""))
+function messageContentToText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part && typeof part.text === "string") return part.text;
+        return "";
+      })
       .join("");
   }
   return "";
 }
 
-function buildRequestBody(ai, systemPrompt, base64, stream) {
+/**
+ * Lightweight text-only chat/completions call (memory summary / extract).
+ * Uses current config endpoint; does not touch short-term memory.
+ * @param {object[]} messages
+ * @param {{ max_tokens?: number, temperature?: number }} [opts]
+ */
+async function callChatCompletions(messages, opts = {}) {
+  const config = loadConfig();
+  const { ai } = config;
+  if (!ai?.endpoint || !ai?.apiKey || !ai?.model) {
+    throw new Error("config.ai 缺少 endpoint / apiKey / model");
+  }
+
+  await applyProxy(ai.proxy);
+  const url = normalizeEndpoint(ai.endpoint);
+  const maxTokens =
+    Number(opts.max_tokens) > 0
+      ? Number(opts.max_tokens)
+      : Number(ai.max_tokens) > 0
+        ? Number(ai.max_tokens)
+        : 256;
+
+  const body = {
+    model: ai.model,
+    temperature:
+      typeof opts.temperature === "number" ? opts.temperature : 0.3,
+    max_tokens: maxTokens,
+    stream: false,
+    messages,
+  };
+
+  const res = await net.fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      Authorization: `Bearer ${ai.apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  const text = await res.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(`API 返回非 JSON (${res.status}): ${text.slice(0, 200)}`);
+  }
+  if (!res.ok) {
+    throw new Error(
+      `API ${res.status}: ${data?.error?.message || text.slice(0, 200)}`,
+    );
+  }
+
+  return messageContentToText(data?.choices?.[0]?.message?.content).trim();
+}
+
+function formatNowStamp(date = new Date()) {
+  const y = date.getFullYear();
+  const mo = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  const h = String(date.getHours()).padStart(2, "0");
+  const mi = String(date.getMinutes()).padStart(2, "0");
+  const s = String(date.getSeconds()).padStart(2, "0");
+  const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
+  const w = weekdays[date.getDay()];
+  return `${y}-${mo}-${d} 周${w} ${h}:${mi}:${s}`;
+}
+
+function buildRequestBody(ai, systemPrompt, base64) {
   const maxTokens = Number(ai.max_tokens) > 0 ? Number(ai.max_tokens) : 1024;
+  const nowStamp = formatNowStamp();
   return {
     model: ai.model,
     temperature: 0.8,
     max_tokens: maxTokens,
-    stream,
+    stream: false,
     messages: [
       { role: "system", content: systemPrompt },
       {
@@ -59,7 +133,7 @@ function buildRequestBody(ai, systemPrompt, base64, stream) {
         content: [
           {
             type: "text",
-            text: "这是前辈现在的桌面截图。请按格式输出：第一行表情名，换行后写 1～2 句台词。",
+            text: `[当前时间 ${nowStamp}] 这是前辈现在的桌面截图。请只返回 JSON：{"expression":"...","response":"..."}`,
           },
           {
             type: "image_url",
@@ -73,57 +147,40 @@ function buildRequestBody(ai, systemPrompt, base64, stream) {
   };
 }
 
-async function consumeChatStream(res, onRaw) {
-  if (!res.body || typeof res.body.getReader !== "function") {
-    throw new Error("NO_STREAM_BODY");
+/**
+ * @param {{ trigger?: string }} [options]
+ */
+async function chatAboutScreen(options = {}) {
+  const config = loadConfig();
+  const { ai, character } = config;
+  if (!ai?.endpoint || !ai?.apiKey || !ai?.model) {
+    throw new Error("config.ai 缺少 endpoint / apiKey / model");
   }
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-  let full = "";
+  const expressions = loadExpressionNames({ includeInternal: false });
+  await applyProxy(ai.proxy);
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+  const shot = await captureFullscreenToJpg();
+  const base64 = imageToBase64Jpeg(shot.path);
+  const memorySections = memory.buildPromptSections(config);
+  const systemPrompt = buildSystemPrompt(character, {
+    expressions,
+    memory: memorySections,
+  });
+  const url = normalizeEndpoint(ai.endpoint);
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    Authorization: `Bearer ${ai.apiKey}`,
+  };
 
-    let newline;
-    while ((newline = buffer.indexOf("\n")) >= 0) {
-      let line = buffer.slice(0, newline);
-      buffer = buffer.slice(newline + 1);
-      line = line.trimEnd();
-      if (!line || line.startsWith(":")) continue;
-      if (!line.startsWith("data:")) continue;
-
-      const data = line.slice(5).trim();
-      if (data === "[DONE]") continue;
-
-      let json;
-      try {
-        json = JSON.parse(data);
-      } catch {
-        continue;
-      }
-
-      const piece = extractDeltaText(json?.choices?.[0]?.delta);
-      if (piece) {
-        full += piece;
-        onRaw(full);
-      }
-    }
-  }
-
-  return full.trim();
-}
-
-async function chatNonStream(url, headers, body, onRaw) {
-  const payload = { ...body, stream: false };
+  const body = buildRequestBody(ai, systemPrompt, base64);
   const res = await net.fetch(url, {
     method: "POST",
     headers,
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
   });
+
   const text = await res.text();
   let data;
   try {
@@ -136,82 +193,12 @@ async function chatNonStream(url, headers, body, onRaw) {
       `API ${res.status}: ${data?.error?.message || text.slice(0, 200)}`,
     );
   }
-  const content = data?.choices?.[0]?.message?.content;
-  const reply = (typeof content === "string" ? content : "").trim();
-  if (reply) onRaw(reply);
-  return reply;
-}
 
-/**
- * @param {{
- *   onDelta?: (info: { response: string|null, expression: string|null, raw: string }) => void
- * }} [hooks]
- */
-async function chatAboutScreen(hooks = {}) {
-  const config = loadConfig();
-  const { ai, character } = config;
-  if (!ai?.endpoint || !ai?.apiKey || !ai?.model) {
-    throw new Error("config.ai 缺少 endpoint / apiKey / model");
-  }
-
-  const expressions = loadExpressionNames({ includeInternal: false });
-  await applyProxy(ai.proxy);
-
-  const shot = await captureFullscreenToJpg();
-  const base64 = imageToBase64Jpeg(shot.path);
-  const systemPrompt = buildSystemPrompt(character, { expressions });
-  const url = normalizeEndpoint(ai.endpoint);
-  const headers = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${ai.apiKey}`,
-  };
-
-  const onDelta =
-    typeof hooks.onDelta === "function" ? hooks.onDelta : () => {};
-
-  const emitParsed = (raw) => {
-    const parsed = extractChatPayload(raw, expressions);
-    onDelta({
-      response: parsed.response,
-      expression: parsed.expression,
-      raw,
-    });
-    return parsed;
-  };
-
-  const streamBody = buildRequestBody(ai, systemPrompt, base64, true);
-
-  const res = await net.fetch(url, {
-    method: "POST",
-    headers: { ...headers, Accept: "text/event-stream" },
-    body: JSON.stringify(streamBody),
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    let msg = text.slice(0, 200);
-    try {
-      msg = JSON.parse(text)?.error?.message || msg;
-    } catch {
-      /* keep */
-    }
-    throw new Error(`API ${res.status}: ${msg}`);
-  }
-
-  let raw = "";
-  try {
-    raw = await consumeChatStream(res, emitParsed);
-  } catch (err) {
-    console.warn("stream parse failed, fallback:", err?.message || err);
-    const body = { ...streamBody, stream: false };
-    raw = await chatNonStream(url, headers, body, emitParsed);
-  }
-
+  const raw = messageContentToText(data?.choices?.[0]?.message?.content).trim();
   const parsed = extractChatPayload(raw, expressions);
   let response = (parsed.response || "").trim();
   let expression = parsed.expression || "neutral";
 
-  // 模型偶发未换行：整段当台词
   if (!response && raw.trim()) {
     const lines = raw.trim().split(/\r?\n/);
     if (lines.length === 1 && !isLikelyExpressionOnly(lines[0], expressions)) {
@@ -221,8 +208,29 @@ async function chatAboutScreen(hooks = {}) {
   }
 
   if (!response) {
-    throw new Error("API 未返回有效台词（需要：第一行表情 + 换行 + 台词）");
+    throw new Error(
+      'API 未返回有效台词（需要 JSON：{"expression":"...","response":"..."}）',
+    );
   }
+
+  // Short-term is sync so the next chat sees this turn immediately.
+  memory.recordTurn(
+    {
+      reply: response,
+      expression,
+      trigger: options.trigger || "",
+    },
+    config,
+  );
+  // Summary / long-term extract are async and must not block TTS.
+  void memory
+    .maintain({ config, callChat: callChatCompletions })
+    .catch((err) => {
+      console.warn(
+        "[memory] maintain failed:",
+        err instanceof Error ? err.message : err,
+      );
+    });
 
   return {
     reply: response,
@@ -239,4 +247,4 @@ function isLikelyExpressionOnly(line, allowed) {
   return allowed.some((e) => e.toLowerCase() === s.toLowerCase());
 }
 
-module.exports = { chatAboutScreen };
+module.exports = { chatAboutScreen, callChatCompletions };

@@ -115,10 +115,7 @@ async function main() {
       bubble.handle(payload);
       if (payload.type === "expression") {
         applyExpression(payload.expression);
-      } else if (
-        (payload.type === "stream" || payload.type === "say") &&
-        payload.expression
-      ) {
+      } else if (payload.type === "say" && payload.expression) {
         applyExpression(payload.expression);
       }
     });

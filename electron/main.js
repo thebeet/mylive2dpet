@@ -11,7 +11,12 @@ const path = require("path");
 const { captureFullscreenToJpg } = require("./screenshot");
 const { loadConfig } = require("./config");
 const { chatAboutScreen } = require("./openaiChat");
-const { speakReply, stopTts } = require("./tts");
+const {
+  isTtsEnabled,
+  prepareReplyAudio,
+  playPreparedAudio,
+  stopTts,
+} = require("./plugins/tts");
 
 const isDev = !app.isPackaged;
 const SCREEN_MARGIN = 16;
@@ -94,40 +99,42 @@ async function runScreenChat(reason = "interval") {
   chatBusy = true;
   clearChatTimer();
   stopTts();
-  let lastExpression = null;
   try {
     sendBubble({ type: "thinking" });
-    const result = await chatAboutScreen({
-      onDelta: ({ response, expression }) => {
-        if (expression && expression !== lastExpression) {
-          lastExpression = expression;
-          sendBubble({ type: "expression", expression });
-        }
-        if (response) {
-          sendBubble({
-            type: "stream",
-            text: response,
-            expression: expression || undefined,
-          });
-        }
-      },
-    });
+    const result = await chatAboutScreen({ trigger: reason });
     console.log(
       `[chat:${reason}]`,
       `expression=${result.expression}`,
       result.reply,
     );
+
+    /** @type {{ path: string, deleteAfter?: boolean, provider?: string } | null} */
+    let prepared = null;
+    if (isTtsEnabled()) {
+      try {
+        prepared = await prepareReplyAudio(result.reply);
+      } catch (err) {
+        console.error(
+          "[tts] prepare failed, show bubble without audio:",
+          err instanceof Error ? err.message : err,
+        );
+        prepared = null;
+      }
+    }
+
+    // 音频 ready（或跳过 TTS）后再同时出气泡 + 播放
     sendBubble({
       type: "say",
       text: result.reply,
       expression: result.expression || "neutral",
     });
-    // 台词定稿后再系统 TTS（不阻塞下一轮休息计时）
-    void speakReply(result.reply, {
-      onState: (state) => {
-        sendBubble({ type: "tts", state });
-      },
-    });
+    if (prepared) {
+      void playPreparedAudio(prepared, {
+        onState: (state) => {
+          sendBubble({ type: "tts", state });
+        },
+      });
+    }
   } catch (err) {
     console.error(`[chat:${reason}] failed:`, err);
     sendBubble({

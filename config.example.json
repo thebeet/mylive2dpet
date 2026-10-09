@@ -27,6 +27,22 @@
     "enabled": true,
     "_comment": "interval_ms>=0: 每次聊完休息该毫秒再自动下一次；interval_ms<0: 不自动，仅点击桌宠/托盘触发"
   },
+  "memory": {
+    "_comment": "核心短期记忆（非插件）。长期记忆见 plugins[{name:memory}]",
+    "shortTerm": {
+      "enabled": true,
+      "maxTurns": 8,
+      "ttlMs": 1800000,
+      "_comment": "进程内近期独白缓冲，注入 system；不存旧截图"
+    },
+    "summary": {
+      "enabled": true,
+      "everyNTurns": 6,
+      "keepTurnsAfterSummary": 3,
+      "maxTokens": 256,
+      "_comment": "滚动会话摘要，拉长有效关联窗口"
+    }
+  },
   "plugins": [
     {
       "name": "tts",
@@ -45,6 +61,16 @@
       "promptLang": "zh",
       "speedFactor": 1,
       "rate": 0
+    },
+    {
+      "name": "memory",
+      "enabled": true,
+      "_comment": "长期记忆插件：JSONL + 关键词/标签检索（无 embedding）。enabled=false 即关闭",
+      "maxInject": 5,
+      "path": "logs/memory.jsonl",
+      "extractEveryNTurns": 3,
+      "maxTokens": 256,
+      "maxEntries": 500
     }
   ]
 }

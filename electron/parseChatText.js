@@ -1,9 +1,6 @@
 /**
- * 解析「第一行 expression，其余为 response」的纯文本协议（适合 SSE 流式）。
- *
- * 示例：
- * smile
- * 前辈还在写代码呢。
+ * 解析模型返回：优先 JSON `{ "expression", "response" }`，
+ * 兼容旧的「第一行表情 + 换行 + 台词」。
  */
 
 /**
@@ -11,17 +8,71 @@
  * @param {string[]} [allowedExpressions]
  */
 function extractChatPayload(raw, allowedExpressions = []) {
-  const text = String(raw || "").replace(/^\uFEFF/, "");
+  const text = String(raw || "").replace(/^\uFEFF/, "").trim();
   if (!text) {
     return { expression: null, response: null, raw: text };
   }
 
+  const fromJson = tryParseModelJson(text);
+  if (fromJson) {
+    const response = String(
+      fromJson.response ?? fromJson.text ?? fromJson.reply ?? "",
+    ).trim();
+    return {
+      expression: normalizeExpression(fromJson.expression, allowedExpressions),
+      response: response || null,
+      raw: text,
+    };
+  }
+
+  return extractNewlinePayload(text, allowedExpressions);
+}
+
+/**
+ * @param {string} text
+ * @returns {{ expression?: unknown, response?: unknown, text?: unknown, reply?: unknown } | null}
+ */
+function tryParseModelJson(text) {
+  const candidates = [text];
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) candidates.unshift(fenced[1].trim());
+
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    candidates.push(text.slice(start, end + 1));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const obj = JSON.parse(candidate);
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+        if (
+          "expression" in obj ||
+          "response" in obj ||
+          "text" in obj ||
+          "reply" in obj
+        ) {
+          return obj;
+        }
+      }
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
+/**
+ * @param {string} text
+ * @param {string[]} allowedExpressions
+ */
+function extractNewlinePayload(text, allowedExpressions) {
   const nl = text.indexOf("\n");
   let expression = null;
   let response = null;
 
   if (nl < 0) {
-    // 尚未出现换行：若整行已是合法表情名则先记下，否则先当台词流式展示
     const line = text.trim();
     if (line && isKnownExpression(line, allowedExpressions)) {
       expression = normalizeExpression(line, allowedExpressions);
@@ -32,8 +83,7 @@ function extractChatPayload(raw, allowedExpressions = []) {
     }
   } else {
     const first = text.slice(0, nl).trim();
-    response = text.slice(nl + 1).replace(/^\r?\n/, "");
-    // 去掉结尾多余空白，但流式中保留正在输入的感觉（不 trimEnd 太多）
+    response = text.slice(nl + 1).replace(/^\r?\n/, "").trim();
     expression = normalizeExpression(first, allowedExpressions);
   }
 

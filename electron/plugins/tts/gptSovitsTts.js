@@ -194,30 +194,14 @@ async function synthesize(opts, text, signal) {
 }
 
 /**
- * 调用本机 GPT-SoVITS API 合成并播放。
- * 需事先启动 api_v2.py（默认 http://127.0.0.1:9880）。
- *
+ * 合成到本地 wav（不播放）。
  * @param {string} text
  * @param {object} [options]
- * @param {string} [options.apiBase]
- * @param {"v1"|"v2"} [options.apiVersion]
- * @param {string} [options.gptWeights]
- * @param {string} [options.sovitsWeights]
- * @param {boolean} [options.weightsPreloaded] API 启动已加载同套权重时跳过首次切换
- * @param {string} [options.refAudio]
- * @param {string} [options.promptText]
- * @param {string} [options.textLang]
- * @param {string} [options.promptLang]
- * @param {number} [options.topK]
- * @param {number} [options.topP]
- * @param {number} [options.temperature]
- * @param {number} [options.speedFactor]
- * @param {string} [options.textSplitMethod]
- * @param {number} [options.batchSize]
+ * @returns {Promise<{ path: string, deleteAfter: boolean } | null>}
  */
-async function speak(text, options = {}) {
+async function synthesizeToFile(text, options = {}) {
   const cleaned = sanitize(text);
-  if (!cleaned) return;
+  if (!cleaned) return null;
 
   stop();
   const myGen = generation;
@@ -227,7 +211,7 @@ async function speak(text, options = {}) {
   try {
     console.log("[tts:gpt-sovits] synthesize:", cleaned.slice(0, 60));
     const wav = await synthesize(options, cleaned, ac.signal);
-    if (myGen !== generation) return;
+    if (myGen !== generation) return null;
 
     const tmp = path.join(
       os.tmpdir(),
@@ -240,21 +224,32 @@ async function speak(text, options = {}) {
       } catch {
         /* ignore */
       }
-      return;
+      return null;
     }
-
-    await playWav.play(tmp, { deleteAfter: true });
+    return { path: tmp, deleteAfter: true };
   } catch (err) {
-    if (ac.signal.aborted || myGen !== generation) return;
+    if (ac.signal.aborted || myGen !== generation) return null;
     throw err;
   } finally {
     if (abortController === ac) abortController = null;
   }
 }
 
+/**
+ * 调用本机 GPT-SoVITS API 合成并播放。
+ * @param {string} text
+ * @param {object} [options]
+ */
+async function speak(text, options = {}) {
+  const prepared = await synthesizeToFile(text, options);
+  if (!prepared) return;
+  await playWav.play(prepared.path, { deleteAfter: prepared.deleteAfter });
+}
+
 module.exports = {
   speak,
   stop,
+  synthesizeToFile,
   promptTextFromRefAudio,
   resolveProjectPath,
 };
