@@ -1,0 +1,50 @@
+{
+  "ai": {
+    "endpoint": "https://your-api.example.com/v1",
+    "proxy": "http://127.0.0.1:7890",
+    "model": "gpt-4o",
+    "apiKey": "sk-xxx",
+    "max_tokens": 1024
+  },
+  "ui": {
+    "windowWidth": 380,
+    "windowHeight": 560,
+    "alwaysOnTop": true
+  },
+  "character": {
+    "cardName": "后辈",
+    "name": "Setsuna",
+    "userIdentity": "后辈",
+    "userTerm": "前辈",
+    "description": "你是{{petName}}，用户的{{userIdentity}}。……",
+    "personality": "温柔清楚。……",
+    "scenario": "你的存在提供「陪伴感」和「节奏感」。……",
+    "rules": "【规则——必须严格遵守】\n1. 只回复1-2句话……",
+    "language": "中文"
+  },
+  "chat": {
+    "interval_ms": 10000,
+    "enabled": true,
+    "_comment": "interval_ms>=0: 每次聊完休息该毫秒再自动下一次；interval_ms<0: 不自动，仅点击桌宠/托盘触发"
+  },
+  "plugins": [
+    {
+      "name": "tts",
+      "enabled": true,
+      "provider": "gpt-sovits",
+      "interruptOnNewChat": true,
+      "_comment_provider": "system | gpt-sovits。gpt-sovits 需本机先启动 GPT-SoVITS api_v2.py（默认 9880）",
+      "apiBase": "http://127.0.0.1:9880",
+      "apiVersion": "v2",
+      "gptWeights": "assets/v2ProPlus/流萤/流萤-e10.ckpt",
+      "sovitsWeights": "assets/v2ProPlus/流萤/流萤_e10_s250.pth",
+      "refAudio": "assets/v2ProPlus/流萤/reference_audios/中文/emotions/【中立】…我应该会选择请求猎犬家系停止追捕。.wav",
+      "promptText": "",
+      "_comment_promptText": "留空则从 refAudio 文件名去掉【情感】后自动推断",
+      "textLang": "zh",
+      "promptLang": "zh",
+      "speedFactor": 1,
+      "rate": 0
+    }
+  ]
+}
