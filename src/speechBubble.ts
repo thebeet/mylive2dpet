@@ -14,8 +14,8 @@ export type HeadAnchor = {
 };
 
 const HIDE_AFTER_MS = 12000;
-const GAP_ABOVE_HEAD = 12;
-const EDGE_PAD = 8;
+const GAP_ABOVE_HEAD = 18;
+const EDGE_PAD = 12;
 
 export function createSpeechBubble(
   mount: HTMLElement,
@@ -42,18 +42,30 @@ export function createSpeechBubble(
     if (!anchor) return;
     const { x, headTop } = anchor;
 
-    const maxBubbleW = Math.max(120, window.innerWidth - EDGE_PAD * 2);
-    el.style.maxWidth = `${Math.min(320, maxBubbleW)}px`;
+    const maxBubbleW = Math.max(180, window.innerWidth - EDGE_PAD * 2);
+    el.style.maxWidth = `${Math.min(480, maxBubbleW)}px`;
     el.style.width = "max-content";
     el.style.maxHeight = "none";
     el.style.height = "auto";
 
-    const bottom = Math.max(
+    // 角色放大后头顶可能超出窗口，先量出气泡高度，再把气泡顶部夹在可视区域内。
+    el.style.top = "auto";
+    el.style.bottom = `${Math.max(
       EDGE_PAD,
       window.innerHeight - headTop + GAP_ABOVE_HEAD,
+    )}px`;
+    const bubbleHeight = el.getBoundingClientRect().height;
+    const desiredTop = Math.max(
+      EDGE_PAD,
+      headTop - GAP_ABOVE_HEAD - bubbleHeight,
     );
-    el.style.bottom = `${bottom}px`;
-    el.style.top = "auto";
+    const maxTop = Math.max(
+      EDGE_PAD,
+      window.innerHeight - EDGE_PAD - bubbleHeight,
+    );
+    const top = Math.min(desiredTop, maxTop);
+    el.style.top = `${top}px`;
+    el.style.bottom = "auto";
 
     // 先按中心定位，量宽后夹紧左右
     el.style.left = `${x}px`;

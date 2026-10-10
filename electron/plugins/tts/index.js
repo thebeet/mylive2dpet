@@ -26,6 +26,8 @@ function getTtsOptions(config = loadConfig()) {
     weightsPreloaded:
       plugin.weightsPreloaded ?? legacy.weightsPreloaded ?? false,
     refAudio: plugin.refAudio || legacy.refAudio || "",
+    refAudioApiPath:
+      plugin.refAudioApiPath || legacy.refAudioApiPath || "",
     promptText: plugin.promptText || legacy.promptText || "",
     textLang: plugin.textLang || legacy.textLang || "zh",
     promptLang: plugin.promptLang || legacy.promptLang || "",

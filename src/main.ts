@@ -6,6 +6,7 @@ import { createSpeechBubble, type HeadAnchor } from "./speechBubble";
 
 const MODEL_URL =
   "/assets/Setsuna_v081l_b/setsuna_psd2live_v001.model3.json";
+const OVERALL_SCALE = 1.5;
 
 Live2DModel.registerTicker(PIXI.Ticker);
 
@@ -26,7 +27,8 @@ function layoutModel(model: Live2DModel, app: PIXI.Application) {
   // 上方多留气泡区（约 38% 高度）
   const topReserve = 0.38;
   const maxH = app.screen.height * (1 - padding - topReserve);
-  const scale = Math.min(maxW / model.width, maxH / model.height);
+  const scale =
+    Math.min(maxW / model.width, maxH / model.height) * OVERALL_SCALE;
   model.scale.set(scale);
   model.anchor.set(0.5, 1);
   model.position.set(app.screen.width / 2, app.screen.height * 0.98);
@@ -98,6 +100,24 @@ async function main() {
   const drag = setupWindowDrag(mount);
 
   let modelRef: Live2DModel | null = null;
+  let latestPointer: { x: number; y: number } | null = null;
+  const updateFocus = (screenPosition: { x: number; y: number }) => {
+    const rect = app.view.getBoundingClientRect();
+    const position = {
+      x: screenPosition.x - window.screenX - rect.left,
+      y: screenPosition.y - window.screenY - rect.top,
+    };
+    latestPointer = position;
+    modelRef?.focus(position.x, position.y);
+  };
+  if (window.petDesktop?.onGlobalPointerMove) {
+    window.petDesktop.onGlobalPointerMove(updateFocus);
+  } else {
+    window.addEventListener("pointermove", (event) => {
+      updateFocus({ x: window.screenX + event.clientX, y: window.screenY + event.clientY });
+    });
+  }
+
   const bubble = createSpeechBubble(mount, () =>
     modelRef ? getHeadAnchor(modelRef) : null,
   );
@@ -140,6 +160,7 @@ async function main() {
 
   try {
     const model = await Live2DModel.from(MODEL_URL, {
+      // 保留库内窗口交互；全局鼠标跟踪补足窗口外的移动。
       autoInteract: true,
       idleMotionGroup: "Thinking",
     });
@@ -148,6 +169,7 @@ async function main() {
     logLive2DCapabilities(model);
     app.stage.addChild(model);
     layoutModel(model, app);
+    if (latestPointer) updateFocus(latestPointer);
 
     let layoutRaf = 0;
     window.addEventListener("resize", () => {
@@ -171,6 +193,14 @@ async function main() {
       "pointerdown",
       (e) => {
         lastPointerButton = e.button;
+        if (e.button === 2) {
+          e.preventDefault();
+          e.stopPropagation();
+          window.petDesktop?.openContextMenu?.({
+            x: e.clientX,
+            y: e.clientY,
+          });
+        }
       },
       { capture: true },
     );
@@ -200,11 +230,6 @@ async function main() {
       (e) => {
         e.preventDefault();
         e.stopPropagation();
-        lastPointerButton = 2;
-        window.petDesktop?.openContextMenu?.({
-          x: e.clientX,
-          y: e.clientY,
-        });
       },
       { capture: true },
     );

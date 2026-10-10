@@ -23,6 +23,9 @@ declare global {
       chatNow: () => Promise<{ ok: boolean }>;
       openContextMenu: (pos?: { x?: number; y?: number }) => void;
       onBubble: (callback: (payload: BubblePayload) => void) => () => void;
+      onGlobalPointerMove: (
+        callback: (position: { x: number; y: number }) => void,
+      ) => () => void;
     };
   }
 }

@@ -26,6 +26,7 @@ let winSize = { ...DEFAULT_WIN };
 let tray = null;
 let mainWindow = null;
 let chatTimer = null;
+let pointerTrackingTimer = null;
 let chatBusy = false;
 let chatLoopEnabled = false;
 let chatIntervalMs = 10000;
@@ -69,6 +70,22 @@ function placeBottomRight(win) {
     width,
     height,
   });
+}
+
+function startPointerTracking(win) {
+  if (pointerTrackingTimer) clearInterval(pointerTrackingTimer);
+  let lastX = NaN;
+  let lastY = NaN;
+  const sendPosition = () => {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) return;
+    const position = screen.getCursorScreenPoint();
+    if (position.x === lastX && position.y === lastY) return;
+    lastX = position.x;
+    lastY = position.y;
+    win.webContents.send("pet:global-pointer", position);
+  };
+  sendPosition();
+  pointerTrackingTimer = setInterval(sendPosition, 1000 / 60);
 }
 
 function sendBubble(payload) {
@@ -250,6 +267,10 @@ function createWindow() {
     },
   );
 
+  win.webContents.on("did-finish-load", () => {
+    startPointerTracking(win);
+  });
+
   win.once("ready-to-show", () => {
     placeBottomRight(win);
     win.setSkipTaskbar(true);
@@ -264,6 +285,10 @@ function createWindow() {
   }
 
   win.on("closed", () => {
+    if (pointerTrackingTimer) {
+      clearInterval(pointerTrackingTimer);
+      pointerTrackingTimer = null;
+    }
     if (mainWindow === win) mainWindow = null;
   });
 
@@ -350,6 +375,12 @@ ipcMain.on("pet:move-window", (event, dx, dy) => {
     width: winSize.width,
     height: winSize.height,
   });
+});
+
+ipcMain.on("pet:request-global-pointer", (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || win.isDestroyed()) return;
+  event.sender.send("pet:global-pointer", screen.getCursorScreenPoint());
 });
 
 ipcMain.on("pet:force-paint", (event) => {

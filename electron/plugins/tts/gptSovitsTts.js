@@ -115,10 +115,13 @@ async function synthesize(opts, text, signal) {
     "",
   );
   const apiVersion = opts.apiVersion === "v1" ? "v1" : "v2";
-  const refAudio = resolveProjectPath(opts.refAudio);
-  if (!refAudio || !fs.existsSync(refAudio)) {
+  // refAudio is read locally to verify the configured source file. A remote or
+  // containerized API may need a different path for the same mounted file.
+  const localRefAudio = resolveProjectPath(opts.refAudio);
+  if (!localRefAudio || !fs.existsSync(localRefAudio)) {
     throw new Error(`refAudio not found: ${opts.refAudio || "(empty)"}`);
   }
+  const apiRefAudio = String(opts.refAudioApiPath || localRefAudio).trim();
 
   const gptWeights = resolveProjectPath(opts.gptWeights);
   const sovitsWeights = resolveProjectPath(opts.sovitsWeights);
@@ -130,7 +133,7 @@ async function synthesize(opts, text, signal) {
 
   const promptText =
     (opts.promptText && String(opts.promptText).trim()) ||
-    promptTextFromRefAudio(refAudio);
+    promptTextFromRefAudio(localRefAudio);
   const textLang = opts.textLang || "zh";
   const promptLang = opts.promptLang || textLang;
 
@@ -142,7 +145,7 @@ async function synthesize(opts, text, signal) {
   if (apiVersion === "v1") {
     url = apiBase;
     body = {
-      refer_wav_path: refAudio,
+      refer_wav_path: apiRefAudio,
       prompt_text: promptText,
       prompt_language: promptLang,
       text,
@@ -157,7 +160,7 @@ async function synthesize(opts, text, signal) {
     body = {
       text,
       text_lang: textLang,
-      ref_audio_path: refAudio,
+      ref_audio_path: apiRefAudio,
       prompt_text: promptText,
       prompt_lang: promptLang,
       top_k: opts.topK ?? 15,

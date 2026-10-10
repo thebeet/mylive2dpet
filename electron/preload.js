@@ -18,4 +18,10 @@ contextBridge.exposeInMainWorld("petDesktop", {
     ipcRenderer.on("pet:bubble", handler);
     return () => ipcRenderer.removeListener("pet:bubble", handler);
   },
+  onGlobalPointerMove: (callback) => {
+    const handler = (_event, position) => callback(position);
+    ipcRenderer.on("pet:global-pointer", handler);
+    ipcRenderer.send("pet:request-global-pointer");
+    return () => ipcRenderer.removeListener("pet:global-pointer", handler);
+  },
 });

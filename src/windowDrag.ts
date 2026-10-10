@@ -33,7 +33,7 @@ export function setupWindowDrag(root: HTMLElement): {
     startY = e.screenY;
     lastX = e.screenX;
     lastY = e.screenY;
-  });
+  }, { capture: true });
 
   window.addEventListener("pointermove", (e) => {
     if (!active || e.pointerId !== pointerId) return;
@@ -50,7 +50,7 @@ export function setupWindowDrag(root: HTMLElement): {
     window.petDesktop!.moveWindow(dx, dy);
     lastX = e.screenX;
     lastY = e.screenY;
-  });
+  }, { capture: true });
 
   const onEnd = (e: PointerEvent) => {
     if (!active || e.pointerId !== pointerId) return;
@@ -58,8 +58,8 @@ export function setupWindowDrag(root: HTMLElement): {
     pointerId = -1;
   };
 
-  window.addEventListener("pointerup", onEnd);
-  window.addEventListener("pointercancel", onEnd);
+  window.addEventListener("pointerup", onEnd, { capture: true });
+  window.addEventListener("pointercancel", onEnd, { capture: true });
 
   return { wasDragging, clearDrag };
 }

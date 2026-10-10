@@ -22,12 +22,12 @@ canvas {
 .status {
   position: fixed;
   left: 50%;
-  bottom: 12px;
+  bottom: 18px;
   transform: translateX(-50%);
   max-width: 92%;
-  padding: 6px 12px;
-  border-radius: 8px;
-  font: 12px/1.4 system-ui, sans-serif;
+  padding: 9px 18px;
+  border-radius: 12px;
+  font: 18px/1.4 system-ui, sans-serif;
   color: #eee;
   background: rgba(0, 0, 0, 0.55);
   pointer-events: none;
@@ -39,10 +39,10 @@ canvas {
 .speech-bubble {
   position: fixed;
   z-index: 5;
-  min-width: 72px;
-  padding: 8px 12px 10px;
-  border-radius: 14px;
-  font: 13px/1.45 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  min-width: 108px;
+  padding: 12px 18px 15px;
+  border-radius: 21px;
+  font: 19.5px/1.45 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: #2a2430;
   background: rgba(255, 252, 248, 0.94);
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
@@ -57,9 +57,9 @@ canvas {
   content: "";
   position: absolute;
   left: 50%;
-  bottom: -7px;
+  bottom: -10.5px;
   transform: translateX(-50%);
-  border: 7px solid transparent;
+  border: 10.5px solid transparent;
   border-top-color: rgba(255, 252, 248, 0.94);
   border-bottom: 0;
 }

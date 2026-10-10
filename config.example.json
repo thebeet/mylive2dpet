@@ -55,6 +55,8 @@
       "gptWeights": "assets/v2ProPlus/流萤/流萤-e10.ckpt",
       "sovitsWeights": "assets/v2ProPlus/流萤/流萤_e10_s250.pth",
       "refAudio": "assets/v2ProPlus/流萤/reference_audios/中文/emotions/【中立】…我应该会选择请求猎犬家系停止追捕。.wav",
+      "refAudioApiPath": "",
+      "_comment_refAudioApiPath": "GPT-SoVITS 服务端看到的参考音频路径；留空则发送 refAudio 解析后的本机路径",
       "promptText": "",
       "_comment_promptText": "留空则从 refAudio 文件名去掉【情感】后自动推断",
       "textLang": "zh",
