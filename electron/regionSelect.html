@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>区域截图</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        cursor: default;
+        background: transparent !important;
+        user-select: none;
+        font-family: system-ui, sans-serif;
+      }
+      body.idle {
+        cursor: default;
+      }
+      body.active {
+        cursor: crosshair;
+      }
+      #mask {
+        position: fixed;
+        inset: 0;
+        display: none;
+        background: rgba(0, 0, 0, 0.28);
+      }
+      #hint {
+        position: fixed;
+        top: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 20;
+        display: none;
+        padding: 8px 14px;
+        border-radius: 8px;
+        background: rgba(20, 20, 20, 0.82);
+        color: #f2f2f2;
+        font-size: 13px;
+        letter-spacing: 0.02em;
+        pointer-events: none;
+      }
+      #sel {
+        position: fixed;
+        display: none;
+        border: 2px solid #6cb6ff;
+        box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.28);
+        background: transparent;
+        z-index: 10;
+        pointer-events: none;
+      }
+      #size {
+        position: absolute;
+        left: 0;
+        top: -22px;
+        padding: 2px 6px;
+        border-radius: 4px;
+        background: rgba(20, 20, 20, 0.85);
+        color: #fff;
+        font-size: 11px;
+        white-space: nowrap;
+      }
+    </style>
+  </head>
+  <body class="idle">
+    <div id="mask"></div>
+    <div id="hint">拖拽选择区域 · Esc 取消</div>
+    <div id="sel"><span id="size"></span></div>
+    <script>
+      const mask = document.getElementById("mask");
+      const hint = document.getElementById("hint");
+      const sel = document.getElementById("sel");
+      const sizeEl = document.getElementById("size");
+
+      let origin = null;
+      let dragging = false;
+      let virtualOrigin = { x: 0, y: 0 };
+      let active = false;
+
+      function enterIdle() {
+        active = false;
+        dragging = false;
+        origin = null;
+        document.body.className = "idle";
+        mask.style.display = "none";
+        hint.style.display = "none";
+        sel.style.display = "none";
+        sel.style.width = "0px";
+        sel.style.height = "0px";
+      }
+
+      function enterActive(payload) {
+        virtualOrigin = (payload && payload.virtualOrigin) || { x: 0, y: 0 };
+        active = true;
+        dragging = false;
+        origin = null;
+        document.body.className = "active";
+        mask.style.display = "block";
+        hint.style.display = "block";
+        sel.style.display = "none";
+        sel.style.width = "0px";
+        sel.style.height = "0px";
+      }
+
+      window.regionSelect.onInit((payload) => enterActive(payload));
+      window.regionSelect.onIdle(() => enterIdle());
+      enterIdle();
+
+      function toScreen(clientX, clientY) {
+        return {
+          x: clientX + virtualOrigin.x,
+          y: clientY + virtualOrigin.y,
+        };
+      }
+
+      function updateSelection(x0, y0, x1, y1) {
+        const left = Math.min(x0, x1);
+        const top = Math.min(y0, y1);
+        const width = Math.abs(x1 - x0);
+        const height = Math.abs(y1 - y0);
+        mask.style.display = "none";
+        sel.style.display = "block";
+        sel.style.left = `${left}px`;
+        sel.style.top = `${top}px`;
+        sel.style.width = `${width}px`;
+        sel.style.height = `${height}px`;
+        sizeEl.textContent = `${Math.round(width)} × ${Math.round(height)}`;
+      }
+
+      function cancelSelect() {
+        dragging = false;
+        origin = null;
+        window.regionSelect.cancel();
+      }
+
+      window.addEventListener("mousedown", (e) => {
+        if (!active) return;
+        // 右键：直接取消；拖拽中按下右键也取消
+        if (e.button === 2) {
+          e.preventDefault();
+          cancelSelect();
+          return;
+        }
+        if (e.button !== 0) return;
+        dragging = true;
+        origin = { x: e.clientX, y: e.clientY };
+        updateSelection(origin.x, origin.y, origin.x, origin.y);
+      });
+
+      window.addEventListener("mousemove", (e) => {
+        if (!active || !dragging || !origin) return;
+        // buttons bit2 = 右键按下
+        if (e.buttons & 2) {
+          cancelSelect();
+          return;
+        }
+        updateSelection(origin.x, origin.y, e.clientX, e.clientY);
+      });
+
+      window.addEventListener("mouseup", (e) => {
+        if (!active) return;
+        if (e.button === 2) {
+          e.preventDefault();
+          cancelSelect();
+          return;
+        }
+        if (!dragging || !origin || e.button !== 0) return;
+        dragging = false;
+        const x0 = origin.x;
+        const y0 = origin.y;
+        const x1 = e.clientX;
+        const y1 = e.clientY;
+        origin = null;
+
+        const width = Math.abs(x1 - x0);
+        const height = Math.abs(y1 - y0);
+        if (width < 4 || height < 4) {
+          window.regionSelect.cancel();
+          return;
+        }
+
+        const a = toScreen(x0, y0);
+        const b = toScreen(x1, y1);
+        window.regionSelect.complete({
+          x: Math.min(a.x, b.x),
+          y: Math.min(a.y, b.y),
+          width,
+          height,
+        });
+      });
+
+      window.addEventListener("contextmenu", (e) => {
+        if (!active) return;
+        e.preventDefault();
+        e.stopPropagation();
+        cancelSelect();
+      });
+
+      window.addEventListener("keydown", (e) => {
+        if (!active) return;
+        if (e.key === "Escape") {
+          e.preventDefault();
+          cancelSelect();
+        }
+      });
+    </script>
+  </body>
+</html>

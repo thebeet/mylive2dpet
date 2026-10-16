@@ -101,22 +101,6 @@ async function main() {
 
   let modelRef: Live2DModel | null = null;
   let latestPointer: { x: number; y: number } | null = null;
-  const updateFocus = (screenPosition: { x: number; y: number }) => {
-    const rect = app.view.getBoundingClientRect();
-    const position = {
-      x: screenPosition.x - window.screenX - rect.left,
-      y: screenPosition.y - window.screenY - rect.top,
-    };
-    latestPointer = position;
-    modelRef?.focus(position.x, position.y);
-  };
-  if (window.petDesktop?.onGlobalPointerMove) {
-    window.petDesktop.onGlobalPointerMove(updateFocus);
-  } else {
-    window.addEventListener("pointermove", (event) => {
-      updateFocus({ x: window.screenX + event.clientX, y: window.screenY + event.clientY });
-    });
-  }
 
   const bubble = createSpeechBubble(mount, () =>
     modelRef ? getHeadAnchor(modelRef) : null,
@@ -158,10 +142,28 @@ async function main() {
   mount.insertBefore(app.view as HTMLCanvasElement, status);
   keepAnimating(app);
 
+  // 主进程已换算为相对窗口内容区的坐标；勿再用 screenX（Electron 无边框透明窗上常不准）
+  const updateFocus = (viewPosition: { x: number; y: number }) => {
+    const rect = (app.view as HTMLCanvasElement).getBoundingClientRect();
+    const position = {
+      x: viewPosition.x - rect.left,
+      y: viewPosition.y - rect.top,
+    };
+    latestPointer = position;
+    modelRef?.focus(position.x, position.y);
+  };
+  if (window.petDesktop?.onGlobalPointerMove) {
+    window.petDesktop.onGlobalPointerMove(updateFocus);
+  } else {
+    window.addEventListener("pointermove", (event) => {
+      updateFocus({ x: event.clientX, y: event.clientY });
+    });
+  }
+
   try {
     const model = await Live2DModel.from(MODEL_URL, {
-      // 保留库内窗口交互；全局鼠标跟踪补足窗口外的移动。
-      autoInteract: true,
+      // 视线只走全局指针 IPC，避免与库内 pointermove 抢 focus
+      autoInteract: false,
       idleMotionGroup: "Thinking",
     });
 

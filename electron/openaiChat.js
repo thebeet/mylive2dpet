@@ -3,8 +3,11 @@ const { loadConfig } = require("./config");
 const { buildSystemPrompt } = require("./prompt");
 const { loadExpressionNames } = require("./live2dCatalog");
 const { extractChatPayload } = require("./parseChatText");
+const path = require("path");
 const { captureFullscreenToJpg } = require("./screenshot");
+const { compareWithPrevious } = require("./screenChange");
 const memory = require("./memory");
+const fs = require("fs");
 
 function normalizeEndpoint(endpoint) {
   const base = String(endpoint || "").replace(/\/+$/, "");
@@ -12,7 +15,7 @@ function normalizeEndpoint(endpoint) {
   return `${base}/chat/completions`;
 }
 
-function imageToBase64Jpeg(filePath, maxWidth = 1280, quality = 25) {
+function imageToBase64Jpeg(filePath, maxWidth = 1920, quality = 25) {
   let image = nativeImage.createFromPath(filePath);
   if (image.isEmpty()) {
     throw new Error(`无法读取截图: ${filePath}`);
@@ -49,6 +52,119 @@ function messageContentToText(content) {
   return "";
 }
 
+const MAX_RETRIES = 3;
+const RETRY_BASE_MS = 800;
+const OPENAI_LOG_PATH = path.join(__dirname, "../logs/openai.jsonl");
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function appendOpenAiLog(entry) {
+  try {
+    fs.mkdirSync(path.dirname(OPENAI_LOG_PATH), { recursive: true });
+    fs.appendFileSync(
+      OPENAI_LOG_PATH,
+      `${JSON.stringify(entry)}\n`,
+      "utf8",
+    );
+  } catch (err) {
+    console.warn(
+      "[ai:log] write failed:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+function isRetryableStatus(status) {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function isRetryableError(err) {
+  if (!err) return false;
+  const msg = String(err.message || err);
+  if (/非 JSON|ERR_|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket|network|fetch failed/i.test(msg)) {
+    return true;
+  }
+  if (typeof err.status === "number") return isRetryableStatus(err.status);
+  return false;
+}
+
+/**
+ * @param {string} url
+ * @param {RequestInit} init
+ * @param {{ maxRetries?: number, label?: string }} [opts]
+ */
+async function fetchChatJson(url, init, opts = {}) {
+  const maxRetries =
+    Number.isFinite(opts.maxRetries) && opts.maxRetries >= 0
+      ? Math.floor(opts.maxRetries)
+      : MAX_RETRIES;
+  const label = opts.label || "api";
+  let lastError;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await net.fetch(url, init);
+      const text = await res.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        appendOpenAiLog({
+          t: new Date().toISOString(),
+          label,
+          ok: false,
+          status: res.status,
+          body: text.slice(0, 4000),
+        });
+        const err = new Error(
+          `API 返回非 JSON (${res.status}): ${text.slice(0, 200)}`,
+        );
+        err.status = res.status;
+        throw err;
+      }
+      if (!res.ok) {
+        appendOpenAiLog({
+          t: new Date().toISOString(),
+          label,
+          ok: false,
+          status: res.status,
+          body: data,
+        });
+        const err = new Error(
+          `API ${res.status}: ${data?.error?.message || text.slice(0, 200)}`,
+        );
+        err.status = res.status;
+        throw err;
+      }
+      appendOpenAiLog({
+        t: new Date().toISOString(),
+        label,
+        ok: true,
+        status: res.status,
+        content: messageContentToText(
+          data?.choices?.[0]?.message?.content,
+        ).trim(),
+        body: data,
+      });
+      return data;
+    } catch (err) {
+      lastError = err;
+      const canRetry = attempt < maxRetries && isRetryableError(err);
+      if (!canRetry) throw err;
+      const delay = RETRY_BASE_MS * (attempt + 1);
+      console.warn(
+        `[${label}] attempt ${attempt + 1}/${maxRetries + 1} failed, retry in ${delay}ms:`,
+        err instanceof Error ? err.message : err,
+      );
+      await sleep(delay);
+    }
+  }
+
+  throw lastError;
+}
+
 /**
  * Lightweight text-only chat/completions call (memory summary / extract).
  * Uses current config endpoint; does not touch short-term memory.
@@ -80,28 +196,19 @@ async function callChatCompletions(messages, opts = {}) {
     messages,
   };
 
-  const res = await net.fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      Authorization: `Bearer ${ai.apiKey}`,
+  const data = await fetchChatJson(
+    url,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Authorization: `Bearer ${ai.apiKey}`,
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  });
-
-  const text = await res.text();
-  let data;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(`API 返回非 JSON (${res.status}): ${text.slice(0, 200)}`);
-  }
-  if (!res.ok) {
-    throw new Error(
-      `API ${res.status}: ${data?.error?.message || text.slice(0, 200)}`,
-    );
-  }
+    { label: "ai:text" },
+  );
 
   return messageContentToText(data?.choices?.[0]?.message?.content).trim();
 }
@@ -118,9 +225,13 @@ function formatNowStamp(date = new Date()) {
   return `${y}-${mo}-${d} 周${w} ${h}:${mi}:${s}`;
 }
 
-function buildRequestBody(ai, systemPrompt, base64) {
+function buildRequestBody(ai, systemPrompt, base64, opts = {}) {
   const maxTokens = Number(ai.max_tokens) > 0 ? Number(ai.max_tokens) : 1024;
   const nowStamp = formatNowStamp();
+  const tip =
+    opts.kind === "region"
+      ? "这是前辈框选的屏幕区域截图"
+      : "这是前辈现在的桌面截图";
   return {
     model: ai.model,
     temperature: 0.8,
@@ -133,7 +244,7 @@ function buildRequestBody(ai, systemPrompt, base64) {
         content: [
           {
             type: "text",
-            text: `[当前时间 ${nowStamp}] 这是前辈现在的桌面截图。请只返回 JSON：{"expression":"...","response":"..."}`,
+            text: `[当前时间 ${nowStamp}] ${tip}。请只返回 JSON：{"expression":"...","response":"...","screenSummary":"..."}`,
           },
           {
             type: "image_url",
@@ -148,7 +259,7 @@ function buildRequestBody(ai, systemPrompt, base64) {
 }
 
 /**
- * @param {{ trigger?: string }} [options]
+ * @param {{ trigger?: string, afterScreenshot?: () => void, imagePath?: string }} [options]
  */
 async function chatAboutScreen(options = {}) {
   const config = loadConfig();
@@ -160,7 +271,49 @@ async function chatAboutScreen(options = {}) {
   const expressions = loadExpressionNames({ includeInternal: false });
   await applyProxy(ai.proxy);
 
-  const shot = await captureFullscreenToJpg();
+  const trigger = options.trigger || "";
+  const isRegion = Boolean(options.imagePath) || trigger === "region";
+  let shot;
+  let change = { distance: -1, threshold: 0 };
+
+  if (options.imagePath) {
+    const imagePath = options.imagePath;
+    if (!fs.existsSync(imagePath)) {
+      throw new Error(`截图不存在: ${imagePath}`);
+    }
+    shot = {
+      path: imagePath,
+      filename: path.basename(imagePath),
+    };
+    // 框选强制送模，仍更新哈希避免下一轮 interval 误判
+    change = compareWithPrevious(shot.path, { force: true, config });
+  } else {
+    shot = await captureFullscreenToJpg();
+    // interval 轮询才判变；点击 / 启动等强制反应
+    const force = trigger !== "interval";
+    change = compareWithPrevious(shot.path, { force, config });
+    if (!change.changed) {
+      try {
+        fs.unlinkSync(shot.path);
+      } catch {
+        // ignore
+      }
+      return {
+        skipped: true,
+        reason: "screen_unchanged",
+        distance: change.distance,
+        threshold: change.threshold,
+        screenshotPath: shot.path,
+        screenshotFilename: shot.filename,
+      };
+    }
+  }
+
+  // 仅截图成功且确认要聊时，才让头顶出现气泡
+  if (typeof options.afterScreenshot === "function") {
+    options.afterScreenshot();
+  }
+
   const base64 = imageToBase64Jpeg(shot.path);
   const memorySections = memory.buildPromptSections(config);
   const systemPrompt = buildSystemPrompt(character, {
@@ -174,42 +327,73 @@ async function chatAboutScreen(options = {}) {
     Authorization: `Bearer ${ai.apiKey}`,
   };
 
-  const body = buildRequestBody(ai, systemPrompt, base64);
-  const res = await net.fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
+  const body = buildRequestBody(ai, systemPrompt, base64, {
+    kind: isRegion ? "region" : "fullscreen",
   });
+  let response = "";
+  let expression = "neutral";
+  let screenSummary = "";
+  let raw = "";
+  let lastParseError = null;
 
-  const text = await res.text();
-  let data;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(`API 返回非 JSON (${res.status}): ${text.slice(0, 200)}`);
-  }
-  if (!res.ok) {
-    throw new Error(
-      `API ${res.status}: ${data?.error?.message || text.slice(0, 200)}`,
-    );
-  }
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const data = await fetchChatJson(
+        url,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+        },
+        { maxRetries: 0, label: "ai:vision" },
+      );
 
-  const raw = messageContentToText(data?.choices?.[0]?.message?.content).trim();
-  const parsed = extractChatPayload(raw, expressions);
-  let response = (parsed.response || "").trim();
-  let expression = parsed.expression || "neutral";
+      raw = messageContentToText(data?.choices?.[0]?.message?.content).trim();
+      const parsed = extractChatPayload(raw, expressions);
+      response = (parsed.response || "").trim();
+      expression = parsed.expression || "neutral";
+      screenSummary = (parsed.screenSummary || "").trim();
 
-  if (!response && raw.trim()) {
-    const lines = raw.trim().split(/\r?\n/);
-    if (lines.length === 1 && !isLikelyExpressionOnly(lines[0], expressions)) {
-      response = lines[0].trim();
-      expression = "neutral";
+      if (!response && raw.trim()) {
+        const lines = raw.trim().split(/\r?\n/);
+        if (
+          lines.length === 1 &&
+          !isLikelyExpressionOnly(lines[0], expressions)
+        ) {
+          response = lines[0].trim();
+          expression = "neutral";
+        }
+      }
+
+      if (!response) {
+        throw new Error(
+          'API 未返回有效台词（需要 JSON：{"expression":"...","response":"...","screenSummary":"..."}）',
+        );
+      }
+      lastParseError = null;
+      break;
+    } catch (err) {
+      lastParseError = err;
+      const canRetry =
+        attempt < MAX_RETRIES &&
+        (isRetryableError(err) ||
+          /未返回有效台词/.test(String(err?.message || "")));
+      if (!canRetry) throw err;
+      const delay = RETRY_BASE_MS * (attempt + 1);
+      console.warn(
+        `[ai:vision] attempt ${attempt + 1}/${MAX_RETRIES + 1} failed, retry in ${delay}ms:`,
+        err instanceof Error ? err.message : err,
+      );
+      await sleep(delay);
     }
   }
 
   if (!response) {
-    throw new Error(
-      'API 未返回有效台词（需要 JSON：{"expression":"...","response":"..."}）',
+    throw (
+      lastParseError ||
+      new Error(
+        'API 未返回有效台词（需要 JSON：{"expression":"...","response":"...","screenSummary":"..."}）',
+      )
     );
   }
 
@@ -218,6 +402,7 @@ async function chatAboutScreen(options = {}) {
     {
       reply: response,
       expression,
+      screenSummary,
       trigger: options.trigger || "",
     },
     config,
@@ -233,9 +418,13 @@ async function chatAboutScreen(options = {}) {
     });
 
   return {
+    skipped: false,
     reply: response,
     expression,
+    screenSummary,
     raw,
+    distance: change.distance,
+    threshold: change.threshold,
     screenshotPath: shot.path,
     screenshotFilename: shot.filename,
   };

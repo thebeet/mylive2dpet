@@ -2,7 +2,7 @@
  * In-process short-term dialogue buffer (text only, no images).
  */
 
-/** @typedef {{ t: number, trigger?: string, petSaid: string, expression?: string }} ShortTermTurn */
+/** @typedef {{ t: number, trigger?: string, petSaid: string, expression?: string, screenSummary?: string }} ShortTermTurn */
 
 /** @type {ShortTermTurn[]} */
 let turns = [];
@@ -30,11 +30,13 @@ function prune(cfg = {}) {
 function append(entry, cfg = {}) {
   const merged = { ...getDefaults(), ...cfg };
   if (merged.enabled === false) return;
+  const screenSummary = String(entry.screenSummary || "").trim();
   turns.push({
     t: entry.t || Date.now(),
     trigger: entry.trigger || "",
     petSaid: String(entry.petSaid || "").trim(),
     expression: entry.expression || "neutral",
+    ...(screenSummary ? { screenSummary } : {}),
   });
   prune(merged);
 }
@@ -74,7 +76,9 @@ function formatForPrompt(items) {
       const hh = String(d.getHours()).padStart(2, "0");
       const mm = String(d.getMinutes()).padStart(2, "0");
       const expr = e.expression ? ` (${e.expression})` : "";
-      return `[${hh}:${mm}]${expr} ${e.petSaid}`;
+      const line = `[${hh}:${mm}]${expr} ${e.petSaid}`;
+      const summary = String(e.screenSummary || "").trim();
+      return summary ? `${line}\n  画面：${summary}` : line;
     })
     .join("\n");
 }

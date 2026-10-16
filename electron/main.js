@@ -6,17 +6,29 @@ const {
   Tray,
   Menu,
   nativeImage,
+  globalShortcut,
 } = require("electron");
 const path = require("path");
 const { captureFullscreenToJpg } = require("./screenshot");
 const { loadConfig } = require("./config");
 const { chatAboutScreen } = require("./openaiChat");
 const {
+  selectRegionScreenshot,
+  isRegionSelectOpen,
+  warmRegionOverlay,
+  disposeRegionOverlay,
+} = require("./regionSelect");
+const {
   isTtsEnabled,
   prepareReplyAudio,
   playPreparedAudio,
   stopTts,
 } = require("./plugins/tts");
+const {
+  startX11Cursor,
+  getPhysicalCursorPoint,
+  isX11CursorReady,
+} = require("./x11Cursor");
 
 const isDev = !app.isPackaged;
 const SCREEN_MARGIN = 16;
@@ -72,13 +84,42 @@ function placeBottomRight(win) {
   });
 }
 
+function getCursorDipPoint() {
+  // Linux/X11：勿用 getCursorScreenPoint（离开窗口后坐标会冻结）
+  if (isX11CursorReady()) {
+    const physical = getPhysicalCursorPoint();
+    if (physical) {
+      if (typeof screen.screenToDipPoint === "function") {
+        return screen.screenToDipPoint(physical);
+      }
+      const display = screen.getDisplayNearestPoint(physical);
+      const scale = display.scaleFactor || 1;
+      return {
+        x: physical.x / scale,
+        y: physical.y / scale,
+      };
+    }
+  }
+  return screen.getCursorScreenPoint();
+}
+
+function getPointerPayload(win) {
+  const cursor = getCursorDipPoint();
+  const bounds = win.getContentBounds();
+  const zoom = win.webContents.getZoomFactor();
+  return {
+    x: (cursor.x - bounds.x) / zoom,
+    y: (cursor.y - bounds.y) / zoom,
+  };
+}
+
 function startPointerTracking(win) {
   if (pointerTrackingTimer) clearInterval(pointerTrackingTimer);
   let lastX = NaN;
   let lastY = NaN;
   const sendPosition = () => {
     if (win.isDestroyed() || win.webContents.isDestroyed()) return;
-    const position = screen.getCursorScreenPoint();
+    const position = getPointerPayload(win);
     if (position.x === lastX && position.y === lastY) return;
     lastX = position.x;
     lastY = position.y;
@@ -111,53 +152,71 @@ function scheduleNextChat() {
   }, wait);
 }
 
-async function runScreenChat(reason = "interval") {
+/**
+ * @param {string} [reason]
+ * @param {{ imagePath?: string }} [opts]
+ */
+async function runScreenChat(reason = "interval", opts = {}) {
   if (chatBusy) return;
   chatBusy = true;
   clearChatTimer();
-  stopTts();
+  let screenshotOk = false;
   try {
-    sendBubble({ type: "thinking" });
-    const result = await chatAboutScreen({ trigger: reason });
+    const result = await chatAboutScreen({
+      trigger: reason,
+      imagePath: opts.imagePath,
+      afterScreenshot: () => {
+        screenshotOk = true;
+        stopTts();
+        sendBubble({ type: "thinking" });
+      },
+    });
+    if (result.skipped) {
+      console.log(
+        `[chat:${reason}] skipped: screen almost unchanged`,
+        `hamming=${result.distance}/${result.threshold}`,
+      );
+      return;
+    }
     console.log(
       `[chat:${reason}]`,
       `expression=${result.expression}`,
+      `hamming=${result.distance}`,
       result.reply,
     );
 
-    /** @type {{ path: string, deleteAfter?: boolean, provider?: string } | null} */
-    let prepared = null;
-    if (isTtsEnabled()) {
-      try {
-        prepared = await prepareReplyAudio(result.reply);
-      } catch (err) {
-        console.error(
-          "[tts] prepare failed, show bubble without audio:",
-          err instanceof Error ? err.message : err,
-        );
-        prepared = null;
-      }
-    }
-
-    // 音频 ready（或跳过 TTS）后再同时出气泡 + 播放
+    // 拿到台词立刻出气泡；TTS 异步准备，不挡住头顶显示
     sendBubble({
       type: "say",
       text: result.reply,
       expression: result.expression || "neutral",
     });
-    if (prepared) {
-      void playPreparedAudio(prepared, {
-        onState: (state) => {
-          sendBubble({ type: "tts", state });
-        },
-      });
+
+    if (isTtsEnabled()) {
+      void prepareReplyAudio(result.reply)
+        .then((prepared) =>
+          playPreparedAudio(prepared, {
+            onState: (state) => {
+              sendBubble({ type: "tts", state });
+            },
+          }),
+        )
+        .catch((err) => {
+          console.error(
+            "[tts] prepare/play failed:",
+            err instanceof Error ? err.message : err,
+          );
+        });
     }
   } catch (err) {
     console.error(`[chat:${reason}] failed:`, err);
-    sendBubble({
-      type: "error",
-      text: err instanceof Error ? err.message : String(err),
-    });
+    // 截图都没成功时不往头顶丢错误气泡
+    if (screenshotOk) {
+      sendBubble({
+        type: "error",
+        text: err instanceof Error ? err.message : String(err),
+      });
+    }
   } finally {
     chatBusy = false;
     scheduleNextChat();
@@ -324,6 +383,12 @@ function buildAppMenu() {
       },
     },
     {
+      label: `框选截图并提问 (${regionShortcutAccelerator()})`,
+      click: () => {
+        void runRegionCaptureChat();
+      },
+    },
+    {
       label: "退出",
       click: () => app.quit(),
     },
@@ -352,16 +417,136 @@ function createTray() {
   tray.on("double-click", () => showPetToBottomRight());
 }
 
+function regionShortcutAccelerator() {
+  // Win/Linux: Ctrl+Alt+Q；macOS: Ctrl+Cmd+Q
+  return process.platform === "darwin"
+    ? "Control+Command+Q"
+    : "Control+Alt+Q";
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitUntilChatIdle(timeoutMs = 120000) {
+  const start = Date.now();
+  while (chatBusy) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error("等待当前聊天结束超时");
+    }
+    await sleep(100);
+  }
+}
+
+async function runRegionCaptureChat() {
+  if (isRegionSelectOpen()) {
+    console.log("[region] selector already open");
+    return;
+  }
+
+  // 框选不依赖窗口焦点；聊天进行中也允许先框选，截完再等空闲送模
+  const petWasVisible = Boolean(
+    mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible(),
+  );
+  let shot = null;
+  try {
+    if (petWasVisible) mainWindow.hide();
+    shot = await selectRegionScreenshot();
+  } catch (err) {
+    console.error("[region] failed:", err);
+    shot = null;
+  } finally {
+    if (petWasVisible && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      pinOnTop(mainWindow);
+    }
+  }
+
+  if (!shot) {
+    console.log("[region] no selection");
+    return;
+  }
+
+  try {
+    if (chatBusy) {
+      console.log("[region] chat busy, wait then send");
+      await waitUntilChatIdle();
+    }
+    await runScreenChat("region", { imagePath: shot.path });
+  } catch (err) {
+    console.error("[region] send failed:", err);
+  }
+}
+
+/** 向操作系统注册全局热键（无焦点也生效） */
+function registerGlobalShortcuts() {
+  const accelerator = regionShortcutAccelerator();
+
+  try {
+    if (globalShortcut.isRegistered(accelerator)) {
+      globalShortcut.unregister(accelerator);
+    }
+  } catch {
+    // ignore
+  }
+
+  const ok = globalShortcut.register(accelerator, () => {
+    console.log(`[shortcut] global fired: ${accelerator}`);
+    void runRegionCaptureChat();
+  });
+  const registered = globalShortcut.isRegistered(accelerator);
+
+  if (!ok || !registered) {
+    console.error(
+      `[shortcut] OS global register failed: ${accelerator} (ok=${ok}, isRegistered=${registered}). 可能被其它程序占用。`,
+    );
+    return false;
+  }
+
+  console.log(
+    `[shortcut] OS global registered: ${accelerator} (works without app focus)`,
+  );
+  return true;
+}
+
 app.whenReady().then(() => {
+  // 便于 Linux 桌面/portal 识别应用身份
+  try {
+    app.setName("mylive2dpet");
+    if (typeof app.setDesktopName === "function") {
+      app.setDesktopName("mylive2dpet.desktop");
+    }
+  } catch {
+    // ignore
+  }
+
+  startX11Cursor();
   createWindow();
   createTray();
   startChatLoop();
+  registerGlobalShortcuts();
+  // 预创建框选层，把 GNOME 窗口打开动画消耗在启动阶段
+  warmRegionOverlay();
+
+  // 失焦后偶发丢绑定，重新确认一次
+  app.on("browser-window-blur", () => {
+    const accelerator = regionShortcutAccelerator();
+    if (!globalShortcut.isRegistered(accelerator)) {
+      console.warn("[shortcut] lost registration, re-register");
+      registerGlobalShortcuts();
+    }
+  });
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
     }
   });
+});
+
+app.on("will-quit", () => {
+  globalShortcut.unregisterAll();
+  disposeRegionOverlay();
 });
 
 // 拖动时固定宽高，避免 Windows DPI 下 setPosition 导致窗口越拖越大
@@ -380,7 +565,7 @@ ipcMain.on("pet:move-window", (event, dx, dy) => {
 ipcMain.on("pet:request-global-pointer", (event) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win || win.isDestroyed()) return;
-  event.sender.send("pet:global-pointer", screen.getCursorScreenPoint());
+  event.sender.send("pet:global-pointer", getPointerPayload(win));
 });
 
 ipcMain.on("pet:force-paint", (event) => {

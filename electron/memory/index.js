@@ -50,7 +50,7 @@ function buildPromptSections(config = {}) {
 
 /**
  * Synchronously record a turn into the short-term buffer (next chat sees it).
- * @param {{ reply: string, expression?: string, trigger?: string }} turn
+ * @param {{ reply: string, expression?: string, screenSummary?: string, trigger?: string }} turn
  * @param {object} [config]
  */
 function recordTurn(turn, config = {}) {
@@ -63,6 +63,7 @@ function recordTurn(turn, config = {}) {
       {
         petSaid: reply,
         expression: turn.expression || "neutral",
+        screenSummary: turn.screenSummary || "",
         trigger: turn.trigger || "",
       },
       mem.shortTerm,
@@ -157,7 +158,7 @@ async function maintain(deps) {
 }
 
 /**
- * @param {{ reply: string, expression?: string, trigger?: string }} turn
+ * @param {{ reply: string, expression?: string, screenSummary?: string, trigger?: string }} turn
  * @param {{ config: object, callChat: Function }} deps
  */
 async function afterReply(turn, deps) {

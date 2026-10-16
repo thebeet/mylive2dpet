@@ -23,7 +23,7 @@ function formatMemorySections(memory = {}) {
   }
   if (blocks.length === 0) return "";
   blocks.push(
-    `# 记忆使用说明\n可参考以上记忆保持话题连贯，但必须以当前截图为准；不要复述已过时的画面细节，不要为了呼应记忆而编造截图中没有的内容。`,
+    `# 记忆使用说明\n近期对话中的「画面：」是当时截图摘要，仅供连贯参考，不要对用户复述这些摘要原文。必须以当前截图为准；不要复述已过时的画面细节，不要为了呼应记忆而编造截图中没有的内容。`,
   );
   return blocks.join("\n\n");
 }
@@ -83,9 +83,10 @@ function buildSystemPrompt(character = {}, extras = {}) {
     `字段：`,
     `- expression: string，表情名`,
     `- response: string，要对用户说的中文台词（1～2 句）`,
+    `- screenSummary: string，当前截图内容的简短客观总结（1～2 句，供后续回合上下文；绝不对用户说出，不要写成台词语气）`,
     ``,
     `正确示例：`,
-    `{"expression":"smile","response":"前辈还在写代码呢，终端比人还忙。"}`,
+    `{"expression":"smile","response":"前辈还在写代码呢，终端比人还忙。","screenSummary":"VSCode 打开 allowance.go，旁边浏览器在查接口文档。"}`,
   ]
     .filter((line, i, arr) => !(line === "" && arr[i - 1] === ""))
     .join("\n");

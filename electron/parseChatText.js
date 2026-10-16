@@ -1,5 +1,5 @@
 /**
- * 解析模型返回：优先 JSON `{ "expression", "response" }`，
+ * 解析模型返回：优先 JSON `{ "expression", "response", "screenSummary" }`，
  * 兼容旧的「第一行表情 + 换行 + 台词」。
  */
 
@@ -10,7 +10,12 @@
 function extractChatPayload(raw, allowedExpressions = []) {
   const text = String(raw || "").replace(/^\uFEFF/, "").trim();
   if (!text) {
-    return { expression: null, response: null, raw: text };
+    return {
+      expression: null,
+      response: null,
+      screenSummary: null,
+      raw: text,
+    };
   }
 
   const fromJson = tryParseModelJson(text);
@@ -18,9 +23,17 @@ function extractChatPayload(raw, allowedExpressions = []) {
     const response = String(
       fromJson.response ?? fromJson.text ?? fromJson.reply ?? "",
     ).trim();
+    const screenSummary = String(
+      fromJson.screenSummary ??
+        fromJson.scene ??
+        fromJson.observation ??
+        fromJson.summary ??
+        "",
+    ).trim();
     return {
       expression: normalizeExpression(fromJson.expression, allowedExpressions),
       response: response || null,
+      screenSummary: screenSummary || null,
       raw: text,
     };
   }
@@ -30,7 +43,7 @@ function extractChatPayload(raw, allowedExpressions = []) {
 
 /**
  * @param {string} text
- * @returns {{ expression?: unknown, response?: unknown, text?: unknown, reply?: unknown } | null}
+ * @returns {{ expression?: unknown, response?: unknown, text?: unknown, reply?: unknown, screenSummary?: unknown, scene?: unknown, observation?: unknown, summary?: unknown } | null}
  */
 function tryParseModelJson(text) {
   const candidates = [text];
@@ -51,7 +64,8 @@ function tryParseModelJson(text) {
           "expression" in obj ||
           "response" in obj ||
           "text" in obj ||
-          "reply" in obj
+          "reply" in obj ||
+          "screenSummary" in obj
         ) {
           return obj;
         }
@@ -90,6 +104,7 @@ function extractNewlinePayload(text, allowedExpressions) {
   return {
     expression,
     response: response != null ? String(response) : null,
+    screenSummary: null,
     raw: text,
   };
 }
