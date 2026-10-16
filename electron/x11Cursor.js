@@ -1,8 +1,8 @@
 /**
  * Linux/X11：Chromium 的 screen.getCursorScreenPoint() 在指针离开窗口后会冻结
  * （Electron #42519）。这里直接 XQueryPointer 读全局坐标（物理像素）。
+ * Windows / macOS 不加载 x11。
  */
-const x11 = require("x11");
 
 let client = null;
 let root = null;
@@ -17,8 +17,23 @@ function canUseX11() {
   return true;
 }
 
+function loadX11() {
+  try {
+    return require("x11");
+  } catch (err) {
+    console.warn(
+      "[cursor] x11 module missing, fallback to Electron API:",
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
+}
+
 function startX11Cursor() {
   if (!canUseX11() || client) return;
+
+  const x11 = loadX11();
+  if (!x11) return;
 
   x11.createClient((err, display) => {
     if (err || !display) {
