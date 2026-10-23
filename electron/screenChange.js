@@ -6,7 +6,7 @@ let lastHash = null;
 const DEFAULTS = {
   enabled: true,
   hashSize: 8,
-  threshold: 8,
+  threshold: 4,
 };
 
 function resolveOptions(config) {

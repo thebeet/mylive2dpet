@@ -22,10 +22,20 @@
     "rules": "【规则——必须严格遵守】\n1. 只回复1-2句话……",
     "language": "中文"
   },
+  "perception": {
+    "enabled": true,
+    "interval_ms": 5000,
+    "_comment": "截图采集间隔（毫秒），独立于决策间隔；必须大于 0"
+  },
   "chat": {
     "interval_ms": 10000,
     "enabled": true,
-    "_comment": "interval_ms>=0: 每次聊完休息该毫秒再自动下一次；interval_ms<0: 不自动，仅点击桌宠/托盘触发"
+    "changeDetect": {
+      "enabled": true,
+      "hashSize": 8,
+      "threshold": 4
+    },
+    "_comment": "决策间隔（毫秒），每次决策完成后等待；0 时空队列最多每秒检查一次；interval_ms<0 时仅点击桌宠/托盘触发"
   },
   "memory": {
     "_comment": "核心短期记忆（非插件）。长期记忆见 plugins[{name:memory}]",

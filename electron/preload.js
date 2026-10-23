@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld("petDesktop", {
   },
   captureScreenshot: () => ipcRenderer.invoke("pet:capture-screenshot"),
   chatNow: () => ipcRenderer.invoke("pet:chat-now"),
+  getDialogueHistory: () => ipcRenderer.invoke("pet:get-dialogue-history"),
   openContextMenu: (pos) => {
     ipcRenderer.send("pet:context-menu", pos || {});
   },

@@ -9,21 +9,22 @@ const {
   globalShortcut,
 } = require("electron");
 const path = require("path");
-const { captureFullscreenToJpg } = require("./screenshot");
 const { loadConfig } = require("./config");
-const { chatAboutScreen } = require("./openaiChat");
+const dialogueHistory = require("./dialogueHistory");
+const { MessageBus } = require("./architecture/messageBus");
+const EVENTS = require("./architecture/events");
+const {
+  registerPerceptionModule,
+  captureScreenshot,
+} = require("./modules/perception");
+const { registerDecisionModule } = require("./modules/decision");
+const { registerExecutionModule } = require("./modules/execution");
 const {
   selectRegionScreenshot,
   isRegionSelectOpen,
   warmRegionOverlay,
   disposeRegionOverlay,
 } = require("./regionSelect");
-const {
-  isTtsEnabled,
-  prepareReplyAudio,
-  playPreparedAudio,
-  stopTts,
-} = require("./plugins/tts");
 const {
   startX11Cursor,
   getPhysicalCursorPoint,
@@ -37,11 +38,16 @@ const DEFAULT_WIN = { width: 380, height: 560 };
 let winSize = { ...DEFAULT_WIN };
 let tray = null;
 let mainWindow = null;
-let chatTimer = null;
+let historyWindow = null;
+let decisionTimer = null;
+let perceptionTimer = null;
 let pointerTrackingTimer = null;
-let chatBusy = false;
-let chatLoopEnabled = false;
-let chatIntervalMs = 10000;
+let decisionBusy = false;
+let decisionLoopEnabled = false;
+let decisionIntervalMs = 10000;
+let perceptionLoopEnabled = false;
+let perceptionIntervalMs = 5000;
+let perceptionCaptureBusy = false;
 
 function readWindowSize() {
   try {
@@ -134,129 +140,149 @@ function sendBubble(payload) {
   mainWindow.webContents.send("pet:bubble", payload);
 }
 
-function clearChatTimer() {
-  if (chatTimer) {
-    clearTimeout(chatTimer);
-    chatTimer = null;
+const messageBus = new MessageBus();
+registerPerceptionModule(messageBus);
+registerDecisionModule(messageBus);
+registerExecutionModule(messageBus, { sendBubble });
+
+messageBus.subscribe(EVENTS.PERCEPTION_SKIPPED, (event) => {
+  console.log(
+    `[perception:${event.trigger}] screenshot skipped: little change`,
+    `hamming=${event.distance}/${event.threshold}`,
+  );
+});
+messageBus.subscribe(EVENTS.PERCEPTION_OBSERVATION_QUEUED, (event) => {
+  console.log(
+    `[perception:${event.observation.trigger}] screenshot queued`,
+    `pending=${event.pendingCount}`,
+  );
+});
+messageBus.subscribe(EVENTS.DECISION_COMPLETED, ({ observations, result }) => {
+  console.log(
+    `[decision] observations=${observations.length}`,
+    `expression=${result.expression}`,
+    result.reply,
+  );
+});
+
+function clearDecisionTimer() {
+  if (decisionTimer) {
+    clearTimeout(decisionTimer);
+    decisionTimer = null;
   }
 }
 
-/** 本次聊天结束后，休息 interval_ms 再发起下一次（interval_ms < 0 时不自动续跑） */
-function scheduleNextChat() {
-  clearChatTimer();
-  if (!chatLoopEnabled || chatIntervalMs < 0) return;
-  const wait = Math.max(0, chatIntervalMs);
-  console.log(`[chat] rest ${wait}ms before next request`);
-  chatTimer = setTimeout(() => {
-    void runScreenChat("interval");
+/** 决策结束后等待 interval_ms 再请求下一次决策（负数时仅手动触发）。 */
+function scheduleNextDecision() {
+  clearDecisionTimer();
+  if (!decisionLoopEnabled || decisionIntervalMs < 0) return;
+  // A zero interval means near-immediate decisions, with a small idle backoff
+  // when the observation queue is empty.
+  const wait = Math.max(1000, decisionIntervalMs);
+  console.log(`[decision] rest ${wait}ms before next request`);
+  decisionTimer = setTimeout(() => {
+    void requestDecision("interval");
   }, wait);
 }
 
 /**
  * @param {string} [reason]
- * @param {{ imagePath?: string }} [opts]
  */
-async function runScreenChat(reason = "interval", opts = {}) {
-  if (chatBusy) return;
-  chatBusy = true;
-  clearChatTimer();
-  let screenshotOk = false;
+async function requestDecision(reason = "interval") {
+  if (decisionBusy) return;
+  decisionBusy = true;
+  clearDecisionTimer();
   try {
-    const result = await chatAboutScreen({
+    await messageBus.publish(EVENTS.DECISION_REQUESTED, {
       trigger: reason,
-      imagePath: opts.imagePath,
-      afterScreenshot: () => {
-        screenshotOk = true;
-        stopTts();
-        sendBubble({ type: "thinking" });
-      },
     });
-    if (result.skipped) {
-      console.log(
-        `[chat:${reason}] skipped: screen almost unchanged`,
-        `hamming=${result.distance}/${result.threshold}`,
-      );
-      return;
-    }
-    console.log(
-      `[chat:${reason}]`,
-      `expression=${result.expression}`,
-      `hamming=${result.distance}`,
-      result.reply,
-    );
-
-    // 拿到台词立刻出气泡；TTS 异步准备，不挡住头顶显示
-    sendBubble({
-      type: "say",
-      text: result.reply,
-      expression: result.expression || "neutral",
-    });
-
-    if (isTtsEnabled()) {
-      void prepareReplyAudio(result.reply)
-        .then((prepared) =>
-          playPreparedAudio(prepared, {
-            onState: (state) => {
-              sendBubble({ type: "tts", state });
-            },
-          }),
-        )
-        .catch((err) => {
-          console.error(
-            "[tts] prepare/play failed:",
-            err instanceof Error ? err.message : err,
-          );
-        });
-    }
   } catch (err) {
-    console.error(`[chat:${reason}] failed:`, err);
-    // 截图都没成功时不往头顶丢错误气泡
-    if (screenshotOk) {
-      sendBubble({
-        type: "error",
-        text: err instanceof Error ? err.message : String(err),
-      });
-    }
+    console.error(`[decision:${reason}] message pipeline failed:`, err);
   } finally {
-    chatBusy = false;
-    scheduleNextChat();
+    decisionBusy = false;
+    scheduleNextDecision();
   }
 }
 
-function startChatLoop() {
-  clearChatTimer();
+async function capturePeriodicScreenshot() {
+  if (!perceptionLoopEnabled || perceptionCaptureBusy) return;
+  perceptionCaptureBusy = true;
+  try {
+    await messageBus.publish(EVENTS.SCREENSHOT_CAPTURE_REQUESTED, {
+      trigger: "interval",
+    });
+  } catch (err) {
+    console.error("[perception] scheduled capture failed:", err);
+  } finally {
+    perceptionCaptureBusy = false;
+  }
+}
+
+function startPerceptionLoop() {
+  if (perceptionTimer) clearInterval(perceptionTimer);
+
+  try {
+    const config = loadConfig();
+    const perception = config.perception || {};
+    const raw = Number(perception.interval_ms);
+    perceptionIntervalMs = Number.isFinite(raw) ? raw : 5000;
+    perceptionLoopEnabled =
+      perception.enabled ?? config.chat?.enabled !== false;
+  } catch (err) {
+    console.error("load perception config failed:", err);
+    perceptionIntervalMs = 5000;
+    perceptionLoopEnabled = true;
+  }
+
+  if (!perceptionLoopEnabled || perceptionIntervalMs <= 0) {
+    console.log("perception screenshot loop disabled");
+    return;
+  }
+
+  console.log(
+    `[perception] capture every ${perceptionIntervalMs}ms; queued images are consumed by decisions`,
+  );
+  void capturePeriodicScreenshot();
+  perceptionTimer = setInterval(
+    () => void capturePeriodicScreenshot(),
+    perceptionIntervalMs,
+  );
+}
+
+function startDecisionLoop() {
+  clearDecisionTimer();
 
   try {
     const config = loadConfig();
     const raw = Number(config.chat?.interval_ms);
-    chatIntervalMs = Number.isFinite(raw) ? raw : 10000;
-    // interval_ms < 0：关闭自动循环，仅手动点击桌宠 / 托盘触发
-    chatLoopEnabled =
-      config.chat?.enabled !== false && chatIntervalMs >= 0;
+    decisionIntervalMs = Number.isFinite(raw) ? raw : 10000;
+    // interval_ms < 0：关闭自动决策，仅手动点击桌宠 / 托盘触发
+    decisionLoopEnabled =
+      config.chat?.enabled !== false && decisionIntervalMs >= 0;
   } catch (err) {
     console.error("load config failed:", err);
-    chatIntervalMs = 10000;
-    chatLoopEnabled = true;
+    decisionIntervalMs = 10000;
+    decisionLoopEnabled = true;
   }
 
-  if (chatIntervalMs < 0) {
+  if (decisionIntervalMs < 0) {
     console.log(
-      "[chat] manual-only mode (interval_ms < 0): click pet or tray to chat",
+      "[decision] manual-only mode (interval_ms < 0): click pet or tray to decide",
     );
     return;
   }
 
-  if (!chatLoopEnabled) {
-    console.log("chat loop disabled by config");
+  if (!decisionLoopEnabled) {
+    console.log("automatic decision loop disabled by config");
     return;
   }
 
   // 模型加载需要时间，首轮稍晚再跑；之后每次都是「结束后再休息 interval_ms」
   console.log(
-    `[chat] first request in 8000ms, then rest ${chatIntervalMs}ms after each reply`,
+    `[decision] first request in 8000ms, then rest ${decisionIntervalMs}ms after each result`,
   );
-  chatTimer = setTimeout(() => {
-    void runScreenChat("startup");
+  decisionTimer = setTimeout(() => {
+    void requestDecision("startup");
   }, 8000);
 }
 
@@ -365,6 +391,40 @@ function showPetToBottomRight() {
   mainWindow.show();
 }
 
+function showDialogueHistory() {
+  if (historyWindow && !historyWindow.isDestroyed()) {
+    if (historyWindow.isMinimized()) historyWindow.restore();
+    historyWindow.show();
+    historyWindow.focus();
+    return;
+  }
+
+  const win = new BrowserWindow({
+    width: 560,
+    height: 720,
+    minWidth: 420,
+    minHeight: 480,
+    title: "桌宠历史对话",
+    show: false,
+    autoHideMenuBar: true,
+    backgroundColor: "#10131a",
+    webPreferences: {
+      preload: path.join(__dirname, "historyPreload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  historyWindow = win;
+
+  win.once("ready-to-show", () => {
+    if (!win.isDestroyed()) win.show();
+  });
+  win.on("closed", () => {
+    if (historyWindow === win) historyWindow = null;
+  });
+  void win.loadFile(path.join(__dirname, "historyWindow.html"));
+}
+
 function buildAppMenu() {
   return Menu.buildFromTemplate([
     {
@@ -372,10 +432,14 @@ function buildAppMenu() {
       click: () => showPetToBottomRight(),
     },
     {
+      label: "历史对话",
+      click: () => showDialogueHistory(),
+    },
+    {
       label: "截取全屏",
       click: async () => {
         try {
-          const result = await captureFullscreenToJpg();
+          const result = await captureScreenshot();
           console.log("screenshot saved:", result.path);
         } catch (err) {
           console.error("screenshot failed:", err);
@@ -385,7 +449,7 @@ function buildAppMenu() {
     {
       label: `框选截图并提问 (${regionShortcutAccelerator()})`,
       click: () => {
-        void runRegionCaptureChat();
+        void runRegionCaptureDecision();
       },
     },
     {
@@ -428,23 +492,23 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitUntilChatIdle(timeoutMs = 120000) {
+async function waitUntilDecisionIdle(timeoutMs = 120000) {
   const start = Date.now();
-  while (chatBusy) {
+  while (decisionBusy) {
     if (Date.now() - start > timeoutMs) {
-      throw new Error("等待当前聊天结束超时");
+      throw new Error("等待当前决策结束超时");
     }
     await sleep(100);
   }
 }
 
-async function runRegionCaptureChat() {
+async function runRegionCaptureDecision() {
   if (isRegionSelectOpen()) {
     console.log("[region] selector already open");
     return;
   }
 
-  // 框选不依赖窗口焦点；聊天进行中也允许先框选，截完再等空闲送模
+  // 框选不依赖窗口焦点；决策进行中也允许先入队，完成后再请求决策
   const petWasVisible = Boolean(
     mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible(),
   );
@@ -468,11 +532,15 @@ async function runRegionCaptureChat() {
   }
 
   try {
-    if (chatBusy) {
-      console.log("[region] chat busy, wait then send");
-      await waitUntilChatIdle();
+    await messageBus.publish(EVENTS.SCREENSHOT_CAPTURE_REQUESTED, {
+      trigger: "region",
+      imagePath: shot.path,
+    });
+    if (decisionBusy) {
+      console.log("[region] decision busy, wait then request decision");
+      await waitUntilDecisionIdle();
     }
-    await runScreenChat("region", { imagePath: shot.path });
+    await requestDecision("region");
   } catch (err) {
     console.error("[region] send failed:", err);
   }
@@ -492,7 +560,7 @@ function registerGlobalShortcuts() {
 
   const ok = globalShortcut.register(accelerator, () => {
     console.log(`[shortcut] global fired: ${accelerator}`);
-    void runRegionCaptureChat();
+    void runRegionCaptureDecision();
   });
   const registered = globalShortcut.isRegistered(accelerator);
 
@@ -523,7 +591,8 @@ app.whenReady().then(() => {
   startX11Cursor();
   createWindow();
   createTray();
-  startChatLoop();
+  startPerceptionLoop();
+  startDecisionLoop();
   registerGlobalShortcuts();
   // 预创建框选层，把 GNOME 窗口打开动画消耗在启动阶段
   warmRegionOverlay();
@@ -540,11 +609,15 @@ app.whenReady().then(() => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
+      startPerceptionLoop();
+      startDecisionLoop();
     }
   });
 });
 
 app.on("will-quit", () => {
+  if (perceptionTimer) clearInterval(perceptionTimer);
+  clearDecisionTimer();
   globalShortcut.unregisterAll();
   disposeRegionOverlay();
 });
@@ -582,13 +655,17 @@ ipcMain.on("pet:force-paint", (event) => {
 });
 
 ipcMain.handle("pet:capture-screenshot", async () => {
-  return captureFullscreenToJpg();
+  return captureScreenshot();
 });
 
 ipcMain.handle("pet:chat-now", async () => {
-  console.log("[chat] pet:chat-now received, busy=", chatBusy);
-  await runScreenChat("click");
+  console.log("[decision] pet:chat-now received, busy=", decisionBusy);
+  await requestDecision("click");
   return { ok: true };
+});
+
+ipcMain.handle("pet:get-dialogue-history", async () => {
+  return dialogueHistory.list(500);
 });
 
 ipcMain.on("pet:context-menu", (event, pos) => {
@@ -598,8 +675,13 @@ ipcMain.on("pet:context-menu", (event, pos) => {
 });
 
 app.on("window-all-closed", () => {
-  chatLoopEnabled = false;
-  clearChatTimer();
+  decisionLoopEnabled = false;
+  clearDecisionTimer();
+  perceptionLoopEnabled = false;
+  if (perceptionTimer) {
+    clearInterval(perceptionTimer);
+    perceptionTimer = null;
+  }
   if (process.platform !== "darwin") {
     app.quit();
   }

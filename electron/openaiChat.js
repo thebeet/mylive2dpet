@@ -4,9 +4,8 @@ const { buildSystemPrompt } = require("./prompt");
 const { loadExpressionNames } = require("./live2dCatalog");
 const { extractChatPayload } = require("./parseChatText");
 const path = require("path");
-const { captureFullscreenToJpg } = require("./screenshot");
-const { compareWithPrevious } = require("./screenChange");
 const memory = require("./memory");
+const dialogueHistory = require("./dialogueHistory");
 const fs = require("fs");
 
 function normalizeEndpoint(endpoint) {
@@ -225,13 +224,33 @@ function formatNowStamp(date = new Date()) {
   return `${y}-${mo}-${d} 周${w} ${h}:${mi}:${s}`;
 }
 
-function buildRequestBody(ai, systemPrompt, base64, opts = {}) {
+function buildRequestBody(ai, systemPrompt, screenshots) {
   const maxTokens = Number(ai.max_tokens) > 0 ? Number(ai.max_tokens) : 1024;
   const nowStamp = formatNowStamp();
-  const tip =
-    opts.kind === "region"
-      ? "这是前辈框选的屏幕区域截图"
-      : "这是前辈现在的桌面截图";
+  const content = [
+    {
+      type: "text",
+      text: `[当前时间 ${nowStamp}] 以下是 ${screenshots.length} 张尚未处理的截图，按拍摄时间从早到晚排列。请结合画面变化理解上下文，并主要根据最后一张截图回应。只返回 JSON：{"expression":"...","response":"...","screenSummary":"..."}`,
+    },
+  ];
+
+  screenshots.forEach((screenshot, index) => {
+    const capturedAt = screenshot.capturedAt
+      ? formatNowStamp(new Date(screenshot.capturedAt))
+      : "时间未知";
+    const kind = screenshot.kind === "region" ? "框选区域" : "桌面全屏";
+    content.push({
+      type: "text",
+      text: `[截图 ${index + 1}/${screenshots.length}；${capturedAt}；${kind}]`,
+    });
+    content.push({
+      type: "image_url",
+      image_url: {
+        url: `data:image/jpeg;base64,${screenshot.base64}`,
+      },
+    });
+  });
+
   return {
     model: ai.model,
     temperature: 0.8,
@@ -241,27 +260,32 @@ function buildRequestBody(ai, systemPrompt, base64, opts = {}) {
       { role: "system", content: systemPrompt },
       {
         role: "user",
-        content: [
-          {
-            type: "text",
-            text: `[当前时间 ${nowStamp}] ${tip}。请只返回 JSON：{"expression":"...","response":"...","screenSummary":"..."}`,
-          },
-          {
-            type: "image_url",
-            image_url: {
-              url: `data:image/jpeg;base64,${base64}`,
-            },
-          },
-        ],
+        content,
       },
     ],
   };
 }
 
 /**
- * @param {{ trigger?: string, afterScreenshot?: () => void, imagePath?: string }} [options]
+ * Make a decision from queued observations produced by the perception module.
+ * @param {Array<{ trigger?: string, kind: string, screenshotPath: string, screenshotFilename?: string, capturedAt?: string }>} observations
  */
-async function chatAboutScreen(options = {}) {
+async function decideFromObservations(observations) {
+  if (!Array.isArray(observations) || observations.length === 0) {
+    throw new Error("没有可用于决策的截图观察");
+  }
+
+  for (const observation of observations) {
+    if (
+      !observation?.screenshotPath ||
+      !fs.existsSync(observation.screenshotPath)
+    ) {
+      throw new Error(
+        `截图不存在: ${observation?.screenshotPath || "(empty)"}`,
+      );
+    }
+  }
+
   const config = loadConfig();
   const { ai, character } = config;
   if (!ai?.endpoint || !ai?.apiKey || !ai?.model) {
@@ -271,50 +295,10 @@ async function chatAboutScreen(options = {}) {
   const expressions = loadExpressionNames({ includeInternal: false });
   await applyProxy(ai.proxy);
 
-  const trigger = options.trigger || "";
-  const isRegion = Boolean(options.imagePath) || trigger === "region";
-  let shot;
-  let change = { distance: -1, threshold: 0 };
-
-  if (options.imagePath) {
-    const imagePath = options.imagePath;
-    if (!fs.existsSync(imagePath)) {
-      throw new Error(`截图不存在: ${imagePath}`);
-    }
-    shot = {
-      path: imagePath,
-      filename: path.basename(imagePath),
-    };
-    // 框选强制送模，仍更新哈希避免下一轮 interval 误判
-    change = compareWithPrevious(shot.path, { force: true, config });
-  } else {
-    shot = await captureFullscreenToJpg();
-    // interval 轮询才判变；点击 / 启动等强制反应
-    const force = trigger !== "interval";
-    change = compareWithPrevious(shot.path, { force, config });
-    if (!change.changed) {
-      try {
-        fs.unlinkSync(shot.path);
-      } catch {
-        // ignore
-      }
-      return {
-        skipped: true,
-        reason: "screen_unchanged",
-        distance: change.distance,
-        threshold: change.threshold,
-        screenshotPath: shot.path,
-        screenshotFilename: shot.filename,
-      };
-    }
-  }
-
-  // 仅截图成功且确认要聊时，才让头顶出现气泡
-  if (typeof options.afterScreenshot === "function") {
-    options.afterScreenshot();
-  }
-
-  const base64 = imageToBase64Jpeg(shot.path);
+  const screenshots = observations.map((observation) => ({
+    ...observation,
+    base64: imageToBase64Jpeg(observation.screenshotPath),
+  }));
   const memorySections = memory.buildPromptSections(config);
   const systemPrompt = buildSystemPrompt(character, {
     expressions,
@@ -327,9 +311,7 @@ async function chatAboutScreen(options = {}) {
     Authorization: `Bearer ${ai.apiKey}`,
   };
 
-  const body = buildRequestBody(ai, systemPrompt, base64, {
-    kind: isRegion ? "region" : "fullscreen",
-  });
+  const body = buildRequestBody(ai, systemPrompt, screenshots);
   let response = "";
   let expression = "neutral";
   let screenSummary = "";
@@ -403,10 +385,22 @@ async function chatAboutScreen(options = {}) {
       reply: response,
       expression,
       screenSummary,
-      trigger: options.trigger || "",
+      trigger: observations
+        .map(({ trigger }) => trigger)
+        .filter(Boolean)
+        .join(","),
     },
     config,
   );
+  dialogueHistory.append({
+    petSaid: response,
+    expression,
+    screenSummary,
+    trigger: observations
+      .map(({ trigger }) => trigger)
+      .filter(Boolean)
+      .join(","),
+  });
   // Summary / long-term extract are async and must not block TTS.
   void memory
     .maintain({ config, callChat: callChatCompletions })
@@ -423,10 +417,8 @@ async function chatAboutScreen(options = {}) {
     expression,
     screenSummary,
     raw,
-    distance: change.distance,
-    threshold: change.threshold,
-    screenshotPath: shot.path,
-    screenshotFilename: shot.filename,
+    observationCount: observations.length,
+    screenshotPaths: observations.map(({ screenshotPath }) => screenshotPath),
   };
 }
 
@@ -436,4 +428,4 @@ function isLikelyExpressionOnly(line, allowed) {
   return allowed.some((e) => e.toLowerCase() === s.toLowerCase());
 }
 
-module.exports = { chatAboutScreen, callChatCompletions };
+module.exports = { decideFromObservations, callChatCompletions };

@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>桌宠历史对话</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, "Noto Sans SC", "Microsoft YaHei", sans-serif;
+        color: #eef0f6;
+        background: #10131a;
+        font-synthesis: none;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        min-width: 360px;
+        min-height: 100vh;
+        background: radial-gradient(ellipse at top left, #252034 0, #10131a 48%);
+      }
+
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 22px 26px 18px;
+        border-bottom: 1px solid #ffffff14;
+        background: #10131aeF;
+        backdrop-filter: blur(16px);
+      }
+
+      h1 { margin: 0; font-size: 19px; font-weight: 650; }
+      #count { margin-top: 5px; color: #a6a9b8; font-size: 12px; }
+
+      button {
+        border: 1px solid #ffffff22;
+        border-radius: 9px;
+        padding: 8px 12px;
+        color: #f4f1ff;
+        background: #ffffff0d;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover { background: #ffffff18; }
+
+      main { padding: 20px 24px 32px; }
+      #entries { display: grid; gap: 12px; }
+
+      .entry {
+        padding: 15px 16px;
+        border: 1px solid #ffffff12;
+        border-radius: 13px;
+        background: #ffffff08;
+        box-shadow: 0 8px 24px #00000012;
+      }
+
+      .meta {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 9px;
+        color: #aaadbc;
+        font-size: 12px;
+      }
+
+      .expression {
+        padding: 2px 7px;
+        border-radius: 999px;
+        color: #d9c7ff;
+        background: #8c65d529;
+      }
+
+      .speech { white-space: pre-wrap; line-height: 1.65; }
+      .summary {
+        margin-top: 10px;
+        padding-top: 9px;
+        border-top: 1px solid #ffffff10;
+        color: #a6a9b8;
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .empty, .error {
+        padding: 48px 16px;
+        color: #a6a9b8;
+        text-align: center;
+        line-height: 1.6;
+      }
+      .error { color: #ff9eae; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>桌宠历史对话</h1>
+        <div id="count">正在读取…</div>
+      </div>
+      <button id="refresh" type="button">刷新</button>
+    </header>
+    <main>
+      <section id="entries" aria-live="polite"></section>
+    </main>
+    <script>
+      const entriesEl = document.getElementById("entries");
+      const countEl = document.getElementById("count");
+
+      function addText(parent, tag, className, value) {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        node.textContent = value;
+        parent.appendChild(node);
+        return node;
+      }
+
+      function render(entries) {
+        entriesEl.replaceChildren();
+        countEl.textContent = `共 ${entries.length} 条（最多显示最近 500 条）`;
+
+        if (entries.length === 0) {
+          addText(entriesEl, "div", "empty", "还没有历史对话。桌宠产生回复后会显示在这里。");
+          return;
+        }
+
+        for (const entry of entries) {
+          const card = document.createElement("article");
+          card.className = "entry";
+          const meta = document.createElement("div");
+          meta.className = "meta";
+          const time = Number(entry.t);
+          addText(
+            meta,
+            "time",
+            "",
+            Number.isFinite(time) ? new Date(time).toLocaleString("zh-CN") : "时间未知",
+          );
+          addText(meta, "span", "expression", entry.expression || "neutral");
+          card.appendChild(meta);
+          addText(card, "div", "speech", entry.petSaid || "");
+          if (entry.screenSummary) {
+            addText(card, "div", "summary", `画面摘要：${entry.screenSummary}`);
+          }
+          entriesEl.appendChild(card);
+        }
+      }
+
+      async function loadHistory() {
+        countEl.textContent = "正在读取…";
+        try {
+          const entries = await window.dialogueHistory.getEntries();
+          render(Array.isArray(entries) ? entries : []);
+        } catch (error) {
+          entriesEl.replaceChildren();
+          addText(entriesEl, "div", "error", `读取历史对话失败：${error.message || error}`);
+          countEl.textContent = "读取失败";
+        }
+      }
+
+      document.getElementById("refresh").addEventListener("click", loadHistory);
+      void loadHistory();
+    </script>
+  </body>
+</html>

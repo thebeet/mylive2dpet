@@ -7,6 +7,7 @@ import { createSpeechBubble, type HeadAnchor } from "./speechBubble";
 const MODEL_URL =
   "/assets/Setsuna_v081l_b/setsuna_psd2live_v001.model3.json";
 const OVERALL_SCALE = 1.5;
+const MODEL_VERTICAL_OFFSET = 50;
 
 Live2DModel.registerTicker(PIXI.Ticker);
 
@@ -31,7 +32,10 @@ function layoutModel(model: Live2DModel, app: PIXI.Application) {
     Math.min(maxW / model.width, maxH / model.height) * OVERALL_SCALE;
   model.scale.set(scale);
   model.anchor.set(0.5, 1);
-  model.position.set(app.screen.width / 2, app.screen.height * 0.98);
+  model.position.set(
+    app.screen.width / 2,
+    app.screen.height * 0.98 + MODEL_VERTICAL_OFFSET,
+  );
 }
 
 /** 估算头顶位置（模型包围盒顶部略下一点） */
