@@ -1,5 +1,5 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("dialogueHistory", {
-  getEntries: () => ipcRenderer.invoke("pet:get-dialogue-history"),
+  getEntries: (options = {}) => ipcRenderer.invoke("dialogue-history:list", options),
 });

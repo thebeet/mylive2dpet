@@ -6,25 +6,22 @@ const {
   Tray,
   Menu,
   nativeImage,
-  globalShortcut,
 } = require("electron");
 const path = require("path");
 const { loadConfig } = require("./config");
-const dialogueHistory = require("./dialogueHistory");
+const { getMenuContributions, setMenuRefreshHandler } = require("./menuHooks");
+const { loadExpressionNames, loadMotionGroups } = require("./live2dCatalog");
 const { MessageBus } = require("./architecture/messageBus");
 const EVENTS = require("./architecture/events");
-const {
-  registerPerceptionModule,
-  captureScreenshot,
-} = require("./modules/perception");
+const { createPluginHost } = require("./pluginHost");
+const { createPerceptionService } = require("./architecture/perceptionService");
+const { createDecisionProviders } = require("./architecture/decisionProviders");
+const { createDecisionScheduler } = require("./architecture/decisionScheduler");
+const { createServiceRegistry } = require("./architecture/serviceRegistry");
+const { createContextProviders } = require("./architecture/contextProviders");
+const { captureFullscreenToJpg } = require("./platform/screenCapture");
 const { registerDecisionModule } = require("./modules/decision");
 const { registerExecutionModule } = require("./modules/execution");
-const {
-  selectRegionScreenshot,
-  isRegionSelectOpen,
-  warmRegionOverlay,
-  disposeRegionOverlay,
-} = require("./regionSelect");
 const {
   startX11Cursor,
   getPhysicalCursorPoint,
@@ -37,17 +34,13 @@ const DEFAULT_WIN = { width: 380, height: 560 };
 
 let winSize = { ...DEFAULT_WIN };
 let tray = null;
+let trayRefreshTimer = null;
 let mainWindow = null;
-let historyWindow = null;
-let decisionTimer = null;
-let perceptionTimer = null;
+let live2dReady = false;
 let pointerTrackingTimer = null;
-let decisionBusy = false;
-let decisionLoopEnabled = false;
-let decisionIntervalMs = 10000;
-let perceptionLoopEnabled = false;
-let perceptionIntervalMs = 5000;
-let perceptionCaptureBusy = false;
+let shuttingDown = false;
+let shutdownComplete = false;
+let shutdownTask = null;
 
 function readWindowSize() {
   try {
@@ -136,24 +129,56 @@ function startPointerTracking(win) {
 }
 
 function sendBubble(payload) {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (shuttingDown || !mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.webContents.send("pet:bubble", payload);
 }
 
 const messageBus = new MessageBus();
-registerPerceptionModule(messageBus);
-registerDecisionModule(messageBus);
-registerExecutionModule(messageBus, { sendBubble });
-
-messageBus.subscribe(EVENTS.PERCEPTION_SKIPPED, (event) => {
-  console.log(
-    `[perception:${event.trigger}] screenshot skipped: little change`,
-    `hamming=${event.distance}/${event.threshold}`,
-  );
+const perception = createPerceptionService(messageBus, { getPolicy: () => loadConfig().observations || {} });
+const services = createServiceRegistry();
+const contextProviders = createContextProviders();
+const decisions = createDecisionProviders(() =>
+  loadConfig().decision?.provider || "ai-conversation", { contextProviders });
+registerDecisionModule(messageBus, {
+  perception,
+  decide: (observations, request) => decisions.decide({ observations, trigger: request.trigger, signal: request.signal }),
 });
+const scheduler = createDecisionScheduler({
+  execute: (request) => messageBus.publish(EVENTS.DECISION_REQUESTED, request),
+  getPolicy: () => loadConfig().decision,
+  hasPendingUser: perception.hasPendingUser,
+});
+const pluginHost = createPluginHost({
+  bus: messageBus,
+  getConfig: loadConfig,
+  perception,
+  decisions,
+  requestDecision: (request) => scheduler.request(request),
+  services,
+  contextProviders,
+  paths: { getUserData: () => app.getPath("userData"), projectRoot: path.resolve(__dirname, "..") },
+  windows: { create: (options) => new BrowserWindow(options) },
+  ipc: {
+    handle: (channel, handler) => {
+      ipcMain.handle(channel, handler);
+      return () => ipcMain.removeHandler(channel);
+    },
+  },
+  screen: {
+    captureFullscreen: captureFullscreenToJpg,
+    getPrimaryDisplay: () => screen.getPrimaryDisplay(),
+    getDisplayNearestPoint: (point) => screen.getDisplayNearestPoint(point),
+  },
+  pet: {
+    getExpressions: () => loadExpressionNames({ includeInternal: false }),
+    getBounds: () => mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()
+      ? mainWindow.getBounds() : null,
+  },
+});
+
 messageBus.subscribe(EVENTS.PERCEPTION_OBSERVATION_QUEUED, (event) => {
   console.log(
-    `[perception:${event.observation.trigger}] screenshot queued`,
+    `[perception:${event.observation.source}] ${event.observation.content.map((part) => part.type).join(",")} queued`,
     `pending=${event.pendingCount}`,
   );
 });
@@ -164,127 +189,6 @@ messageBus.subscribe(EVENTS.DECISION_COMPLETED, ({ observations, result }) => {
     result.reply,
   );
 });
-
-function clearDecisionTimer() {
-  if (decisionTimer) {
-    clearTimeout(decisionTimer);
-    decisionTimer = null;
-  }
-}
-
-/** 决策结束后等待 interval_ms 再请求下一次决策（负数时仅手动触发）。 */
-function scheduleNextDecision() {
-  clearDecisionTimer();
-  if (!decisionLoopEnabled || decisionIntervalMs < 0) return;
-  // A zero interval means near-immediate decisions, with a small idle backoff
-  // when the observation queue is empty.
-  const wait = Math.max(1000, decisionIntervalMs);
-  console.log(`[decision] rest ${wait}ms before next request`);
-  decisionTimer = setTimeout(() => {
-    void requestDecision("interval");
-  }, wait);
-}
-
-/**
- * @param {string} [reason]
- */
-async function requestDecision(reason = "interval") {
-  if (decisionBusy) return;
-  decisionBusy = true;
-  clearDecisionTimer();
-  try {
-    await messageBus.publish(EVENTS.DECISION_REQUESTED, {
-      trigger: reason,
-    });
-  } catch (err) {
-    console.error(`[decision:${reason}] message pipeline failed:`, err);
-  } finally {
-    decisionBusy = false;
-    scheduleNextDecision();
-  }
-}
-
-async function capturePeriodicScreenshot() {
-  if (!perceptionLoopEnabled || perceptionCaptureBusy) return;
-  perceptionCaptureBusy = true;
-  try {
-    await messageBus.publish(EVENTS.SCREENSHOT_CAPTURE_REQUESTED, {
-      trigger: "interval",
-    });
-  } catch (err) {
-    console.error("[perception] scheduled capture failed:", err);
-  } finally {
-    perceptionCaptureBusy = false;
-  }
-}
-
-function startPerceptionLoop() {
-  if (perceptionTimer) clearInterval(perceptionTimer);
-
-  try {
-    const config = loadConfig();
-    const perception = config.perception || {};
-    const raw = Number(perception.interval_ms);
-    perceptionIntervalMs = Number.isFinite(raw) ? raw : 5000;
-    perceptionLoopEnabled =
-      perception.enabled ?? config.chat?.enabled !== false;
-  } catch (err) {
-    console.error("load perception config failed:", err);
-    perceptionIntervalMs = 5000;
-    perceptionLoopEnabled = true;
-  }
-
-  if (!perceptionLoopEnabled || perceptionIntervalMs <= 0) {
-    console.log("perception screenshot loop disabled");
-    return;
-  }
-
-  console.log(
-    `[perception] capture every ${perceptionIntervalMs}ms; queued images are consumed by decisions`,
-  );
-  void capturePeriodicScreenshot();
-  perceptionTimer = setInterval(
-    () => void capturePeriodicScreenshot(),
-    perceptionIntervalMs,
-  );
-}
-
-function startDecisionLoop() {
-  clearDecisionTimer();
-
-  try {
-    const config = loadConfig();
-    const raw = Number(config.chat?.interval_ms);
-    decisionIntervalMs = Number.isFinite(raw) ? raw : 10000;
-    // interval_ms < 0：关闭自动决策，仅手动点击桌宠 / 托盘触发
-    decisionLoopEnabled =
-      config.chat?.enabled !== false && decisionIntervalMs >= 0;
-  } catch (err) {
-    console.error("load config failed:", err);
-    decisionIntervalMs = 10000;
-    decisionLoopEnabled = true;
-  }
-
-  if (decisionIntervalMs < 0) {
-    console.log(
-      "[decision] manual-only mode (interval_ms < 0): click pet or tray to decide",
-    );
-    return;
-  }
-
-  if (!decisionLoopEnabled) {
-    console.log("automatic decision loop disabled by config");
-    return;
-  }
-
-  // 模型加载需要时间，首轮稍晚再跑；之后每次都是「结束后再休息 interval_ms」
-  console.log(
-    `[decision] first request in 8000ms, then rest ${decisionIntervalMs}ms after each result`,
-  );
-  decisionTimer = setTimeout(() => {
-    void requestDecision("startup");
-  }, 8000);
-}
 
 function pinOnTop(win) {
   if (!win || win.isDestroyed()) return;
@@ -325,11 +229,18 @@ function createWindow() {
   });
 
   mainWindow = win;
+  live2dReady = false;
   placeBottomRight(win);
   win.setSkipTaskbar(true);
   pinOnTop(win);
   win.webContents.setBackgroundThrottling(false);
   win.webContents.setFrameRate(60);
+
+  win.webContents.on("did-start-loading", () => {
+    if (mainWindow !== win) return;
+    live2dReady = false;
+    if (tray && !tray.isDestroyed()) tray.setContextMenu(buildAppMenu());
+  });
 
   // 失焦后重新置顶，避免被其它窗口盖住后不再浮到最前
   win.on("blur", () => {
@@ -375,12 +286,15 @@ function createWindow() {
       pointerTrackingTimer = null;
     }
     if (mainWindow === win) mainWindow = null;
+    live2dReady = false;
+    if (tray && !tray.isDestroyed()) tray.setContextMenu(buildAppMenu());
   });
 
   return win;
 }
 
 function showPetToBottomRight() {
+  if (shuttingDown) return;
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow();
     return;
@@ -391,72 +305,60 @@ function showPetToBottomRight() {
   mainWindow.show();
 }
 
-function showDialogueHistory() {
-  if (historyWindow && !historyWindow.isDestroyed()) {
-    if (historyWindow.isMinimized()) historyWindow.restore();
-    historyWindow.show();
-    historyWindow.focus();
-    return;
-  }
-
-  const win = new BrowserWindow({
-    width: 560,
-    height: 720,
-    minWidth: 420,
-    minHeight: 480,
-    title: "桌宠历史对话",
-    show: false,
-    autoHideMenuBar: true,
-    backgroundColor: "#10131a",
-    webPreferences: {
-      preload: path.join(__dirname, "historyPreload.js"),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
-  historyWindow = win;
-
-  win.once("ready-to-show", () => {
-    if (!win.isDestroyed()) win.show();
-  });
-  win.on("closed", () => {
-    if (historyWindow === win) historyWindow = null;
-  });
-  void win.loadFile(path.join(__dirname, "historyWindow.html"));
-}
-
 function buildAppMenu() {
+  const motionGroups = loadMotionGroups();
+  const expressions = loadExpressionNames();
+  const pluginMenuItems = getMenuContributions();
   return Menu.buildFromTemplate([
     {
       label: "显示到右下角",
       click: () => showPetToBottomRight(),
     },
+    ...pluginMenuItems,
     {
-      label: "历史对话",
-      click: () => showDialogueHistory(),
+      label: "播放动作",
+      enabled: live2dReady && motionGroups.length > 0,
+      submenu: motionGroups.length > 0
+        ? motionGroups.map(({ group, motions }) => ({
+            label: group,
+            submenu: motions.map(({ index, file }) => ({
+              label: path.basename(file || `动作 ${index + 1}`, ".motion3.json"),
+              click: () => sendLive2DCommand("pet:play-motion", { group, index }),
+            })),
+          }))
+        : [{ label: "没有可用动作", enabled: false }],
     },
     {
-      label: "截取全屏",
-      click: async () => {
-        try {
-          const result = await captureScreenshot();
-          console.log("screenshot saved:", result.path);
-        } catch (err) {
-          console.error("screenshot failed:", err);
-        }
-      },
-    },
-    {
-      label: `框选截图并提问 (${regionShortcutAccelerator()})`,
-      click: () => {
-        void runRegionCaptureDecision();
-      },
+      label: "切换表情",
+      enabled: live2dReady && expressions.length > 0,
+      submenu: expressions.length > 0
+        ? expressions.map((expression) => ({
+            label: expression,
+            click: () => sendLive2DCommand("pet:play-expression", expression),
+          }))
+        : [{ label: "没有可用表情", enabled: false }],
     },
     {
       label: "退出",
       click: () => app.quit(),
     },
   ]);
+}
+
+function refreshTrayMenu() {
+  if (trayRefreshTimer) clearTimeout(trayRefreshTimer);
+  trayRefreshTimer = setTimeout(() => {
+    trayRefreshTimer = null;
+    if (tray && !tray.isDestroyed()) tray.setContextMenu(buildAppMenu());
+  }, 0);
+}
+
+function sendLive2DCommand(channel, payload) {
+  if (!live2dReady || !mainWindow || mainWindow.isDestroyed() ||
+      mainWindow.webContents.isDestroyed()) {
+    return;
+  }
+  mainWindow.webContents.send(channel, payload);
 }
 
 function popupAppMenu(browserWindow, x, y) {
@@ -481,103 +383,7 @@ function createTray() {
   tray.on("double-click", () => showPetToBottomRight());
 }
 
-function regionShortcutAccelerator() {
-  // Win/Linux: Ctrl+Alt+Q；macOS: Ctrl+Cmd+Q
-  return process.platform === "darwin"
-    ? "Control+Command+Q"
-    : "Control+Alt+Q";
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitUntilDecisionIdle(timeoutMs = 120000) {
-  const start = Date.now();
-  while (decisionBusy) {
-    if (Date.now() - start > timeoutMs) {
-      throw new Error("等待当前决策结束超时");
-    }
-    await sleep(100);
-  }
-}
-
-async function runRegionCaptureDecision() {
-  if (isRegionSelectOpen()) {
-    console.log("[region] selector already open");
-    return;
-  }
-
-  // 框选不依赖窗口焦点；决策进行中也允许先入队，完成后再请求决策
-  const petWasVisible = Boolean(
-    mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible(),
-  );
-  let shot = null;
-  try {
-    if (petWasVisible) mainWindow.hide();
-    shot = await selectRegionScreenshot();
-  } catch (err) {
-    console.error("[region] failed:", err);
-    shot = null;
-  } finally {
-    if (petWasVisible && mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.show();
-      pinOnTop(mainWindow);
-    }
-  }
-
-  if (!shot) {
-    console.log("[region] no selection");
-    return;
-  }
-
-  try {
-    await messageBus.publish(EVENTS.SCREENSHOT_CAPTURE_REQUESTED, {
-      trigger: "region",
-      imagePath: shot.path,
-    });
-    if (decisionBusy) {
-      console.log("[region] decision busy, wait then request decision");
-      await waitUntilDecisionIdle();
-    }
-    await requestDecision("region");
-  } catch (err) {
-    console.error("[region] send failed:", err);
-  }
-}
-
-/** 向操作系统注册全局热键（无焦点也生效） */
-function registerGlobalShortcuts() {
-  const accelerator = regionShortcutAccelerator();
-
-  try {
-    if (globalShortcut.isRegistered(accelerator)) {
-      globalShortcut.unregister(accelerator);
-    }
-  } catch {
-    // ignore
-  }
-
-  const ok = globalShortcut.register(accelerator, () => {
-    console.log(`[shortcut] global fired: ${accelerator}`);
-    void runRegionCaptureDecision();
-  });
-  const registered = globalShortcut.isRegistered(accelerator);
-
-  if (!ok || !registered) {
-    console.error(
-      `[shortcut] OS global register failed: ${accelerator} (ok=${ok}, isRegistered=${registered}). 可能被其它程序占用。`,
-    );
-    return false;
-  }
-
-  console.log(
-    `[shortcut] OS global registered: ${accelerator} (works without app focus)`,
-  );
-  return true;
-}
-
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // 便于 Linux 桌面/portal 识别应用身份
   try {
     app.setName("mylive2dpet");
@@ -588,38 +394,46 @@ app.whenReady().then(() => {
     // ignore
   }
 
+  await pluginHost.activate();
+  if (shuttingDown) return;
+  registerExecutionModule(messageBus, { sendBubble });
   startX11Cursor();
   createWindow();
+  setMenuRefreshHandler(refreshTrayMenu);
   createTray();
-  startPerceptionLoop();
-  startDecisionLoop();
-  registerGlobalShortcuts();
-  // 预创建框选层，把 GNOME 窗口打开动画消耗在启动阶段
-  warmRegionOverlay();
-
-  // 失焦后偶发丢绑定，重新确认一次
-  app.on("browser-window-blur", () => {
-    const accelerator = regionShortcutAccelerator();
-    if (!globalShortcut.isRegistered(accelerator)) {
-      console.warn("[shortcut] lost registration, re-register");
-      registerGlobalShortcuts();
-    }
-  });
+  await pluginHost.start();
+  if (shuttingDown) return;
+  scheduler.start();
 
   app.on("activate", () => {
+    if (shuttingDown) return;
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
-      startPerceptionLoop();
-      startDecisionLoop();
+      void pluginHost.start();
+      scheduler.start();
     }
   });
 });
 
-app.on("will-quit", () => {
-  if (perceptionTimer) clearInterval(perceptionTimer);
-  clearDecisionTimer();
-  globalShortcut.unregisterAll();
-  disposeRegionOverlay();
+app.on("before-quit", (event) => {
+  if (shutdownComplete) return;
+  event.preventDefault();
+  if (shutdownTask) return;
+  shuttingDown = true;
+  void scheduler.stop();
+  if (pointerTrackingTimer) clearInterval(pointerTrackingTimer);
+  pointerTrackingTimer = null;
+  if (trayRefreshTimer) clearTimeout(trayRefreshTimer);
+  trayRefreshTimer = null;
+  setMenuRefreshHandler(null);
+  shutdownTask = Promise.all([scheduler.dispose(), pluginHost.dispose()]).then(() =>
+    perception.discard(() => true, "shutdown")
+  ).catch((error) => {
+    console.error("[plugins] shutdown failed:", error);
+  }).finally(() => {
+    shutdownComplete = true;
+    app.quit();
+  });
 });
 
 // 拖动时固定宽高，避免 Windows DPI 下 setPosition 导致窗口越拖越大
@@ -655,17 +469,12 @@ ipcMain.on("pet:force-paint", (event) => {
 });
 
 ipcMain.handle("pet:capture-screenshot", async () => {
-  return captureScreenshot();
+  return perception.capture("screen", { trigger: "manual-capture", enqueue: false });
 });
 
 ipcMain.handle("pet:chat-now", async () => {
-  console.log("[decision] pet:chat-now received, busy=", decisionBusy);
-  await requestDecision("click");
+  await scheduler.request({ trigger: "click", waitForIdle: false });
   return { ok: true };
-});
-
-ipcMain.handle("pet:get-dialogue-history", async () => {
-  return dialogueHistory.list(500);
 });
 
 ipcMain.on("pet:context-menu", (event, pos) => {
@@ -674,14 +483,17 @@ ipcMain.on("pet:context-menu", (event, pos) => {
   popupAppMenu(win, pos?.x, pos?.y);
 });
 
+ipcMain.on("pet:live2d-ready", (event) => {
+  if (!mainWindow || mainWindow.isDestroyed() ||
+      event.sender !== mainWindow.webContents) return;
+  live2dReady = true;
+  if (tray && !tray.isDestroyed()) tray.setContextMenu(buildAppMenu());
+});
+
 app.on("window-all-closed", () => {
-  decisionLoopEnabled = false;
-  clearDecisionTimer();
-  perceptionLoopEnabled = false;
-  if (perceptionTimer) {
-    clearInterval(perceptionTimer);
-    perceptionTimer = null;
-  }
+  if (shuttingDown) return;
+  void pluginHost.stop();
+  void scheduler.stop();
   if (process.platform !== "darwin") {
     app.quit();
   }

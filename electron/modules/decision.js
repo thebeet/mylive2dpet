@@ -1,16 +1,17 @@
-const { decideFromObservations } = require("../openaiChat");
+const { randomUUID } = require("crypto");
 const EVENTS = require("../architecture/events");
+const { createDecisionResult } = require("../architecture/contracts");
+const { createPerceptionService } = require("../architecture/perceptionService");
 
 /** Drain queued observations as a batch when a decision is requested. */
-function registerDecisionModule(bus) {
+function registerDecisionModule(bus, { decide, perception = createPerceptionService(bus) } = {}) {
+  if (typeof decide !== "function") {
+    throw new TypeError("decision module requires an injected decision provider");
+  }
+  const sessionId = randomUUID();
+  const sessionStartedAt = Date.now();
   return bus.subscribe(EVENTS.DECISION_REQUESTED, async (request = {}) => {
-    const observations = bus
-      .takeAll(EVENTS.PERCEPTION_OBSERVATION)
-      .sort((left, right) => {
-        const leftTime = Date.parse(left.capturedAt) || 0;
-        const rightTime = Date.parse(right.capturedAt) || 0;
-        return leftTime - rightTime;
-      });
+    const observations = await perception.takeBatch();
     if (observations.length === 0) {
       console.log(
         `[decision:${request.trigger || "manual"}] skipped: no pending observations`,
@@ -18,42 +19,39 @@ function registerDecisionModule(bus) {
       return;
     }
 
+    const id = randomUUID();
     let result;
     try {
-      await bus.publish(EVENTS.DECISION_STARTED, {
+      request.signal?.throwIfAborted();
+      await bus.notify(EVENTS.DECISION_STARTED, {
+        id, sessionId, sessionStartedAt,
         trigger: request.trigger,
         observationCount: observations.length,
       });
-      result = await decideFromObservations(observations);
+      result = createDecisionResult(await decide(observations, request));
+      request.signal?.throwIfAborted();
     } catch (error) {
-      // Keep failed observations at the front of the queue for a later retry.
-      bus.requeue(EVENTS.PERCEPTION_OBSERVATION, observations);
-      await bus.publish(EVENTS.PIPELINE_FAILED, {
+      const recovery = await perception.fail(observations, error, { cancelled: request.signal?.aborted });
+      await bus.notify(EVENTS.PIPELINE_FAILED, {
+        id,
+        cancelled: Boolean(request.signal?.aborted),
         stage: "decision",
         trigger: request.trigger,
-        screenshotCaptured: true,
         observationCount: observations.length,
         error,
+        ...recovery,
       });
       return;
     }
 
-    try {
-      await bus.publish(EVENTS.DECISION_COMPLETED, {
-        trigger: request.trigger,
-        observations,
-        result,
-      });
-    } catch (error) {
-      await bus.publish(EVENTS.PIPELINE_FAILED, {
-        stage: "execution",
-        trigger: request.trigger,
-        screenshotCaptured: true,
-        observationCount: observations.length,
-        error,
-      });
-    }
-  });
+    await bus.notify(EVENTS.DECISION_COMPLETED, {
+      id, sessionId, sessionStartedAt, completedAt: Date.now(),
+      trigger: request.trigger,
+      observations,
+      result,
+    });
+    await perception.release(observations, "completed");
+  }, { owner: "core:decision" });
 }
 
 module.exports = { registerDecisionModule };

@@ -4,23 +4,25 @@
  * the next message and preserve a predictable order.
  */
 class MessageBus {
-  constructor() {
+  constructor({ logger = console } = {}) {
     this.listeners = new Map();
     this.queues = new Map();
+    this.logger = logger;
   }
 
-  subscribe(type, handler) {
+  subscribe(type, handler, { owner } = {}) {
     if (typeof handler !== "function") {
       throw new TypeError("message handler must be a function");
     }
     const handlers = this.listeners.get(type) || [];
-    handlers.push(handler);
+    const subscription = { handler, owner };
+    handlers.push(subscription);
     this.listeners.set(type, handlers);
 
     return () => {
       const current = this.listeners.get(type);
       if (!current) return;
-      const index = current.indexOf(handler);
+      const index = current.indexOf(subscription);
       if (index >= 0) current.splice(index, 1);
       if (current.length === 0) this.listeners.delete(type);
     };
@@ -28,16 +30,56 @@ class MessageBus {
 
   async publish(type, payload) {
     const handlers = [...(this.listeners.get(type) || [])];
-    for (const handler of handlers) {
+    for (const { handler } of handlers) {
       await handler(payload);
     }
   }
 
-  enqueue(queue, message) {
-    const messages = this.queues.get(queue) || [];
+  /** Notifications preserve ordering, but one failed observer cannot block others. */
+  async notify(type, payload) {
+    const handlers = [...(this.listeners.get(type) || [])];
+    for (const { handler, owner } of handlers) {
+      try {
+        await handler(payload);
+      } catch (error) {
+        const label = owner || handler.name || "anonymous";
+        const message = `[message-bus:${type}] subscriber=${label} failed:`;
+        try {
+          const write = this.logger?.error || console.error;
+          await write.call(this.logger || console, message, error);
+        } catch (reportError) {
+          // Do not publish another event: failure observers may themselves fail.
+          try {
+            console.error(message, error, "error reporting failed:", reportError);
+          } catch { /* Reporting must not interrupt notification delivery. */ }
+        }
+      }
+    }
+  }
+
+  enqueue(queue, message, { maxMatching = Infinity, matches = () => true } = {}) {
+    let messages = this.queues.get(queue) || [];
     messages.push(message);
+    let excess = Number.isFinite(maxMatching) ? messages.filter(matches).length - maxMatching : 0;
+    if (excess > 0) {
+      messages = messages.filter((item) => {
+        if (excess > 0 && matches(item)) {
+          excess -= 1;
+          return false;
+        }
+        return true;
+      });
+    }
     this.queues.set(queue, messages);
     return messages.length;
+  }
+
+  discard(queue, predicate) {
+    const messages = this.queues.get(queue) || [];
+    const kept = messages.filter((message) => !predicate(message));
+    if (kept.length) this.queues.set(queue, kept);
+    else this.queues.delete(queue);
+    return messages.length - kept.length;
   }
 
   takeAll(queue) {
@@ -54,6 +96,10 @@ class MessageBus {
 
   queueSize(queue) {
     return (this.queues.get(queue) || []).length;
+  }
+
+  peek(queue) {
+    return [...(this.queues.get(queue) || [])];
   }
 }
 

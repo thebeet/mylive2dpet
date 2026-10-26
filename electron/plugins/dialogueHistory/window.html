@@ -36,6 +36,12 @@
         backdrop-filter: blur(16px);
       }
 
+      #search-form { display: flex; gap: 8px; padding: 12px 24px 0; }
+      #search { flex: 1; min-width: 0; padding: 9px 12px; color: inherit;
+        background: #ffffff08; border: 1px solid #ffffff22; border-radius: 9px; font: inherit; }
+      #more { margin-top: 18px; width: 100%; }
+      button:disabled { opacity: 0.5; cursor: default; }
+
       h1 { margin: 0; font-size: 19px; font-weight: 650; }
       #count { margin-top: 5px; color: #a6a9b8; font-size: 12px; }
 
@@ -79,6 +85,7 @@
       }
 
       .speech { white-space: pre-wrap; line-height: 1.65; }
+      .user-speech { margin-bottom: 8px; color: #b5b8c8; line-height: 1.6; white-space: pre-wrap; }
       .summary {
         margin-top: 10px;
         padding-top: 9px;
@@ -105,12 +112,23 @@
       </div>
       <button id="refresh" type="button">刷新</button>
     </header>
+    <form id="search-form">
+      <input id="search" type="search" maxlength="200" placeholder="搜索对话内容" aria-label="搜索对话内容" />
+      <button type="submit">搜索</button>
+    </form>
     <main>
       <section id="entries" aria-live="polite"></section>
+      <button id="more" type="button" hidden>加载更多</button>
     </main>
     <script>
       const entriesEl = document.getElementById("entries");
       const countEl = document.getElementById("count");
+      const moreEl = document.getElementById("more");
+      let nextCursor = null;
+      let displayed = 0;
+      let requestVersion = 0;
+      let activeSearch = "";
+      let loading = false;
 
       function addText(parent, tag, className, value) {
         const node = document.createElement(tag);
@@ -120,12 +138,13 @@
         return node;
       }
 
-      function render(entries) {
-        entriesEl.replaceChildren();
-        countEl.textContent = `共 ${entries.length} 条（最多显示最近 500 条）`;
+      function render(entries, reset) {
+        if (reset) entriesEl.replaceChildren();
+        displayed = (reset ? 0 : displayed) + entries.length;
+        countEl.textContent = `已显示 ${displayed} 条${nextCursor ? "，可继续加载" : ""}`;
 
-        if (entries.length === 0) {
-          addText(entriesEl, "div", "empty", "还没有历史对话。桌宠产生回复后会显示在这里。");
+        if (displayed === 0) {
+          addText(entriesEl, "div", "empty", activeSearch ? "没有匹配的对话。" : "还没有历史对话。桌宠产生回复后会显示在这里。");
           return;
         }
 
@@ -143,27 +162,51 @@
           );
           addText(meta, "span", "expression", entry.expression || "neutral");
           card.appendChild(meta);
+          if (entry.userSaid) {
+            addText(card, "div", "user-speech", `你：${entry.userSaid}`);
+          }
           addText(card, "div", "speech", entry.petSaid || "");
-          if (entry.screenSummary) {
-            addText(card, "div", "summary", `画面摘要：${entry.screenSummary}`);
+          for (const [source, summary] of Object.entries(entry.summaries || {})) {
+            if (!summary) continue;
+            const label = { screen: "画面", audio: "设备音频" }[source] || source;
+            addText(card, "div", "summary", `${label}摘要：${summary}`);
           }
           entriesEl.appendChild(card);
         }
       }
 
-      async function loadHistory() {
+      async function loadHistory(reset = true) {
+        if (!reset && (loading || !nextCursor)) return;
+        const version = ++requestVersion;
+        entriesEl.querySelectorAll(".error").forEach((node) => node.remove());
+        if (reset) activeSearch = document.getElementById("search").value.trim();
+        loading = true;
+        moreEl.disabled = true;
         countEl.textContent = "正在读取…";
         try {
-          const entries = await window.dialogueHistory.getEntries();
-          render(Array.isArray(entries) ? entries : []);
+          const result = await window.dialogueHistory.getEntries({
+            limit: 100, before: reset ? null : nextCursor, search: activeSearch,
+          });
+          if (version !== requestVersion) return;
+          if (!result || !Array.isArray(result.entries)) throw new Error("历史数据格式无效");
+          nextCursor = result.nextCursor;
+          render(result.entries, reset);
+          moreEl.hidden = !nextCursor;
         } catch (error) {
-          entriesEl.replaceChildren();
+          if (version !== requestVersion) return;
+          if (reset) { entriesEl.replaceChildren(); moreEl.hidden = true; }
           addText(entriesEl, "div", "error", `读取历史对话失败：${error.message || error}`);
           countEl.textContent = "读取失败";
+        } finally {
+          if (version === requestVersion) { loading = false; moreEl.disabled = false; }
         }
       }
 
-      document.getElementById("refresh").addEventListener("click", loadHistory);
+      document.getElementById("refresh").addEventListener("click", () => void loadHistory());
+      document.getElementById("search-form").addEventListener("submit", (event) => {
+        event.preventDefault(); void loadHistory();
+      });
+      moreEl.addEventListener("click", () => void loadHistory(false));
       void loadHistory();
     </script>
   </body>

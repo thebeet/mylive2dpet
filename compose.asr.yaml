@@ -1,0 +1,29 @@
+name: mylive2dpet-asr
+
+services:
+  whisper-asr:
+    image: onerahmet/openai-whisper-asr-webservice:latest
+    pull_policy: never
+    container_name: mylive2dpet-whisper-asr
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9000:9000"
+    environment:
+      ASR_ENGINE: faster_whisper
+      ASR_MODEL: small
+      ASR_DEVICE: cpu
+      ASR_QUANTIZATION: int8
+      HF_ENDPOINT: ${WHISPER_HF_ENDPOINT:-https://hf-mirror.com}
+      HF_HUB_DISABLE_XET: "1"
+    volumes:
+      - whisper-cache:/root/.cache
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/openapi.json', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10m
+
+volumes:
+  whisper-cache:
+    name: mylive2dpet-whisper-cache

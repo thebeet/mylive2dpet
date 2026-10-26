@@ -1,5 +1,5 @@
 /**
- * 解析模型返回：优先 JSON `{ "expression", "response", "screenSummary" }`，
+ * 解析模型返回：优先 JSON `{ "expression", "response", "screenSummary", "audioSummary" }`，
  * 兼容旧的「第一行表情 + 换行 + 台词」。
  */
 
@@ -14,6 +14,7 @@ function extractChatPayload(raw, allowedExpressions = []) {
       expression: null,
       response: null,
       screenSummary: null,
+      audioSummary: null,
       raw: text,
     };
   }
@@ -34,6 +35,7 @@ function extractChatPayload(raw, allowedExpressions = []) {
       expression: normalizeExpression(fromJson.expression, allowedExpressions),
       response: response || null,
       screenSummary: screenSummary || null,
+      audioSummary: String(fromJson.audioSummary || "").trim() || null,
       raw: text,
     };
   }
@@ -43,7 +45,7 @@ function extractChatPayload(raw, allowedExpressions = []) {
 
 /**
  * @param {string} text
- * @returns {{ expression?: unknown, response?: unknown, text?: unknown, reply?: unknown, screenSummary?: unknown, scene?: unknown, observation?: unknown, summary?: unknown } | null}
+ * @returns {{ expression?: unknown, response?: unknown, text?: unknown, reply?: unknown, screenSummary?: unknown, audioSummary?: unknown, scene?: unknown, observation?: unknown, summary?: unknown } | null}
  */
 function tryParseModelJson(text) {
   const candidates = [text];
@@ -105,6 +107,7 @@ function extractNewlinePayload(text, allowedExpressions) {
     expression,
     response: response != null ? String(response) : null,
     screenSummary: null,
+    audioSummary: null,
     raw: text,
   };
 }

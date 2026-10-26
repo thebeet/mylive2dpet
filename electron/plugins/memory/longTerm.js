@@ -1,46 +1,12 @@
-/**
- * Durable long-term memory: JSONL on disk + keyword/tag rule retrieval.
- * No embeddings.
- */
-
+const { randomUUID } = require("crypto");
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
 
 function getDefaults() {
-  return {
-    enabled: true,
-    maxInject: 5,
-    path: "logs/memory.jsonl",
-    extractEveryNTurns: 3,
-    maxTokens: 256,
-    maxEntries: 500,
-  };
+  return { enabled: true, legacyPath: "logs/memory.jsonl", maxInject: 5,
+    extractEveryNTurns: 3, maxTokens: 256, maxEntries: 500 };
 }
 
-/**
- * @param {string} relOrAbs
- */
-function resolveStorePath(relOrAbs) {
-  const p = String(relOrAbs || getDefaults().path);
-  if (path.isAbsolute(p)) return p;
-  return path.join(__dirname, "../../..", p);
-}
-
-/**
- * @param {string} filePath
- */
-function ensureParentDir(filePath) {
-  const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-}
-
-/**
- * @param {string} text
- * @returns {string[]}
- */
 function tokenize(text) {
   const s = String(text || "").toLowerCase();
   /** @type {string[]} */
@@ -62,80 +28,6 @@ function tokenize(text) {
   return [...new Set(parts)];
 }
 
-/**
- * @param {string} filePath
- * @returns {object[]}
- */
-function loadAll(filePath) {
-  if (!fs.existsSync(filePath)) return [];
-  const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
-  /** @type {object[]} */
-  const items = [];
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    try {
-      const obj = JSON.parse(line);
-      if (obj && typeof obj.text === "string" && obj.text.trim()) {
-        items.push(obj);
-      }
-    } catch {
-      // skip bad lines
-    }
-  }
-  return items;
-}
-
-/**
- * @param {object} entry
- * @param {object} [cfg]
- */
-function append(entry, cfg = {}) {
-  const merged = { ...getDefaults(), ...cfg };
-  if (merged.enabled === false) return null;
-  const filePath = resolveStorePath(merged.path);
-  ensureParentDir(filePath);
-
-  const record = {
-    id: entry.id || crypto.randomBytes(8).toString("hex"),
-    type: entry.type || "fact",
-    text: String(entry.text || "").trim(),
-    tags: Array.isArray(entry.tags)
-      ? entry.tags.map((t) => String(t).toLowerCase()).filter(Boolean)
-      : [],
-    importance:
-      typeof entry.importance === "number"
-        ? Math.min(5, Math.max(1, entry.importance))
-        : 2,
-    createdAt: entry.createdAt || Date.now(),
-  };
-  if (!record.text) return null;
-
-  fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf8");
-  maybeCompact(filePath, merged.maxEntries);
-  return record;
-}
-
-/**
- * Keep file from growing forever: keep newest maxEntries.
- * @param {string} filePath
- * @param {number} maxEntries
- */
-function maybeCompact(filePath, maxEntries) {
-  const max = Number(maxEntries) > 0 ? Number(maxEntries) : 500;
-  const items = loadAll(filePath);
-  if (items.length <= max) return;
-  const kept = items.slice(-max);
-  fs.writeFileSync(
-    filePath,
-    kept.map((e) => JSON.stringify(e)).join("\n") + "\n",
-    "utf8",
-  );
-}
-
-/**
- * @param {object} item
- * @param {string[]} queryTokens
- */
 function scoreItem(item, queryTokens) {
   const text = String(item.text || "").toLowerCase();
   const tags = Array.isArray(item.tags)
@@ -153,79 +45,110 @@ function scoreItem(item, queryTokens) {
   return score;
 }
 
-/**
- * @param {string} queryText
- * @param {object} [cfg]
- * @returns {object[]}
- */
-function retrieve(queryText, cfg = {}) {
-  const merged = { ...getDefaults(), ...cfg };
-  if (merged.enabled === false) return [];
-  const filePath = resolveStorePath(merged.path);
-  const items = loadAll(filePath);
-  if (!items.length) return [];
-
-  const tokens = tokenize(queryText);
-  const maxInject = Math.max(1, Number(merged.maxInject) || 5);
-
-  if (!tokens.length) {
-    // No query signal — return most recent / important.
-    return items
-      .slice()
-      .sort((a, b) => {
-        const ia = Number(a.importance) || 0;
-        const ib = Number(b.importance) || 0;
-        if (ib !== ia) return ib - ia;
-        return (b.createdAt || 0) - (a.createdAt || 0);
-      })
-      .slice(0, maxInject);
-  }
-
-  return items
-    .map((item) => ({ item, score: scoreItem(item, tokens) }))
-    .filter((x) => x.score > 0.5)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, maxInject)
-    .map((x) => x.item);
-}
-
-/**
- * @param {object[]} items
- */
 function formatForPrompt(items) {
   if (!items.length) return "";
   return items.map((e) => `- (${e.type || "fact"}) ${e.text}`).join("\n");
 }
 
-/**
- * Near-duplicate check before append.
- * @param {string} text
- * @param {object} [cfg]
- */
-function isDuplicate(text, cfg = {}) {
-  const merged = { ...getDefaults(), ...cfg };
-  const filePath = resolveStorePath(merged.path);
-  const needle = String(text || "").trim().toLowerCase();
-  if (!needle) return true;
-  const items = loadAll(filePath);
-  return items.some((e) => {
-    const t = String(e.text || "").trim().toLowerCase();
-    if (!t) return false;
-    if (t === needle) return true;
-    if (t.includes(needle) || needle.includes(t)) {
-      return Math.min(t.length, needle.length) >= 8;
+function createLongTermStore(storage) {
+  storage.migrate("memory", [(db) => db.exec(`
+    CREATE TABLE memory_entries (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+      type TEXT NOT NULL, text TEXT NOT NULL, normalized_text TEXT NOT NULL UNIQUE,
+      tags_json TEXT NOT NULL, importance REAL NOT NULL CHECK(importance BETWEEN 1 AND 5),
+      created_at INTEGER NOT NULL, metadata_json TEXT NOT NULL
+    );
+    CREATE INDEX memory_entries_time ON memory_entries(created_at DESC, sequence DESC);
+  `)]);
+  const insert = storage.prepare(`INSERT OR IGNORE INTO memory_entries
+    (id, type, text, normalized_text, tags_json, importance, created_at, metadata_json)
+    VALUES (@id, @type, @text, @normalizedText, @tags, @importance, @createdAt, @metadata)`);
+  const exactDuplicate = storage.prepare("SELECT 1 FROM memory_entries WHERE normalized_text = ? LIMIT 1");
+  const nearDuplicate = storage.prepare(`SELECT 1 FROM memory_entries
+    WHERE length(normalized_text) >= 8 AND
+    (instr(normalized_text, @text) > 0 OR instr(@text, normalized_text) > 0) LIMIT 1`);
+
+  function normalize(entry, fallbackId) {
+    if (!entry || typeof entry.text !== "string" || !entry.text.trim()) return null;
+    const text = entry.text.trim();
+    const importance = Number(entry.importance);
+    const stamp = Number(entry.createdAt);
+    return { id: String(entry.id || fallbackId || randomUUID()),
+      type: String(entry.type || "fact"), text, normalizedText: text.toLowerCase(),
+      tags: JSON.stringify(Array.isArray(entry.tags) ? entry.tags.map((tag) => String(tag).toLowerCase()).filter(Boolean) : []),
+      importance: Number.isFinite(importance) ? Math.min(5, Math.max(1, importance)) : 2,
+      createdAt: Number.isFinite(stamp) && stamp > 0 ? Math.trunc(stamp) : Date.now(),
+      metadata: JSON.stringify(entry.metadata || {}) };
+  }
+
+  function isDuplicate(text) {
+    const needle = String(text || "").trim().toLowerCase();
+    if (!needle) return true;
+    return Boolean(exactDuplicate.get(needle) || (needle.length >= 8 && nearDuplicate.get({ text: needle })));
+  }
+
+  function compact(config = {}) {
+    const max = Math.max(1, Math.floor(Number(config.maxEntries) || 500));
+    storage.prepare(`DELETE FROM memory_entries WHERE sequence NOT IN
+      (SELECT sequence FROM memory_entries ORDER BY sequence DESC LIMIT ?)`).run(max);
+  }
+
+  function appendBatch(facts, config = {}, metadata = {}) {
+    if (config.enabled === false) return 0;
+    return storage.transaction(() => {
+      let added = 0;
+      for (const fact of facts) {
+        const record = normalize({ ...fact, metadata: { ...fact.metadata, ...metadata } });
+        if (!record || isDuplicate(record.text)) continue;
+        added += insert.run(record).changes;
+      }
+      compact(config);
+      return added;
+    });
+  }
+
+  function retrieve(queryText, config = {}) {
+    if (config.enabled === false) return [];
+    const items = storage.prepare("SELECT * FROM memory_entries ORDER BY sequence DESC LIMIT ?")
+      .all(Math.max(1, Math.floor(Number(config.maxEntries) || 500)))
+      .map((row) => ({ id: row.id, type: row.type, text: row.text, tags: JSON.parse(row.tags_json),
+        importance: row.importance, createdAt: row.created_at, metadata: JSON.parse(row.metadata_json) }));
+    const tokens = tokenize(queryText);
+    const maxInject = Math.max(1, Math.floor(Number(config.maxInject) || 5));
+    if (!tokens.length) {
+      return items.sort((left, right) => right.importance - left.importance || right.createdAt - left.createdAt).slice(0, maxInject);
     }
-    return false;
-  });
+    return items.map((item) => ({ item, score: scoreItem(item, tokens) }))
+      .filter(({ score }) => score > 0.5).sort((left, right) => right.score - left.score)
+      .slice(0, maxInject).map(({ item }) => item);
+  }
+
+  function importLegacy(sourcePath, config, logger) {
+    const result = storage.importJsonl("memory", sourcePath, (entry, id) => {
+      const record = normalize(entry, id);
+      return record ? insert.run(record).changes > 0 : false;
+    });
+    if (!result.missing) compact(config);
+    if (!result.missing && !result.alreadyImported) logger.info(`legacy memory imported=${result.imported} skipped=${result.skipped}`);
+    return result;
+  }
+
+  function clear(legacyPath) {
+    const source = path.resolve(legacyPath);
+    if (fs.existsSync(source)) fs.truncateSync(source, 0);
+    return storage.transaction(() => {
+      const deleted = storage.prepare("DELETE FROM memory_entries").run().changes;
+      // Preserve and add import markers so older files cannot restore cleared facts.
+      storage.prepare(`INSERT INTO legacy_imports
+        (namespace, source_path, imported_at, imported_count, skipped_count)
+        VALUES ('memory', ?, ?, 0, 0) ON CONFLICT(namespace, source_path)
+        DO UPDATE SET imported_at = excluded.imported_at, imported_count = 0, skipped_count = 0`)
+        .run(source, Date.now());
+      return deleted;
+    });
+  }
+
+  return { appendBatch, retrieve, isDuplicate, formatForPrompt, importLegacy, clear };
 }
 
-module.exports = {
-  getDefaults,
-  resolveStorePath,
-  append,
-  loadAll,
-  retrieve,
-  formatForPrompt,
-  tokenize,
-  isDuplicate,
-};
+module.exports = { getDefaults, tokenize, formatForPrompt, createLongTermStore };

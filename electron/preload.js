@@ -10,9 +10,19 @@ contextBridge.exposeInMainWorld("petDesktop", {
   },
   captureScreenshot: () => ipcRenderer.invoke("pet:capture-screenshot"),
   chatNow: () => ipcRenderer.invoke("pet:chat-now"),
-  getDialogueHistory: () => ipcRenderer.invoke("pet:get-dialogue-history"),
   openContextMenu: (pos) => {
     ipcRenderer.send("pet:context-menu", pos || {});
+  },
+  live2dReady: () => ipcRenderer.send("pet:live2d-ready"),
+  onPlayMotion: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on("pet:play-motion", handler);
+    return () => ipcRenderer.removeListener("pet:play-motion", handler);
+  },
+  onPlayExpression: (callback) => {
+    const handler = (_event, expression) => callback(expression);
+    ipcRenderer.on("pet:play-expression", handler);
+    return () => ipcRenderer.removeListener("pet:play-expression", handler);
   },
   onBubble: (callback) => {
     const handler = (_event, payload) => callback(payload);

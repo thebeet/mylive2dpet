@@ -1,59 +1,91 @@
 {
-  "ai": {
-    "endpoint": "https://your-api.example.com/v1",
-    "proxy": "http://127.0.0.1:7890",
-    "model": "gpt-4o",
-    "apiKey": "sk-xxx",
-    "max_tokens": 1024
-  },
   "ui": {
     "windowWidth": 380,
     "windowHeight": 560,
     "alwaysOnTop": true
   },
-  "character": {
-    "cardName": "后辈",
-    "name": "Setsuna",
-    "userIdentity": "后辈",
-    "userTerm": "前辈",
-    "description": "你是{{petName}}，用户的{{userIdentity}}。……",
-    "personality": "温柔清楚。……",
-    "scenario": "你的存在提供「陪伴感」和「节奏感」。……",
-    "rules": "【规则——必须严格遵守】\n1. 只回复1-2句话……",
-    "language": "中文"
-  },
-  "perception": {
+  "decision": {
+    "provider": "ai-conversation",
     "enabled": true,
-    "interval_ms": 5000,
-    "_comment": "截图采集间隔（毫秒），独立于决策间隔；必须大于 0"
-  },
-  "chat": {
     "interval_ms": 10000,
-    "enabled": true,
-    "changeDetect": {
-      "enabled": true,
-      "hashSize": 8,
-      "threshold": 4
-    },
-    "_comment": "决策间隔（毫秒），每次决策完成后等待；0 时空队列最多每秒检查一次；interval_ms<0 时仅点击桌宠/托盘触发"
-  },
-  "memory": {
-    "_comment": "核心短期记忆（非插件）。长期记忆见 plugins[{name:memory}]",
-    "shortTerm": {
-      "enabled": true,
-      "maxTurns": 8,
-      "ttlMs": 1800000,
-      "_comment": "进程内近期独白缓冲，注入 system；不存旧截图"
-    },
-    "summary": {
-      "enabled": true,
-      "everyNTurns": 6,
-      "keepTurnsAfterSummary": 3,
-      "maxTokens": 256,
-      "_comment": "滚动会话摘要，拉长有效关联窗口"
-    }
+    "_comment": "选择已注册的决策插件；每次结束后等待 interval_ms，负数关闭自动决策，保留手动触发。兼容旧 chat.enabled/interval_ms。"
   },
   "plugins": [
+    {
+      "name": "manual-input",
+      "enabled": true,
+      "_comment": "手动对话插件：右键输入窗口、用户文本观察与即时决策请求；默认启用。"
+    },
+    {
+      "name": "storage-sqlite",
+      "enabled": true,
+      "path": "pet.sqlite3",
+      "busyTimeoutMs": 5000
+    },
+    {
+      "name": "dialogue-history",
+      "enabled": true,
+      "storageService": "storage-sqlite.database",
+      "legacyPath": "logs/dialogue-history.jsonl"
+    },
+    {
+      "name": "ai-conversation",
+      "enabled": true,
+      "ai": {
+        "endpoint": "https://your-api.example.com/v1",
+        "proxy": "http://127.0.0.1:7890",
+        "model": "gpt-4o",
+        "apiKey": "sk-xxx",
+        "max_tokens": 1024,
+        "timeoutMs": 30000,
+        "retryBudgetMs": 90000
+      },
+      "character": {
+        "cardName": "后辈",
+        "name": "Setsuna",
+        "userIdentity": "后辈",
+        "userTerm": "前辈",
+        "description": "你是{{petName}}，用户的{{userIdentity}}。……",
+        "personality": "温柔清楚。……",
+        "scenario": "你的存在提供「陪伴感」和「节奏感」。……",
+        "rules": "【规则——必须严格遵守】\n1. 只回复1-2句话……",
+        "language": "中文"
+      },
+      "_comment": "AI 对话插件：模型请求、提示词与结果解析；ai/character 兼容旧根节点配置。"
+    },
+    {
+      "name": "screen-perception",
+      "enabled": true,
+      "interval_ms": 5000,
+      "changeDetect": {
+        "enabled": true,
+        "hashSize": 8,
+        "threshold": 4
+      },
+      "_comment": "视觉感知插件：enabled 控制自动截图，手动截图仍可用；兼容旧 perception.enabled/interval_ms 与 chat.changeDetect。",
+      "observationTtlMs": 60000
+    },
+    {
+      "name": "audio-output-perception",
+      "enabled": false,
+      "source": "default",
+      "speechThresholdDb": -40,
+      "minSpeechMs": 400,
+      "silenceMs": 800,
+      "maxSegmentMs": 15000,
+      "ttsCooldownMs": 600,
+      "_comment": "Linux PipeWire/PulseAudio 输出监视源；source 可填具体 .monitor 名称；默认不保存原始音频。",
+      "asr": {
+        "provider": "whisper-asr-webservice",
+        "endpoint": "http://127.0.0.1:9000",
+        "apiKey": "",
+        "language": "zh",
+        "vadFilter": true,
+        "proxy": "",
+        "timeoutMs": 60000,
+        "_comment": "whisper-asr-webservice 对接 /asr，模型由容器 ASR_MODEL 选择；openai 对接 /audio/transcriptions 并需配置 model。language 留空自动识别。"
+      }
+    },
     {
       "name": "tts",
       "enabled": true,
@@ -77,12 +109,41 @@
     {
       "name": "memory",
       "enabled": true,
-      "_comment": "长期记忆插件：JSONL + 关键词/标签检索（无 embedding）。enabled=false 即关闭",
-      "maxInject": 5,
-      "path": "logs/memory.jsonl",
-      "extractEveryNTurns": 3,
-      "maxTokens": 256,
-      "maxEntries": 500
+      "textService": "ai-conversation.text",
+      "shortTerm": {
+        "enabled": true,
+        "maxTurns": 8,
+        "ttlMs": 1800000,
+        "_comment": "进程内近期独白缓冲，注入 system；不存旧截图"
+      },
+      "summary": {
+        "enabled": true,
+        "everyNTurns": 6,
+        "keepTurnsAfterSummary": 3,
+        "maxTokens": 256,
+        "_comment": "滚动会话摘要，拉长有效关联窗口"
+      },
+      "longTerm": {
+        "maxInject": 5,
+        "extractEveryNTurns": 3,
+        "maxTokens": 256,
+        "maxEntries": 500,
+        "enabled": true,
+        "legacyPath": "logs/memory.jsonl"
+      },
+      "_comment": "统一记忆插件：enabled 控制整个插件；shortTerm/summary/longTerm 可独立关闭。旧根节点 memory 与旧插件平铺长期参数仍兼容。",
+      "storageService": "storage-sqlite.database"
     }
-  ]
+  ],
+  "observations": {
+    "maxPending": 128,
+    "maxBatch": 16,
+    "maxRetries": 2,
+    "perSource": {
+      "screen": 6,
+      "audio-output": 20,
+      "manual-input": 100
+    },
+    "_comment": "用户消息优先；容量不足时拒绝新增用户消息，补充观察淘汰最旧项；有限重试，已接收的用户消息回队时保留。"
+  }
 }

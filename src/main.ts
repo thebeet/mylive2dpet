@@ -129,6 +129,20 @@ async function main() {
     });
   }
 
+  window.petDesktop?.onPlayMotion?.(({ group, index }) => {
+    if (!modelRef || typeof group !== "string" || !group ||
+        !Number.isInteger(index) || index < 0) return;
+    void modelRef.motion(group, index, MotionPriority.NORMAL);
+    console.log(`[Live2D] manual motion: ${group}[${index}]`);
+  });
+
+  window.petDesktop?.onPlayExpression?.((expression) => {
+    if (!modelRef || typeof expression !== "string" || !expression) return;
+    lastAppliedExpression = expression;
+    void modelRef.expression(expression);
+    console.log("[Live2D] manual expression:", expression);
+  });
+
   const status = document.createElement("div");
   status.className = "status";
   status.textContent = "正在加载模型（约 270MB，首次较慢）…";
@@ -241,6 +255,7 @@ async function main() {
     );
 
     status.remove();
+    window.petDesktop?.live2dReady?.();
     requestAnimationFrame(() => {
       window.petDesktop?.forcePaint();
     });

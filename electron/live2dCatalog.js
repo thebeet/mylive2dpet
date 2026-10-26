@@ -24,4 +24,29 @@ function loadExpressionNames(opts = {}) {
   return names.filter((n) => !n.startsWith("_"));
 }
 
-module.exports = { MODEL3_PATH, loadExpressionNames };
+/**
+ * 从 model3.json 读取动作组。索引保持与模型定义一致，供 model.motion(group, index) 使用。
+ * @param {{ includeInternal?: boolean }} [opts]
+ */
+function loadMotionGroups(opts = {}) {
+  const includeInternal = opts.includeInternal === true;
+  const raw = fs.readFileSync(MODEL3_PATH, "utf8");
+  const model = JSON.parse(raw);
+  const motions = model?.FileReferences?.Motions || {};
+
+  return Object.entries(motions)
+    .filter(([group]) => includeInternal || !group.startsWith("_"))
+    .map(([group, definitions]) => ({
+      group,
+      motions: (Array.isArray(definitions) ? definitions : [])
+        .map((motion, index) => ({
+          index,
+          file: typeof motion?.File === "string" ? motion.File : "",
+        }))
+        .filter((motion) => includeInternal ||
+          !path.basename(motion.file).startsWith("_")),
+    }))
+    .filter((entry) => entry.motions.length > 0);
+}
+
+module.exports = { MODEL3_PATH, loadExpressionNames, loadMotionGroups };

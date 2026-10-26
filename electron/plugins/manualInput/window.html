@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>手动对话</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, "Noto Sans SC", "Microsoft YaHei", sans-serif;
+        color: #eef0f6;
+        background: #11131a;
+        font-synthesis: none;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 18px; }
+      header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+      h1 { margin: 0; font-size: 15px; font-weight: 600; }
+      #close { border: 0; color: #a6a9b8; background: transparent; font: inherit; font-size: 20px; cursor: pointer; }
+      textarea {
+        display: block;
+        width: 100%;
+        height: 136px;
+        resize: none;
+        border: 1px solid #ffffff22;
+        border-radius: 10px;
+        outline: none;
+        padding: 11px 12px;
+        color: #eef0f6;
+        background: #ffffff08;
+        font: inherit;
+        line-height: 1.5;
+      }
+      textarea:focus { border-color: #a889edaa; }
+      footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
+      #status { color: #ff9eae; font-size: 12px; }
+      #send { border: 0; border-radius: 8px; padding: 8px 15px; color: white; background: #7654c9; font: inherit; cursor: pointer; }
+      #send:disabled { opacity: .55; cursor: default; }
+      .hint { color: #8d91a2; font-size: 11px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>和桌宠聊点什么</h1>
+      <button id="close" type="button" aria-label="关闭">×</button>
+    </header>
+    <textarea id="message" maxlength="4000" autofocus placeholder="输入消息…（Ctrl+Enter 发送）"></textarea>
+    <footer>
+      <span id="status" role="status"></span>
+      <span class="hint">最多 4000 字</span>
+      <button id="send" type="button">发送</button>
+    </footer>
+    <script>
+      const input = document.getElementById("message");
+      const send = document.getElementById("send");
+      const status = document.getElementById("status");
+
+      async function close() {
+        try {
+          await window.manualChat.close();
+        } catch (error) {
+          status.textContent = error.message || "关闭失败，请重试";
+        }
+      }
+
+      async function submit() {
+        const text = input.value.trim();
+        if (!text || send.disabled) return;
+        send.disabled = true;
+        status.textContent = "正在发送…";
+        try {
+          await window.manualChat.submit(text);
+          await close();
+        } catch (error) {
+          status.textContent = error.message || "发送失败，请重试";
+          send.disabled = false;
+          input.focus();
+        }
+      }
+
+      send.addEventListener("click", submit);
+      document.getElementById("close").addEventListener("click", () => void close());
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault();
+          void submit();
+        } else if (event.key === "Escape") {
+          void close();
+        }
+      });
+      window.addEventListener("DOMContentLoaded", () => input.focus());
+    </script>
+  </body>
+</html>

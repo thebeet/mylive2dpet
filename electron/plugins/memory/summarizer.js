@@ -2,12 +2,6 @@
  * Rolling session summary — compresses older short-term turns into one paragraph.
  */
 
-/** @type {string} */
-let summary = "";
-
-/** @type {number} */
-let turnsSinceSummary = 0;
-
 function getDefaults() {
   return {
     enabled: true,
@@ -17,43 +11,18 @@ function getDefaults() {
   };
 }
 
-function get() {
-  return summary;
-}
-
-function set(text) {
-  summary = String(text || "").trim();
-}
-
-function clear() {
-  summary = "";
-  turnsSinceSummary = 0;
-}
-
-function bumpTurnCount() {
-  turnsSinceSummary += 1;
-  return turnsSinceSummary;
-}
-
-function resetTurnCount() {
-  turnsSinceSummary = 0;
-}
-
-function getTurnCount() {
-  return turnsSinceSummary;
-}
-
 /**
  * @param {object} cfg
+ * @param {number} pendingTurns
  * @param {number} shortTermLen
  */
-function shouldSummarize(cfg, shortTermLen) {
+function shouldSummarize(cfg, pendingTurns, shortTermLen) {
   const merged = { ...getDefaults(), ...cfg };
   if (merged.enabled === false) return false;
   const every = Math.max(2, Number(merged.everyNTurns) || 6);
-  if (turnsSinceSummary >= every) return true;
+  if (pendingTurns >= every) return true;
   // Buffer nearly full — fold early so we don't lose context on prune.
-  if (shortTermLen >= every + (Number(merged.keepTurnsAfterSummary) || 3)) {
+  if (shortTermLen >= every + Number(merged.keepTurnsAfterSummary)) {
     return true;
   }
   return false;
@@ -78,7 +47,8 @@ async function summarizeWithLlm(args) {
         "你是桌面宠物的记忆整理助手。把近期独白压成简洁会话摘要，供后续对话保持连贯。" +
         "只输出摘要正文，不要标题、不要列表符号、不要 JSON。2～4 句中文。" +
         "保留：用户在做什么、宠物提过的具体事实/偏好、未完结的话题线索。" +
-        "丢掉：纯寒暄、重复吐槽、过时且已被新内容取代的画面细节。",
+        "丢掉：纯寒暄、重复吐槽、过时且已被新内容取代的画面细节。" +
+        "设备音频来自外部应用播放，不代表用户本人说的话；摘要必须保留这个来源，不得据此推断用户身份或偏好。",
     },
     {
       role: "user",
@@ -101,14 +71,15 @@ async function summarizeWithLlm(args) {
     .replace(/^["']|["']$/g, "");
 }
 
-module.exports = {
-  getDefaults,
-  get,
-  set,
-  clear,
-  bumpTurnCount,
-  resetTurnCount,
-  getTurnCount,
-  shouldSummarize,
-  summarizeWithLlm,
-};
+function createSummarizer() {
+  let summary = "";
+  return {
+    get: () => summary,
+    set: (text) => { summary = String(text || "").trim(); },
+    clear: () => { summary = ""; },
+    shouldSummarize,
+    summarizeWithLlm,
+  };
+}
+
+module.exports = { getDefaults, createSummarizer };

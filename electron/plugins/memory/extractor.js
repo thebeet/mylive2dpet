@@ -9,31 +9,15 @@ function getDefaults() {
   };
 }
 
-/** @type {number} */
-let turnsSinceExtract = 0;
-
-function bumpTurnCount() {
-  turnsSinceExtract += 1;
-  return turnsSinceExtract;
-}
-
-function resetTurnCount() {
-  turnsSinceExtract = 0;
-}
-
-function getTurnCount() {
-  return turnsSinceExtract;
-}
-
 /**
  * @param {object} cfg
  */
-function shouldExtract(cfg = {}) {
+function shouldExtract(cfg = {}, pendingTurns = 0) {
   const every = Math.max(
     1,
     Number(cfg.extractEveryNTurns) || getDefaults().extractEveryNTurns,
   );
-  return turnsSinceExtract >= every;
+  return pendingTurns >= every;
 }
 
 /**
@@ -101,7 +85,8 @@ async function extractWithLlm(args) {
         "只输出 JSON 数组，不要其它文字。每项：" +
         '{"type":"fact|preference|event","text":"简洁中文事实","tags":["关键词"],"importance":1-5}。' +
         "规则：只记跨会话仍有用的偏好、习惯、身份、进行中的事；" +
-        "不要记一次性吐槽、纯画面描写、不确定猜测；最多 5 条；无则 []。",
+        "不要记一次性吐槽、纯画面描写、不确定猜测；" +
+        "设备音频是外部应用播放的内容，禁止把其中的第一人称、身份或偏好归到用户身上；最多 5 条；无则 []。",
     },
     {
       role: "user",
@@ -118,9 +103,6 @@ async function extractWithLlm(args) {
 
 module.exports = {
   getDefaults,
-  bumpTurnCount,
-  resetTurnCount,
-  getTurnCount,
   shouldExtract,
   parseFactsJson,
   extractWithLlm,
