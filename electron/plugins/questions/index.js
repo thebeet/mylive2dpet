@@ -2,21 +2,31 @@ const path = require("path");
 const EVENTS = require("../../architecture/events");
 const { getOptions } = require("./options");
 
-function createQuestionsPlugin(context, { now = Date.now, setTimer = setInterval, clearTimer = clearInterval } = {}) {
+function createQuestionsPlugin(context, { now = Date.now, setTimer = setInterval, clearTimer = clearInterval,
+  setExpiryTimer = setTimeout, clearExpiryTimer = clearTimeout } = {}) {
   let running = true, disposed = false, win = null, current = null, timer = null, expiry = null;
+  let engaged = false;
   let pausedUntil = 0;
   const decisions = new Set(), speech = new Set();
   const options = () => getOptions(context.config.get());
   const memory = () => {
     const service = context.services.get("memory.work");
-    if (!service) throw new Error("工作记忆服务不可用");
+    if (!service) throw new Error("人物记忆服务不可用");
     return service;
   };
   const available = () => running && !disposed && options().enabled;
   const pauseUntil = () => Math.max(pausedUntil, memory().attention().questionsPausedUntil || 0);
-  function close() {
-    if (expiry) clearTimeout(expiry);
+  function clearExpiry() {
+    if (expiry !== null) clearExpiryTimer(expiry);
     expiry = null;
+  }
+  function engage() {
+    engaged = true;
+    clearExpiry();
+  }
+  function close() {
+    clearExpiry();
+    engaged = false;
     const old = win;
     win = current = null;
     if (old && !old.isDestroyed()) old.destroy();
@@ -39,7 +49,7 @@ function createQuestionsPlugin(context, { now = Date.now, setTimer = setInterval
   function show({ manual = false } = {}) {
     if (!available()) return false;
     if (win && !win.isDestroyed()) {
-      if (manual) { win.show(); win.focus(); }
+      if (manual) { engage(); win.show(); win.focus(); }
       return true;
     }
     if (!manual && !canAsk()) return false;
@@ -57,6 +67,8 @@ function createQuestionsPlugin(context, { now = Date.now, setTimer = setInterval
       webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: true } });
     win = created;
     current = question;
+    engaged = manual;
+    created.on("focus", () => { if (win === created) engage(); });
     created.setPosition(Math.max(area.x + 16, Math.min(bounds?.x || area.x + area.width - width - 16, area.x + area.width - width - 16)),
       Math.max(area.y + 16, Math.min((bounds?.y || area.y + area.height) - height - 12, area.y + area.height - height - 16)));
     created.once("ready-to-show", () => {
@@ -65,8 +77,14 @@ function createQuestionsPlugin(context, { now = Date.now, setTimer = setInterval
         if (!manual && !canAsk()) { close(); return; }
         memory().markShown(question.id);
         if (manual) { created.show(); created.focus(); } else created.showInactive();
-        expiry = setTimeout(() => dismiss("defer"), options().timeoutMs);
-        expiry.unref?.();
+        // Only an untouched automatic popup expires. Once answering starts,
+        // keep the window and draft until the user explicitly handles it.
+        if (!engaged) {
+          expiry = setExpiryTimer(() => {
+            if (win === created && !engaged) dismiss("defer");
+          }, options().timeoutMs);
+          expiry.unref?.();
+        }
         context.menu?.refresh();
       } catch (error) { context.logger.warn("question display failed:", error); close(); }
     });
@@ -83,6 +101,7 @@ function createQuestionsPlugin(context, { now = Date.now, setTimer = setInterval
   }
   const releases = [
     context.ipc.handle("current", (event) => { requireSender(event); return current; }),
+    context.ipc.handle("activity", (event) => { requireSender(event); engage(); }),
     context.ipc.handle("answer", (event, input) => {
       requireSender(event);
       if (!input || typeof input !== "object" || (input.text != null && (typeof input.text !== "string" || input.text.length > 600))) throw new Error("回答内容无效或过长");
@@ -98,21 +117,17 @@ function createQuestionsPlugin(context, { now = Date.now, setTimer = setInterval
       }
       context.menu?.refresh();
     }),
-    context.bus.subscribe(EVENTS.DECISION_STARTED, ({ id }) => { decisions.add(id); if (current) dismiss(); }),
+    context.bus.subscribe(EVENTS.DECISION_STARTED, ({ id }) => { decisions.add(id); }),
     context.bus.subscribe(EVENTS.DECISION_COMPLETED, ({ id }) => { decisions.delete(id); }),
     context.bus.subscribe(EVENTS.PIPELINE_FAILED, (event) => { if (event.stage === "decision") decisions.delete(event.id); }),
     context.bus.subscribe(EVENTS.SPEECH_OUTPUT_STATE, (event) => {
-      if (event.state === "start") { speech.add(event.playbackId); if (current) dismiss(); }
+      if (event.state === "start") speech.add(event.playbackId);
       else speech.delete(event.playbackId);
-    }),
-    context.bus.subscribe(EVENTS.PERCEPTION_OBSERVATION_QUEUED, ({ observation }) => {
-      if ((observation.source === "audio-output" || observation.role === "user") && current) dismiss();
     }),
   ];
   const refresh = () => {
     try {
-      // Typing into the popup resets system idle time; keep the question open.
-      // Actual incoming messages, speech and decisions dismiss it via events.
+      // Busy/idle conditions gate new popups, never an existing answer.
       if (current) return;
       show();
     } catch (error) { if (available()) context.logger.warn("question scheduling deferred:", error.message); }

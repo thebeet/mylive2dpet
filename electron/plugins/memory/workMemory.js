@@ -6,10 +6,10 @@ function createWorkMemory(context, { options, now = Date.now, isAvailable }) {
   let store = null;
   const available = () => isAvailable() && options().enabled && options().work.enabled;
   function repository() {
-    if (!options().work.enabled) throw new Error("工作记忆已关闭");
+    if (!options().work.enabled) throw new Error("人物记忆已关闭");
     if (!store) {
       const storage = context.services.get(options().storageService);
-      if (!storage) throw new Error("工作记忆存储不可用");
+      if (!storage) throw new Error("人物记忆存储不可用");
       store = createWorkStore(storage, { now });
     }
     return store;
@@ -46,16 +46,19 @@ function createWorkMemory(context, { options, now = Date.now, isAvailable }) {
     const evidence = repository().pending(options().work.batchSize);
     return evidence.length > 0 && (evidence.length >= options().work.extractEveryNObservations || now() - evidence[0].capturedAt >= options().work.flushAfterMs);
   }
-  async function maintain({ callChat, valid }) {
+  async function maintain({ callChat, valid, applyMemory }) {
     if (!due()) return;
     const repo = repository(), config = options().work;
     const evidence = repo.pending(config.batchSize);
     const result = await extractWork({ evidence, profiles: repo.profiles(), callChat, maxTokens: config.maxTokens });
     if (!valid() || !available()) return;
-    repo.applyExtraction(result, evidence, config);
+    const allowed = new Set(evidence.map((e) => e.id));
+    if ((result.facts || []).some((fact) => !Array.isArray(fact.evidenceIds) || !fact.evidenceIds.length || fact.evidenceIds.some((id) => !allowed.has(id)))) throw new Error("长期人物记忆缺少本批来源证据");
+    repo.applyExtraction(result, evidence, config, (memory) => applyMemory?.(memory, evidence));
     await context.bus.notify(EVENTS.WORK_MEMORY_UPDATED, {});
+    return result;
   }
-  const requireAvailable = () => { if (!available()) throw new Error("工作记忆已停止或关闭"); return repository(); };
+  const requireAvailable = () => { if (!available()) throw new Error("人物记忆已停止或关闭"); return repository(); };
   const api = {
     snapshot: () => requireAvailable().snapshot(),
     nextQuestion: (config) => requireAvailable().nextQuestion(config),
@@ -63,6 +66,16 @@ function createWorkMemory(context, { options, now = Date.now, isAvailable }) {
     markShown: (id) => requireAvailable().markShown(id),
     answer: (id, answer, config) => {
       const result = requireAvailable().answer(id, answer, config);
+      void context.bus.notify(EVENTS.WORK_MEMORY_UPDATED, {});
+      return result;
+    },
+    deleteQuestion: (id) => {
+      const result = requireAvailable().deleteQuestion(id);
+      void context.bus.notify(EVENTS.WORK_MEMORY_UPDATED, {});
+      return result;
+    },
+    deleteAnswer: (questionId, answerId) => {
+      const result = requireAvailable().deleteAnswer(questionId, answerId);
       void context.bus.notify(EVENTS.WORK_MEMORY_UPDATED, {});
       return result;
     },
@@ -81,10 +94,11 @@ function createWorkMemory(context, { options, now = Date.now, isAvailable }) {
     },
   };
   return { api, ingestObservation, ingestDecision, due, maintain,
+    organizationSnapshot: () => requireAvailable().profiles(),
+    organize: (plan, profiles) => requireAvailable().organize(plan, profiles),
+    migrateWorkDetails: (longTerm) => requireAvailable().migrateWorkDetails(longTerm),
     context: (query) => available() ? repository().context(query, options().work) : "",
     snapshot: () => options().work.enabled ? { enabled: true, ...repository().snapshot() } : { enabled: false, profiles: [], questions: [], recentEvidence: [], pending: 0 },
-    restoreSummary: () => options().work.enabled ? repository().getState("sessionSummary", "") : "",
-    saveSummary: (value) => { if (available()) repository().setState("sessionSummary", value); },
     clear: () => {
       if (store) store.clear();
       else {

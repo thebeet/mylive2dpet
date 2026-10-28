@@ -49,21 +49,19 @@
       </header>
       <nav class="tabs" role="tablist" aria-label="记忆分类">
         <button id="recent-tab" type="button" role="tab" aria-selected="true" aria-controls="recent-panel">近期对话</button>
-        <button id="summary-tab" type="button" role="tab" aria-selected="false" aria-controls="summary-panel" tabindex="-1">会话摘要</button>
         <button id="long-tab" type="button" role="tab" aria-selected="false" aria-controls="long-panel" tabindex="-1">长期记忆</button>
-        <button id="work-tab" type="button" role="tab" aria-selected="false" aria-controls="work-panel" tabindex="-1">工作画像</button>
+        <button id="work-tab" type="button" role="tab" aria-selected="false" aria-controls="work-panel" tabindex="-1">人物画像</button>
         <button id="question-history-tab" type="button" role="tab" aria-selected="false" aria-controls="question-history-panel" tabindex="-1">提问记录</button>
       </nav>
     </div>
     <main>
       <p id="error" class="error" role="alert" hidden></p>
       <section id="recent-panel" role="tabpanel" aria-labelledby="recent-tab" tabindex="0"><h2>近期对话</h2><p id="recent-info" class="muted"></p><div id="recent" class="content"></div></section>
-      <section id="summary-panel" role="tabpanel" aria-labelledby="summary-tab" tabindex="0" hidden><h2>会话摘要</h2><p id="summary-info" class="muted"></p><div id="summary" class="content"></div></section>
       <section id="long-panel" role="tabpanel" aria-labelledby="long-tab" tabindex="0" hidden><h2>长期记忆</h2><p id="long-info" class="muted"></p><div id="long" class="content"></div></section>
-      <section id="work-panel" role="tabpanel" aria-labelledby="work-tab" tabindex="0" hidden><h2>人物与项目</h2><p id="work-info" class="muted"></p><div id="profiles" class="content"></div><h2 style="margin-top:24px">待提问</h2><div id="questions" class="content"></div><h2 style="margin-top:24px">最近观察</h2><div id="evidence" class="content"></div></section>
+      <section id="work-panel" role="tabpanel" aria-labelledby="work-tab" tabindex="0" hidden><h2>人物画像</h2><p id="work-info" class="muted"></p><div id="profiles" class="content"></div></section>
       <section id="question-history-panel" role="tabpanel" aria-labelledby="question-history-tab" tabindex="0" hidden>
-        <h2>问过的问题</h2><p id="question-history-info" class="muted"></p>
-        <div class="history-filters"><input id="history-search" type="search" aria-label="搜索提问记录" placeholder="搜索问题、人物、项目或回答…" /><select id="history-status" aria-label="筛选提问状态"><option value="all">全部状态</option><option value="answered">已回答</option><option value="pending">待继续询问</option><option value="dismissed">已停止询问</option></select></div>
+        <h2>待提问与提问记录</h2><p id="question-history-info" class="muted"></p>
+        <div class="history-filters"><input id="history-search" type="search" aria-label="搜索提问记录" placeholder="搜索问题、人物、范围或回答…" /><select id="history-status" aria-label="筛选提问状态"><option value="all">全部状态</option><option value="pending">待提问</option><option value="answered">已回答</option><option value="dismissed">已停止询问</option></select></div>
         <div id="question-history" class="content"></div>
       </section>
     </main>

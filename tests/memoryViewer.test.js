@@ -5,6 +5,8 @@ const { MessageBus } = require("../electron/architecture/messageBus");
 const EVENTS = require("../electron/architecture/events");
 const { createMemoryPlugin } = require("../electron/plugins/memory");
 const { listEntries } = require("../electron/plugins/memory/longTerm");
+const { createWorkStore } = require("../electron/plugins/memory/workStore");
+const { workStorage } = require("./helpers/workStorage");
 
 function harness({ storage, durable, showMessageBox } = {}) {
   const bus = new MessageBus();
@@ -12,7 +14,7 @@ function harness({ storage, durable, showMessageBox } = {}) {
   const windows = [];
   let menu;
   const config = { plugins: [{ name: "memory", enabled: true,
-    shortTerm: { maxTurns: 8 }, summary: { enabled: false }, longTerm: { enabled: false, maxInject: 1 },
+    shortTerm: { maxTurns: 8 }, longTerm: { enabled: false, maxInject: 1 },
   }] };
   const plugin = createMemoryPlugin({
     bus, config: { get: () => config }, logger: { info() {}, warn() {}, error() {} },
@@ -107,7 +109,7 @@ test("long-term inspection handles missing tables and missing storage without hi
   t.after(() => h.plugin.dispose());
   const snapshot = h.plugin.getSnapshot();
   assert.deepEqual(snapshot.shortTerm.turns, []);
-  assert.equal(snapshot.summary.text, "");
+  assert.equal(Object.hasOwn(snapshot, "summary"), false);
   assert.equal(snapshot.longTerm.error, "长期记忆存储不可用");
 });
 
@@ -179,4 +181,30 @@ test("stopping cancels the dialog and a late confirmation cannot clear restarted
   await pending;
   assert.equal(deleted, 0);
   assert.equal(h.plugin.getState().turns[0].reply, "恢复后的新记忆");
+});
+
+test("history deletion IPC validates the viewer and preserves the confirmed profile", async (t) => {
+  const { db, storage } = workStorage();
+  const h = harness({ storage });
+  h.config.plugins[0].work = { enabled: true };
+  t.after(async () => { await h.plugin.dispose(); db.close(); });
+  const repo = createWorkStore(storage);
+  repo.applyExtraction({ entities: [], claims: [], questions: [{ subject: { kind: "user", name: "用户" },
+    field: "communication", scope: "", prompt: "喜欢怎么解释？", options: [{ label: "结论", value: "先给结论" }, { label: "过程", value: "完整过程" }] }] }, []);
+  const question = repo.nextQuestion();
+  repo.markShown(question.id);
+  repo.answer(question.id, { action: "answer", optionIndex: 0 });
+  const profile = repo.profiles()[0];
+  const answerId = repo.snapshot().questionHistory[0].records.find((r) => r.action === "answer").id;
+  h.view(); const win = h.windows[0]; win.emit("ready-to-show");
+  const removeAnswer = h.handlers.get("delete-answer"), removeQuestion = h.handlers.get("delete-question");
+  assert.throws(() => removeAnswer({ sender: {} }, { questionId: question.id, answerId }), /来源无效/);
+  assert.throws(() => removeQuestion({ sender: win.webContents }, null), /ID 无效/);
+  removeAnswer({ sender: win.webContents }, { questionId: question.id, answerId });
+  assert.deepEqual(repo.profiles()[0], profile);
+  removeQuestion({ sender: win.webContents }, question.id);
+  assert.deepEqual(repo.snapshot().questionHistory, []);
+  assert.deepEqual(repo.profiles()[0], profile);
+  await h.plugin.stop();
+  assert.throws(() => removeQuestion({ sender: win.webContents }, question.id), /已关闭/);
 });

@@ -1,14 +1,17 @@
 const { randomUUID } = require("crypto");
 const { tokenize } = require("./longTerm");
+const { profilePriority } = require("./profilePriority");
+const { validateProfilePlan } = require("./profileOrganizer");
+const { isPersonProfile } = require("./personProfile");
 
 const KINDS = new Set(["user", "person", "project", "team"]);
-const FIELDS = new Set(["identity", "organization_role", "project_role", "responsibility", "team", "collaboration", "task", "preference", "communication"]);
+const FIELDS = new Set(["identity", "organization_role", "project_role", "responsibility", "team", "collaboration", "relationship", "task", "preference", "communication"]);
 const clean = (value, max = 300) => typeof value === "string" ? value.trim().slice(0, max) : "";
 const keyFor = ({ kind, name }) => kind === "user" ? "user:self" : `${kind}:${name.toLowerCase()}`;
 function subjectOf(input) {
-  if (!input || !KINDS.has(input.kind)) throw new Error("工作记忆人物或项目类型无效");
+  if (!input || !KINDS.has(input.kind)) throw new Error("人物记忆人物或项目类型无效");
   const name = input.kind === "user" ? "用户" : clean(input.name, 80);
-  if (!name) throw new Error("工作记忆名称不能为空");
+  if (!name) throw new Error("人物记忆名称不能为空");
   return { kind: input.kind, name };
 }
 function decodeQuestion(row) {
@@ -51,7 +54,12 @@ function createWorkStore(storage, { now = Date.now } = {}) {
       outcome TEXT NOT NULL, created_at INTEGER NOT NULL
     );
     CREATE TABLE work_memory_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-  `)]);
+  `), (db) => db.exec(`
+    CREATE TABLE work_profile_organization_history (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT, organized_at INTEGER NOT NULL,
+      reason TEXT NOT NULL, originals_json TEXT NOT NULL, replacement_id TEXT
+    );
+  `), (db) => db.exec("DELETE FROM work_memory_state WHERE key = 'sessionSummary'")]);
 
   function getState(key, fallback = null) {
     const row = storage.prepare("SELECT value FROM work_memory_state WHERE key = ?").get(key);
@@ -96,9 +104,9 @@ function createWorkStore(storage, { now = Date.now } = {}) {
   }
   function addClaim(input, { userAnswer = false, evidenceIds = [] } = {}) {
     const subject = subjectOf(input.subject);
-    if (!FIELDS.has(input.field)) throw new Error("工作记忆字段无效");
+    if (!FIELDS.has(input.field)) throw new Error("人物记忆字段无效");
     const scope = clean(input.scope, 120), value = clean(input.value, 600);
-    if (!value) throw new Error("工作记忆内容不能为空");
+    if (!value) throw new Error("人物记忆内容不能为空");
     const basis = userAnswer ? "user_answer" : input.basis === "observation" ? "observation" : "inference";
     const confidence = userAnswer ? 1 : Math.max(0.05, Math.min(basis === "inference" ? 0.85 : 0.95, Number(input.confidence) || 0.5));
     const entityId = upsertEntity(subject);
@@ -136,16 +144,17 @@ function createWorkStore(storage, { now = Date.now } = {}) {
       Math.max(0, Math.min(10, Number(input.priority) || 5)), now(), now());
     return id;
   }
-  function applyExtraction(result, evidence, config = {}) {
+  function applyExtraction(result, evidence, config = {}, applyMemory = () => {}) {
     const allowed = new Set(evidence.map((e) => e.id));
     return storage.transaction(() => {
       for (const entity of result.entities) upsertEntity(entity);
       for (const claim of result.claims) {
         const ids = (claim.evidenceIds || []).filter((id) => allowed.has(id));
-        if (!ids.length) throw new Error("工作记忆缺少本批来源证据");
+        if (!ids.length) throw new Error("人物记忆缺少本批来源证据");
         addClaim(claim, { evidenceIds: ids });
       }
       for (const question of result.questions) enqueueQuestion(question, config.maxQuestions);
+      applyMemory(result);
       for (const e of evidence) storage.prepare("UPDATE work_evidence SET processed = 1 WHERE id = ?").run(e.id);
       storage.prepare(`DELETE FROM work_evidence WHERE processed = 1 AND sequence NOT IN
         (SELECT sequence FROM work_evidence ORDER BY sequence DESC LIMIT ?) AND NOT EXISTS
@@ -161,6 +170,59 @@ function createWorkStore(storage, { now = Date.now } = {}) {
       evidenceIds: JSON.parse(r.evidence_ids_json), status: r.status, updatedAt: r.updated_at }));
   }
   function questions() { return storage.prepare("SELECT * FROM work_questions ORDER BY priority DESC, created_at").all().map(decodeQuestion); }
+  function organize(input, snapshot) {
+    const plan = validateProfilePlan(input, snapshot);
+    return storage.transaction(() => {
+      if (JSON.stringify(profiles()) !== JSON.stringify(snapshot)) throw new Error("人物画像已变化，请重新整理");
+      const known = new Map(snapshot.map((p) => [p.id, p]));
+      const stamp = now();
+      const record = storage.prepare(`INSERT INTO work_profile_organization_history
+        (organized_at, reason, originals_json, replacement_id) VALUES (?, ?, ?, ?)`);
+      const mergedIds = [];
+      for (const item of plan.merge) {
+        const sources = item.sourceIds.map((id) => known.get(id));
+        const first = sources[0];
+        const basis = sources.some((p) => p.basis === "user_answer") ? "user_answer"
+          : sources.some((p) => p.basis === "observation") ? "observation" : "inference";
+        const confidence = Math.max(...sources.filter((p) => p.basis === basis).map((p) => p.confidence));
+        const evidenceIds = [...new Set(sources.flatMap((p) => p.evidenceIds))];
+        const id = randomUUID();
+        for (const source of sources) storage.prepare("UPDATE work_claims SET status = 'superseded' WHERE id = ?").run(source.id);
+        storage.prepare(`INSERT INTO work_claims(id, entity_id, field, scope, value, basis, confidence, evidence_ids_json, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, first.entityId, first.field, item.scope, item.value, basis,
+          confidence, JSON.stringify(evidenceIds), Math.max(...sources.map((p) => p.updatedAt)));
+        record.run(stamp, item.reason, JSON.stringify(sources), id);
+        mergedIds.push(id);
+      }
+      for (const item of plan.archive) {
+        storage.prepare("UPDATE work_claims SET status = 'archived' WHERE id = ?").run(item.id);
+        record.run(stamp, item.reason, JSON.stringify([known.get(item.id)]), null);
+      }
+      return { before: snapshot.length, after: profiles().length, merged: mergedIds.length, archived: plan.archive.length };
+    });
+  }
+  function organizationHistory() {
+    return storage.prepare("SELECT * FROM work_profile_organization_history ORDER BY sequence DESC").all()
+      .map((r) => ({ organizedAt: r.organized_at, reason: r.reason,
+        originals: JSON.parse(r.originals_json), replacementId: r.replacement_id }));
+  }
+  function migrateWorkDetails(longTerm) {
+    const details = profiles().filter((p) => !isPersonProfile(p));
+    if (!details.length) return { moved: 0 };
+    return storage.transaction(() => {
+      longTerm.importProfiles(details);
+      const record = storage.prepare(`INSERT INTO work_profile_organization_history
+        (organized_at, reason, originals_json, replacement_id) VALUES (?, ?, ?, NULL)`);
+      for (const p of details) {
+        storage.prepare("UPDATE work_claims SET status = 'archived' WHERE id = ?").run(p.id);
+        record.run(now(), "具体工作内容迁入长期记忆", JSON.stringify([p]));
+      }
+      for (const q of questions().filter((q) => q.status === "pending" && !isPersonProfile(q))) {
+        storage.prepare("UPDATE work_questions SET status = 'dismissed' WHERE id = ?").run(q.id);
+      }
+      return { moved: details.length };
+    });
+  }
   function nextQuestion({ manual = false, cooldownMs = 0, dailyLimit = 0, maxAgeMs = 604800000 } = {}) {
     const t = now();
     if (!manual) {
@@ -170,7 +232,8 @@ function createWorkStore(storage, { now = Date.now } = {}) {
       const count = getState("questionDaily", { day: start.getTime(), count: 0 });
       if (dailyLimit > 0 && count.day === start.getTime() && count.count >= dailyLimit) return null;
     }
-    return questions().find((q) => q.status === "pending" && q.nextAt <= t && (manual || t - q.createdAt <= maxAgeMs)) || null;
+    return questions().filter((q) => isPersonProfile(q) && q.status === "pending" && q.nextAt <= t && (manual || t - q.createdAt <= maxAgeMs))
+      .sort((a, b) => profilePriority(a) - profilePriority(b))[0] || null;
   }
   function markShown(id) {
     const q = getQuestion(id);
@@ -201,10 +264,29 @@ function createWorkStore(storage, { now = Date.now } = {}) {
       .filter((q) => q.lastShownAt != null || q.records.length)
       .sort((a, b) => Math.max(b.lastShownAt || 0, b.records.at(-1)?.createdAt || 0) - Math.max(a.lastShownAt || 0, a.records.at(-1)?.createdAt || 0));
   }
+  function deleteQuestion(id) {
+    getQuestion(id);
+    return storage.transaction(() => {
+      storage.prepare("DELETE FROM work_question_answers WHERE question_id = ?").run(id);
+      storage.prepare("DELETE FROM work_questions WHERE id = ?").run(id);
+      return { ok: true };
+    });
+  }
+  function deleteAnswer(questionId, answerId) {
+    getQuestion(questionId);
+    const row = storage.prepare("SELECT id FROM work_question_answers WHERE id = ? AND question_id = ? AND outcome = 'answer'").get(answerId, questionId);
+    if (!row) throw new Error("答案不存在或已删除");
+    storage.prepare("DELETE FROM work_question_answers WHERE id = ? AND question_id = ?").run(answerId, questionId);
+    return { ok: true };
+  }
   function answer(id, { action, optionIndex, text }, { deferMs = 1800000, maxSkips = 3 } = {}) {
     const q = getQuestion(id);
     if (q.status !== "pending") throw new Error("问题已经处理");
-    if (!["answer", "unknown", "skip", "defer"].includes(action)) throw new Error("无效的回答操作");
+    if (!["answer", "unknown", "skip", "defer", "remove"].includes(action)) throw new Error("无效的回答操作");
+    if (action === "remove") {
+      // Removal is not an answer, skip or deferral. Delete its history too.
+      return { ...deleteQuestion(id), action };
+    }
     const custom = clean(text, 600);
     const selected = Number.isInteger(optionIndex) ? q.options[optionIndex] : null;
     const value = action === "answer" ? custom || selected?.value : "";
@@ -227,7 +309,7 @@ function createWorkStore(storage, { now = Date.now } = {}) {
   }
   function context(query, { maxClaims = 20, maxContextChars = 8000 } = {}) {
     const tokens = tokenize(query);
-    const ranked = profiles().map((p) => {
+    const ranked = profiles().filter(isPersonProfile).map((p) => {
       const body = `${p.subject.name} ${p.aliases.join(" ")} ${p.scope} ${p.value}`.toLowerCase();
       const matches = tokens.filter((t) => body.includes(t)).length;
       return { p, score: matches * 3 + p.confidence + (p.basis === "user_answer" ? 1 : 0), matches };
@@ -256,17 +338,17 @@ function createWorkStore(storage, { now = Date.now } = {}) {
       return row ? { source: row.source, capturedAt: row.captured_at, text: row.text.slice(0, 400) } : null;
     };
     return { profiles: profiles().map((p) => ({ ...p, evidence: p.evidenceIds.slice(-3).map(evidenceFor).filter(Boolean) })),
-      questions: questions(), questionHistory: questionHistory(), pending: storage.prepare("SELECT COUNT(*) AS count FROM work_evidence WHERE processed = 0").get().count,
+      questions: questions(), questionHistory: questionHistory(), organizationHistory: organizationHistory(), pending: storage.prepare("SELECT COUNT(*) AS count FROM work_evidence WHERE processed = 0").get().count,
       recentEvidence: storage.prepare("SELECT * FROM work_evidence ORDER BY sequence DESC LIMIT 30").all()
         .map((r) => ({ id: r.id, source: r.source, capturedAt: r.captured_at, text: r.text, metadata: JSON.parse(r.metadata_json), processed: Boolean(r.processed) })) };
   }
   function clear() {
     storage.transaction(() => {
-      for (const table of ["work_claims", "work_entities", "work_questions", "work_question_answers", "work_evidence", "work_memory_state"]) storage.exec(`DELETE FROM ${table}`);
+      for (const table of ["work_profile_organization_history", "work_claims", "work_entities", "work_questions", "work_question_answers", "work_evidence", "work_memory_state"]) storage.exec(`DELETE FROM ${table}`);
     });
   }
   return { addEvidence, pending, applyExtraction, profiles, context, snapshot, clear,
-    nextQuestion, getQuestion, markShown, answer, correctProfile, getState, setState };
+    nextQuestion, getQuestion, markShown, answer, correctProfile, getState, setState, organize, migrateWorkDetails, deleteQuestion, deleteAnswer };
 }
 
 module.exports = { createWorkStore, subjectOf, FIELDS };

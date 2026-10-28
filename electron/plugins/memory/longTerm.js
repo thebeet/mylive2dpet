@@ -1,10 +1,12 @@
 const { randomUUID } = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const { validatePlan } = require("./organizer");
+const { validateUpdatePlan } = require("./updater");
 
 function getDefaults() {
   return { enabled: true, legacyPath: "logs/memory.jsonl", maxInject: 5,
-    extractEveryNTurns: 3, maxTokens: 256, maxEntries: 500 };
+    extractEveryNTurns: 20, maxTokens: 16384, maxEntries: 500 };
 }
 
 function tokenize(text) {
@@ -70,6 +72,11 @@ function createLongTermStore(storage) {
       created_at INTEGER NOT NULL, metadata_json TEXT NOT NULL
     );
     CREATE INDEX memory_entries_time ON memory_entries(created_at DESC, sequence DESC);
+  `), (db) => db.exec(`
+    CREATE TABLE memory_organization_history (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT, organized_at INTEGER NOT NULL,
+      reason TEXT NOT NULL, originals_json TEXT NOT NULL, replacement_id TEXT
+    );
   `)]);
   const insert = storage.prepare(`INSERT OR IGNORE INTO memory_entries
     (id, type, text, normalized_text, tags_json, importance, created_at, metadata_json)
@@ -145,11 +152,104 @@ function createLongTermStore(storage) {
     return result;
   }
 
+  function organize(input, snapshot) {
+    const plan = validatePlan({ merge: input?.merge, archive: input?.archive }, snapshot);
+    return storage.transaction(() => {
+      const before = listEntries(storage);
+      // Reject stale snapshots rather than replacing changed or newly imported facts.
+      if (JSON.stringify(before) !== JSON.stringify(snapshot)) throw new Error("长期记忆已变化，请重新整理");
+      const byId = new Map(snapshot.map((entry) => [entry.id, entry]));
+      const stamp = Date.now();
+      const replacements = plan.merge.map((item) => {
+        const originals = item.sourceIds.map((id) => byId.get(id));
+        const metadata = { organizedAt: stamp, sourceMemoryIds: item.sourceIds };
+        for (const key of ["sourceMemoryIds", "sourceDecisionIds", "sourceSessionIds", "sourceEvidenceIds", "sourceProfileIds"]) {
+          metadata[key] = [...new Set([...(metadata[key] || []),
+            ...originals.flatMap((entry) => Array.isArray(entry.metadata?.[key]) ? entry.metadata[key] : [])])];
+        }
+        return { item, originals, record: normalize({ ...item,
+          createdAt: Math.max(...originals.map((entry) => entry.createdAt)), metadata }) };
+      });
+      const remove = storage.prepare("DELETE FROM memory_entries WHERE id = ?");
+      for (const item of plan.merge) for (const id of item.sourceIds) remove.run(id);
+      for (const item of plan.archive) remove.run(item.id);
+      const archive = storage.prepare(`INSERT INTO memory_organization_history
+        (organized_at, reason, originals_json, replacement_id) VALUES (?, ?, ?, ?)`);
+      for (const { item, originals, record } of replacements) {
+        if (insert.run(record).changes !== 1) throw new Error("合并后的记忆与其他记录重复，原始记忆已保留");
+        archive.run(stamp, item.reason, JSON.stringify(originals), record.id);
+      }
+      for (const item of plan.archive) archive.run(stamp, item.reason, JSON.stringify([byId.get(item.id)]), null);
+      return { before: before.length, after: before.length - plan.merge.reduce((sum, item) => sum + item.sourceIds.length - 1, 0) - plan.archive.length,
+        merged: plan.merge.length, archived: plan.archive.length };
+    });
+  }
+
+  function history() {
+    return storage.prepare("SELECT * FROM memory_organization_history ORDER BY sequence DESC").all()
+      .map((row) => ({ organizedAt: row.organized_at, reason: row.reason,
+        originals: JSON.parse(row.originals_json), replacementId: row.replacement_id }));
+  }
+  function updateFromDialogue(input, snapshot, turns, evidence = [], config = {}) {
+    const plan = validateUpdatePlan(input, snapshot, turns, evidence);
+    return storage.transaction(() => {
+      if (JSON.stringify(listEntries(storage)) !== JSON.stringify(snapshot)) throw new Error("长期记忆已变化，请重新更新");
+      const stamp = Date.now(), known = new Map(snapshot.map((e) => [e.id, e]));
+      function record(item, old) {
+        const sourceTurns = turns.filter((t) => item.sourceTurnIds.includes(t.id));
+        const sourceEvidence = evidence.filter((e) => item.sourceEvidenceIds.includes(e.id));
+        const metadata = { ...old?.metadata, updatedAt: stamp,
+          updateSources: { turns: sourceTurns, evidence: sourceEvidence } };
+        const refs = { sourceTurnIds: item.sourceTurnIds, sourceEvidenceIds: item.sourceEvidenceIds,
+          sourceDecisionIds: sourceTurns.map((t) => t.decisionId).filter(Boolean),
+          sourceSessionIds: sourceTurns.map((t) => t.sessionId).filter(Boolean) };
+        for (const [key, values] of Object.entries(refs)) metadata[key] = [...new Set([...(Array.isArray(metadata[key]) ? metadata[key] : []), ...values])];
+        return normalize({ ...item, id: old?.id, createdAt: old?.createdAt || stamp, metadata });
+      }
+      // Delete/reinsert updated slots inside the transaction so valid text swaps don't hit UNIQUE.
+      const records = plan.update.map((item) => ({ original: known.get(item.id), replacement: record(item, known.get(item.id)) }));
+      for (const { original } of records) storage.prepare("DELETE FROM memory_entries WHERE id = ?").run(original.id);
+      const archive = storage.prepare(`INSERT INTO memory_organization_history
+        (organized_at, reason, originals_json, replacement_id) VALUES (?, ?, ?, ?)`);
+      for (const { original, replacement } of records) {
+        if (insert.run(replacement).changes !== 1) throw new Error("更新后的记忆与其他条目重复，原始记忆已保留");
+        archive.run(stamp, "基于对话更新已有记忆", JSON.stringify([original]), original.id);
+      }
+      const capacity = Math.max(1, Number(config.maxEntries) || getDefaults().maxEntries);
+      if (plan.add.length && snapshot.length + plan.add.length > capacity) throw new Error("长期记忆容量不足，不能通过新增淘汰已有记忆");
+      for (const item of plan.add) {
+        if (insert.run(record(item)).changes !== 1) throw new Error("新增长期记忆与现有条目重复，原始记忆已保留");
+      }
+      return { updated: records.length, added: plan.add.length, before: snapshot.length, after: snapshot.length + plan.add.length };
+    });
+  }
+  function importProfiles(profiles) {
+    return storage.transaction(() => {
+      for (const p of profiles) {
+        const text = `${p.subject.name}${p.scope ? `【${p.scope}】` : ""}：${p.value}`;
+        const metadata = { sourceProfileIds: [p.id], sourceEvidenceIds: p.evidenceIds, basis: p.basis, confidence: p.confidence };
+        const old = storage.prepare("SELECT * FROM memory_entries WHERE normalized_text = ?").get(text.toLowerCase());
+        if (old) {
+          const previous = JSON.parse(old.metadata_json);
+          for (const key of ["sourceProfileIds", "sourceEvidenceIds"]) previous[key] = [...new Set([...(previous[key] || []), ...metadata[key]])];
+          previous.profileSources = [...(previous.profileSources || []), { id: p.id, basis: p.basis, confidence: p.confidence }];
+          storage.prepare("UPDATE memory_entries SET metadata_json = ? WHERE id = ?").run(JSON.stringify(previous), old.id);
+        } else {
+          insert.run(normalize({ type: "event", text, tags: [p.subject.name, p.scope].filter(Boolean),
+            importance: p.basis === "user_answer" ? 4 : 2, createdAt: p.updatedAt, metadata }));
+        }
+      }
+      // Migration retains all facts; it must not prune unrelated older memory.
+      return { moved: profiles.length };
+    });
+  }
+
   function clear(legacyPath) {
     const source = path.resolve(legacyPath);
     if (fs.existsSync(source)) fs.truncateSync(source, 0);
     return storage.transaction(() => {
       const deleted = storage.prepare("DELETE FROM memory_entries").run().changes;
+      storage.exec("DELETE FROM memory_organization_history");
       // Preserve and add import markers so older files cannot restore cleared facts.
       storage.prepare(`INSERT INTO legacy_imports
         (namespace, source_path, imported_at, imported_count, skipped_count)
@@ -160,7 +260,8 @@ function createLongTermStore(storage) {
     });
   }
 
-  return { appendBatch, retrieve, list: () => listEntries(storage), isDuplicate, formatForPrompt, importLegacy, clear };
+  return { appendBatch, retrieve, list: () => listEntries(storage), organize, history, importProfiles, updateFromDialogue,
+    isDuplicate, formatForPrompt, importLegacy, clear };
 }
 
 module.exports = { getDefaults, tokenize, formatForPrompt, listEntries, createLongTermStore };

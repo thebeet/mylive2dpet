@@ -1,9 +1,9 @@
 const element = (id) => document.getElementById(id);
 const refresh = element("refresh");
 const error = element("error");
-const sourceLabel = (source) => ({ screen: "画面", audio: "设备音频", work: "工作观察", "audio-output": "会议／播放转写", user: "用户输入", "user-answer": "用户回答", "user-correction": "用户修正" }[source] || source);
-const fieldLabel = (field) => ({ identity: "身份", organization_role: "组织角色", project_role: "项目角色", responsibility: "负责工作", team: "所属团队", collaboration: "协作关系", task: "当前事项", preference: "偏好", communication: "沟通方式" }[field] || field);
-const basisLabel = (basis) => ({ user_answer: "用户回答", inference: "暂时猜测", observation: "观察记录" }[basis] || basis);
+const sourceLabel = (source) => ({ screen: "画面内容", audio: "设备音频", work: "工作内容", "audio-output": "会议／播放转写", user: "用户对话", "manual-input": "用户对话", "user-answer": "提问回答", "user-correction": "手动修正" }[source] || source);
+const fieldLabel = (field) => ({ identity: "身份", organization_role: "组织角色", project_role: "项目角色", responsibility: "负责工作", team: "所属团队", collaboration: "协作关系", relationship: "人际关系", task: "当前事项", preference: "偏好", communication: "沟通方式" }[field] || field);
+const basisLabel = (basis) => ({ user_answer: "用户确认", inference: "暂时猜测", observation: "根据来源提取" }[basis] || basis);
 const typeLabel = (type) => ({ fact: "事实", preference: "偏好", habit: "习惯", event: "事件", user: "用户信息", world: "环境信息" }[type] || type);
 const time = (stamp) => new Date(stamp).toLocaleString("zh-CN");
 const tabs = [...document.querySelectorAll('[role="tab"]')];
@@ -29,21 +29,38 @@ function renderQuestionHistory() {
   const status = element("history-status").value;
   const filtered = historyItems.filter((q) => (status === "all" || q.status === status) &&
     `${q.prompt} ${q.subject.name} ${q.scope} ${q.records.map((r) => r.value).join(" ")}`.toLowerCase().includes(search));
-  element("question-history-info").textContent = `共 ${historyItems.length} 个问过的问题 · 当前显示 ${filtered.length} 个 · 重启后保留`;
+  element("question-history-info").textContent = `共 ${historyItems.length} 个问题 · ${historyItems.filter((q) => q.status === "pending").length} 个待提问 · 当前显示 ${filtered.length} 个 · 重启后保留`;
   const list = element("question-history"); list.replaceChildren();
-  if (!filtered.length) addText(list, "p", "muted", historyItems.length ? "没有匹配的提问记录。" : "还没有问过的问题。选择题弹出后会记录在这里。");
+  if (!filtered.length) addText(list, "p", "muted", historyItems.length ? "没有匹配的提问记录。" : "暂无待提问或提问记录。也可以在右键菜单中选择「桌宠提问 → 回答一个问题」。");
   const actionLabel = { shown: "桌宠提问", answer: "你的回答", unknown: "不清楚", skip: "跳过", defer: "稍后再问" };
-  const statusLabel = { answered: "已回答", pending: "待继续询问", dismissed: "已停止询问" };
+  const statusLabel = { answered: "已回答", pending: "待提问", dismissed: "已停止询问" };
   for (const q of filtered) {
     const card = addText(list, "article", "", "");
     addText(card, "div", "text", q.prompt);
+    const removeQuestion = addText(card, "button", "profile-edit", "删除问题及记录");
+    removeQuestion.type = "button";
+    removeQuestion.addEventListener("click", () => void deleteHistory(removeQuestion, () => window.petMemory.deleteQuestion(q.id)));
     addText(card, "div", "muted", `${q.subject.name}${q.scope ? ` · ${q.scope}` : ""} · ${statusLabel[q.status] || q.status}`);
     if (q.reason) addText(card, "div", "muted", q.reason);
     addText(card, "div", "muted", `选项：${q.options.map((o) => o.label).join("／")}`);
     if (q.lastShownAt != null && !q.records.some((r) => r.action === "shown")) addText(card, "div", "muted", `${time(q.lastShownAt)} · 桌宠提问`);
-    for (const record of q.records) addText(card, "div", record.action === "answer" ? "text" : "muted", `${time(record.createdAt)} · ${actionLabel[record.action] || record.action}${record.value ? `：${record.value}` : ""}`);
+    for (const record of q.records) {
+      const row = addText(card, "div", record.action === "answer" ? "text" : "muted", `${time(record.createdAt)} · ${actionLabel[record.action] || record.action}${record.value ? `：${record.value}` : ""}`);
+      if (record.action === "answer") {
+        const removeAnswer = addText(row, "button", "profile-edit", "删除答案");
+        removeAnswer.type = "button";
+        removeAnswer.addEventListener("click", () => void deleteHistory(removeAnswer, () => window.petMemory.deleteAnswer(q.id, record.id)));
+      }
+    }
     if (q.status === "pending" && q.nextAt > Date.now()) addText(card, "div", "muted", `延后至 ${time(q.nextAt)}`);
+    else if (q.status === "pending") addText(card, "div", "muted", "等待合适时机询问");
   }
+}
+async function deleteHistory(button, remove) {
+  button.disabled = true;
+  error.hidden = true;
+  try { await remove(); await load(); }
+  catch (cause) { error.textContent = cause.message || "删除失败，请重试"; error.hidden = false; button.disabled = false; }
 }
 element("history-search").addEventListener("input", renderQuestionHistory);
 element("history-status").addEventListener("change", renderQuestionHistory);
@@ -75,7 +92,7 @@ function render(snapshot) {
     if (selected) selectTab(selected);
   }
   element("status").textContent = `${snapshot.enabled ? "记忆已启用" : "记忆已关闭"} · 本次运行 ${snapshot.totalTurns} 轮对话 · ${snapshot.clearing ? "正在清空" : snapshot.maintaining ? "正在整理记忆" : "整理空闲"} · ${time(Date.now())}`;
-  const { shortTerm, summary, longTerm } = snapshot;
+  const { shortTerm, longTerm } = snapshot;
   element("recent-info").textContent = `${shortTerm.enabled ? "参与对话" : "对话注入已关闭"} · 当前 ${shortTerm.turns.length} / ${shortTerm.maxTurns} 轮 · 保留 ${Math.round(shortTerm.ttlMs / 60000)} 分钟`;
   const recent = element("recent");
   recent.replaceChildren();
@@ -89,27 +106,37 @@ function render(snapshot) {
       if (text) addText(card, "div", "text muted", `${sourceLabel(source)}摘要：${text}`);
     }
   }
-  element("summary-info").textContent = summary.enabled ? `已启用 · ${snapshot.work?.enabled ? "摘要在本地保存，重启后恢复" : "仅保留本次运行的摘要"}` : "摘要已关闭";
-  const summaryContent = element("summary");
-  summaryContent.replaceChildren();
-  addText(summaryContent, "div", summary.text ? "text" : "muted", summary.text || "暂无会话摘要。");
-  element("long-info").textContent = `${longTerm.enabled ? "已启用" : "长期记忆已关闭"} · ${longTerm.error ? "读取失败" : `已保存 ${longTerm.entries.length} 条，容量 ${longTerm.maxEntries} 条`} · 待提取 ${snapshot.pendingFacts} 轮对话`;
+  element("long-info").textContent = `${longTerm.enabled ? "已启用" : "长期记忆已关闭"} · ${longTerm.error ? "读取失败" : `已保存 ${longTerm.entries.length} 条，容量 ${longTerm.maxEntries} 条`} · 每 ${longTerm.updateEveryNTurns || 20} 轮对话更新 · 待更新 ${snapshot.pendingFacts} 轮对话`;
   const long = element("long");
   long.replaceChildren();
   if (longTerm.error) addText(long, "p", "error", longTerm.error);
   else if (!longTerm.entries.length) addText(long, "p", "muted", "暂无长期记忆。");
   for (const entry of longTerm.entries) {
     const card = addText(long, "article", "", "");
-    addText(card, "div", "muted", `${typeLabel(entry.type)} · 重要性 ${entry.importance} / 5 · ${time(entry.createdAt)}`);
+    addText(card, "div", "muted", `${typeLabel(entry.type)} · 重要性 ${entry.importance} / 5 · ${time(entry.createdAt)}${entry.metadata?.updatedAt ? ` · 更新于 ${time(entry.metadata.updatedAt)}` : ""}`);
     addText(card, "div", "text", entry.text);
     if (entry.tags.length) addText(card, "div", "muted", `标签：${entry.tags.join("、")}`);
   }
-  const work = snapshot.work || { enabled: false, profiles: [], questions: [], recentEvidence: [] };
-  historyItems = work.questionHistory || [];
+  const organizationHistory = longTerm.organizationHistory || [];
+  if (organizationHistory.length) addText(long, "h3", "", "整理记录（原始记忆）");
+  for (const record of organizationHistory) {
+    const details = addText(long, "details", "", "");
+    addText(details, "summary", "muted", `${time(record.organizedAt)} · ${record.reason === "基于对话更新已有记忆" ? "更新" : record.replacementId ? "合并" : "归档"} · ${record.reason}`);
+    for (const original of record.originals) {
+      addText(details, "div", "text", original.text);
+      addText(details, "div", "muted", `${typeLabel(original.type)} · ${time(original.createdAt)}`);
+    }
+  }
+  const work = snapshot.work || { enabled: false, profiles: [], questions: [] };
+  const allQuestions = new Map((work.questionHistory || []).map((q) => [q.id, q]));
+  for (const q of work.questions || []) {
+    if (q.status === "pending" && !allQuestions.has(q.id)) allQuestions.set(q.id, { ...q, records: [] });
+  }
+  historyItems = [...allQuestions.values()].sort((a, b) => Number(b.status === "pending") - Number(a.status === "pending"));
   renderQuestionHistory();
-  element("work-info").textContent = work.error || (work.enabled ? `已启用 · ${work.profiles.length} 条当前画像关系 · ${work.pending} 条观察待整理` : "工作记忆已关闭");
+  element("work-info").textContent = work.error || (work.enabled ? `已启用 · ${work.profiles.length} 条人物信息` : "人物画像已关闭");
   const profiles = element("profiles"); profiles.replaceChildren();
-  if (!work.profiles.length) addText(profiles, "p", "muted", "还在了解你和同事们，工作信息会逐渐整理到这里。");
+  if (!work.profiles.length) addText(profiles, "p", "muted", "你的身份、习惯、偏好与人际关系会逐渐整理到这里。");
   const grouped = new Map();
   for (const profile of work.profiles) {
     let card = grouped.get(profile.entityId);
@@ -139,24 +166,19 @@ function render(snapshot) {
     });
     if (profile.evidence?.length) {
       const details = document.createElement("details"); card.appendChild(details);
-      addText(details, "summary", "muted", "看看来源");
+      addText(details, "summary", "muted", "信息来源");
       for (const evidence of profile.evidence) addText(details, "div", "text muted", `${sourceLabel(evidence.source)} · ${time(evidence.capturedAt)}\n${evidence.text}`);
     }
   }
-  const questions = element("questions"); questions.replaceChildren();
-  const pending = work.questions.filter((q) => q.status === "pending");
-  if (!pending.length) addText(questions, "p", "muted", "暂无待提问。也可以在右键菜单中选择「桌宠提问 → 回答一个问题」。");
-  for (const question of pending) {
-    const card = addText(questions, "article", "", "");
-    addText(card, "div", "text", question.prompt);
-    addText(card, "div", "muted", `${question.reason} · ${question.nextAt > Date.now() ? `延后至 ${time(question.nextAt)}` : "等待合适时机"}`);
-  }
-  const evidence = element("evidence"); evidence.replaceChildren();
-  if (!work.recentEvidence.length) addText(evidence, "p", "muted", "暂无工作观察。");
-  for (const item of work.recentEvidence) {
-    const card = addText(evidence, "article", "", "");
-    addText(card, "div", "muted", `${sourceLabel(item.source)} · ${time(item.capturedAt)} · ${item.processed ? "已整理" : "待整理"}`);
-    addText(card, "div", "text", item.text);
+  const profileHistory = work.organizationHistory || [];
+  if (profileHistory.length) addText(profiles, "h3", "", "画像整理记录（原始内容）");
+  for (const record of profileHistory) {
+    const details = addText(profiles, "details", "", "");
+    addText(details, "summary", "muted", `${time(record.organizedAt)} · ${record.replacementId ? "合并" : "归档"} · ${record.reason}`);
+    for (const original of record.originals) {
+      addText(details, "div", "text", `${original.subject.name}${original.scope ? `【${original.scope}】` : ""} ${fieldLabel(original.field)}：${original.value}`);
+      addText(details, "div", "muted", `${basisLabel(original.basis)} · ${time(original.updatedAt)}`);
+    }
   }
 }
 

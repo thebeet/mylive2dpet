@@ -4,6 +4,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { EventEmitter } = require("node:events");
 const { createChatService } = require("../electron/plugins/aiConversation/chat");
 const { createRawLogRepository } = require("../electron/plugins/rawLog/repository");
+const { normalizeUsage } = require("../electron/plugins/rawLog/usage");
 const { activate } = require("../electron/plugins/rawLog");
 const { MessageBus } = require("../electron/architecture/messageBus");
 const EVENTS = require("../electron/architecture/events");
@@ -71,6 +72,60 @@ test("failing log observers cannot prevent a successful model call", async () =>
   assert.equal(await service.callChatCompletions([{ role: "user", content: "hello" }]), "ok");
 });
 
+test("text calls reject exhausted reasoning budgets and partial output without treating them as empty facts", async () => {
+  for (const content of [null, '[{"text":"用户喜欢喝咖啡"}]']) {
+    const service = chat({ fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({
+      model: "reasoning-model", choices: [{ finish_reason: "length", message: { content } }],
+      usage: { completion_tokens: 256, completion_tokens_details: { reasoning_tokens: 256 } },
+    }) }) });
+    await assert.rejects(service.callChatCompletions([{ role: "user", content: "提取事实" }], { max_tokens: 256 }),
+      /token 上限.*model=reasoning-model.*finish_reason=length.*max_tokens=256.*reasoning_tokens=256/);
+  }
+});
+
+test("text calls distinguish successful empty fact arrays from missing response content", async () => {
+  let content = "[]";
+  const service = chat({ fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({
+    choices: [{ finish_reason: "stop", message: { content } }],
+  }) }) });
+  const messages = [{ role: "user", content: "提取事实" }];
+  assert.equal(await service.callChatCompletions(messages), "[]");
+  content = " ";
+  await assert.rejects(service.callChatCompletions(messages), /返回空正文.*finish_reason=stop/);
+});
+
+test("text timeout overrides cover network and total budgets without changing ordinary calls or wire fields", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let signal;
+  const service = chat({
+    getConfig: () => ({ plugins: [{ name: "ai-conversation", ai: {
+      endpoint: "https://example.invalid/v1", apiKey: "test", model: "test", timeoutMs: 10, retryBudgetMs: 20,
+    } }] }),
+    fetchImpl: async (_url, init) => {
+      signal = init.signal;
+      const body = JSON.parse(init.body);
+      for (const field of ["timeoutMs", "retryBudgetMs", "maxRetries"]) assert.ok(!Object.hasOwn(body, field));
+      await new Promise((resolve) => setTimeout(resolve, 35));
+      signal.throwIfAborted();
+      return { ok: true, status: 200, text: async () => '{"choices":[{"message":{"content":"ok"}}]}' };
+    },
+  });
+  const pending = service.callChatCompletions([{ role: "user", content: "整理记忆" }], {
+    timeoutMs: 50, retryBudgetMs: 100, maxRetries: 0,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(25);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(signal.aborted, false);
+  t.mock.timers.tick(10);
+  assert.equal(await pending, "ok");
+  const ordinary = assert.rejects(service.callChatCompletions([{ role: "user", content: "普通摘要" }], { maxRetries: 0 }), /超时（10ms）/);
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(11);
+  await ordinary;
+  assert.equal(signal.aborted, true);
+});
+
 test("SQLite pagination omits large content while details preserve raw request and response", (t) => {
   const db = new DatabaseSync(":memory:");
   t.after(() => db.close());
@@ -89,6 +144,48 @@ test("SQLite pagination omits large content while details preserve raw request a
   assert.equal(repository.get("id-4").response.choices[0].message.content, "reply");
   assert.throws(() => repository.list({ before: "1 OR 1=1" }), /游标/);
   assert.throws(() => repository.get("missing"), /不存在/);
+});
+
+test("per-request token usage is read from existing raw responses without sending their full content in pagination", (t) => {
+  const db = new DatabaseSync(":memory:"); t.after(() => db.close());
+  const repository = createRawLogRepository(storageFor(db));
+  const responses = [
+    { usage: { prompt_tokens: 1000, completion_tokens: 200, total_tokens: 1200,
+      prompt_tokens_details: { cached_tokens: 400, cache_write_tokens: 300 }, completion_tokens_details: { reasoning_tokens: 80 } } },
+    { usage: { prompt_tokens: 120, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 0 } } },
+    { usage: { prompt_tokens: 100, completion_tokens: 50 } },
+    JSON.stringify({ usage: { prompt_tokens: 500, completion_tokens: 75, prompt_cache_hit_tokens: 128, prompt_cache_miss_tokens: 372 } }),
+    { usage: "malformed usage" },
+  ];
+  for (const [i, response] of responses.entries()) {
+    repository.append({ id: `usage${i}`, sessionId: "session", t: i, label: "ai:text", request: { model: "test", messages: [] } });
+    repository.finish({ id: `usage${i}`, finishedAt: 100, status: 200, response });
+  }
+  const listed = new Map(repository.list().entries.map((entry) => [entry.id, entry]));
+  const expected = { inputTokens: 1000, outputTokens: 200, totalTokens: 1200, cachedTokens: 400,
+    uncachedTokens: 600, cacheWriteTokens: 300, reasoningTokens: 80 };
+  assert.deepEqual(listed.get("usage0").usage, expected);
+  assert.deepEqual(repository.get("usage0").usage, expected);
+  assert.deepEqual(repository.get("usage0").response, responses[0]);
+  assert.equal(Object.hasOwn(listed.get("usage0"), "response_json"), false);
+  assert.equal(Object.hasOwn(listed.get("usage0"), "usageJson"), false);
+  assert.equal(listed.get("usage1").usage.cachedTokens, 0);
+  assert.equal(listed.get("usage1").usage.uncachedTokens, 120);
+  assert.equal(listed.get("usage2").usage.cachedTokens, null);
+  assert.equal(listed.get("usage2").usage.uncachedTokens, null);
+  assert.equal(listed.get("usage3").usage.uncachedTokens, 372);
+  assert.deepEqual(listed.get("usage3").usage, repository.get("usage3").usage);
+  assert.equal(listed.get("usage4").usage, null);
+});
+
+test("usage supports Responses counters and keeps absent or inconsistent cache counters unknown", () => {
+  assert.deepEqual(normalizeUsage({ input_tokens: 100, output_tokens: 20,
+    input_tokens_details: { cached_tokens: 80 }, output_tokens_details: { reasoning_tokens: 10 } }),
+  { inputTokens: 100, outputTokens: 20, totalTokens: 120, cachedTokens: 80, uncachedTokens: 20, cacheWriteTokens: null, reasoningTokens: 10 });
+  assert.equal(normalizeUsage({ prompt_tokens: 100, prompt_tokens_details: { cached_tokens: 120 } }).uncachedTokens, null);
+  assert.equal(normalizeUsage({ prompt_tokens: 100, completion_tokens: 10, prompt_tokens_details: { cache_write_tokens: 97 } }).cachedTokens, null);
+  assert.equal(normalizeUsage({}), null);
+  assert.equal(normalizeUsage({ prompt_tokens: -1, completion_tokens: Infinity }), null);
 });
 
 test("log plugin validates window identity and records late cancellation while stopped", async (t) => {

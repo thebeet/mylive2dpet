@@ -1,6 +1,6 @@
 const path = require("path");
 
-function createMemoryViewer(context, { getSnapshot, isAvailable, correctProfile }) {
+function createMemoryViewer(context, { getSnapshot, isAvailable, correctProfile, deleteQuestion, deleteAnswer }) {
   let win = null;
   let viewTab = "recent";
   function close() {
@@ -22,10 +22,20 @@ function createMemoryViewer(context, { getSnapshot, isAvailable, correctProfile 
     if (!input || typeof input.id !== "string" || typeof input.text !== "string") throw new Error("画像修正内容无效");
     return correctProfile(input.id, input.text);
   }) || (() => {}) : () => {};
+  const unregisterDeleteQuestion = deleteQuestion ? context.ipc?.handle("delete-question", (event, id) => {
+    requireSender(event);
+    if (typeof id !== "string" || !id) throw new Error("问题 ID 无效");
+    return deleteQuestion(id);
+  }) || (() => {}) : () => {};
+  const unregisterDeleteAnswer = deleteAnswer ? context.ipc?.handle("delete-answer", (event, input) => {
+    requireSender(event);
+    if (!input || typeof input.questionId !== "string" || typeof input.answerId !== "string" || !input.questionId || !input.answerId) throw new Error("答案 ID 无效");
+    return deleteAnswer(input.questionId, input.answerId);
+  }) || (() => {}) : () => {};
 
   function show(tab) {
     if (!isAvailable()) return;
-    const explicitTab = typeof tab === "string" && ["recent", "summary", "long", "work", "question-history"].includes(tab);
+    const explicitTab = typeof tab === "string" && ["recent", "long", "work", "question-history"].includes(tab);
     if (explicitTab) viewTab = tab;
     if (win && !win.isDestroyed()) {
       if (win.isMinimized()) win.restore();
@@ -54,7 +64,7 @@ function createMemoryViewer(context, { getSnapshot, isAvailable, correctProfile 
     });
   }
 
-  return { show, close, dispose() { close(); unregisterIpc(); unregisterCorrection(); } };
+  return { show, close, dispose() { close(); unregisterIpc(); unregisterCorrection(); unregisterDeleteQuestion(); unregisterDeleteAnswer(); } };
 }
 
 module.exports = { createMemoryViewer };

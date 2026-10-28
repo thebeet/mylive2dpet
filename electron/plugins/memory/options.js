@@ -1,6 +1,5 @@
 const { getPlugin } = require("../registry");
 const shortTerm = require("./shortTerm");
-const summarizer = require("./summarizer");
 const longTerm = require("./longTerm");
 
 const integer = (value, fallback, minimum = 1) => {
@@ -11,7 +10,6 @@ const integer = (value, fallback, minimum = 1) => {
 function getOptions(config = {}) {
   const plugin = getPlugin(config, "memory");
   const short = { ...shortTerm.getDefaults(), ...plugin?.shortTerm };
-  const summary = { ...summarizer.getDefaults(), ...plugin?.summary };
   const long = { ...longTerm.getDefaults(), ...plugin?.longTerm };
   const work = { enabled: false, extractEveryNObservations: 3, flushAfterMs: 120000,
     batchSize: 16, maxTokens: 1800, maxEvidence: 2000, maxQuestions: 30,
@@ -26,15 +24,11 @@ function getOptions(config = {}) {
   short.enabled = short.enabled !== false;
   short.maxTurns = integer(short.maxTurns, 8);
   short.ttlMs = integer(short.ttlMs, 1_800_000);
-  summary.enabled = summary.enabled !== false;
-  summary.everyNTurns = integer(summary.everyNTurns, 6, 2);
-  summary.keepTurnsAfterSummary = integer(summary.keepTurnsAfterSummary, 3, 0);
-  summary.maxTokens = integer(summary.maxTokens, 256);
   long.enabled = long.enabled !== false;
   long.legacyPath = String(long.legacyPath).trim() || longTerm.getDefaults().legacyPath;
   long.maxInject = integer(long.maxInject, 5);
-  long.extractEveryNTurns = integer(long.extractEveryNTurns, 3);
-  long.maxTokens = integer(long.maxTokens, 256);
+  long.extractEveryNTurns = integer(long.extractEveryNTurns, longTerm.getDefaults().extractEveryNTurns);
+  long.maxTokens = integer(long.maxTokens, longTerm.getDefaults().maxTokens);
   long.maxEntries = integer(long.maxEntries, 500);
 
   return {
@@ -42,7 +36,6 @@ function getOptions(config = {}) {
     textService: String(plugin?.textService || "ai-conversation.text"),
     storageService: String(plugin?.storageService || "storage-sqlite.database"),
     shortTerm: short,
-    summary,
     longTerm: long,
     work,
   };

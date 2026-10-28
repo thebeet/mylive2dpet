@@ -28,7 +28,7 @@ function harness(overrides = {}, dependencies = {}) {
   const contexts = createContextProviders({ logger: quiet });
   const config = { plugins: [{ name: "memory", enabled: true,
     textService: "model.text", shortTerm: { maxTurns: 20 },
-    summary: { enabled: false }, longTerm: { enabled: false }, ...overrides,
+    longTerm: { enabled: false }, ...overrides,
   }] };
   const plugin = createMemoryPlugin({
     bus, services, logger: quiet, config: { get: () => config },
@@ -47,7 +47,12 @@ function harness(overrides = {}, dependencies = {}) {
 const fakeDurable = (added) => ({
   retrieve: () => [], formatForPrompt: () => "", isDuplicate: () => false,
   append: (fact) => added.push(fact),
+  list: () => added,
+  updateFromDialogue: (plan) => { added.push(...plan.add); return { updated: plan.update.length, added: plan.add.length }; },
 });
+const addition = (messages, facts) => JSON.stringify({ update: [], add: facts.map((fact) => ({
+  type: "fact", tags: [], importance: 4, ...fact, sourceTurnIds: JSON.parse(messages[1].content).turns.map((t) => t.id),
+})) });
 
 test("memory uses nested plugin options and the whole-plugin switch", () => {
   const config = { plugins: [{ name: "memory", enabled: true,
@@ -58,7 +63,7 @@ test("memory uses nested plugin options and the whole-plugin switch", () => {
   assert.equal(options.enabled, true);
   assert.equal(options.shortTerm.enabled, true);
   assert.equal(options.shortTerm.maxTurns, 12);
-  assert.equal(options.summary.enabled, false);
+  assert.equal(Object.hasOwn(options, "summary"), false);
   assert.equal(options.longTerm.enabled, false);
   assert.equal(options.longTerm.legacyPath, "existing.jsonl");
   assert.equal(options.longTerm.maxInject, 7);
@@ -106,111 +111,13 @@ test("recording is independent of the decision provider and optional context fai
   assert.ok(!inputs[1].context.some(({ id }) => id.startsWith("invalid:")));
 });
 
-test("a summary preserves new arrivals and only consumes the snapshot's turn count", async (t) => {
-  const pending = deferred();
-  const h = harness({ summary: { enabled: true, everyNTurns: 2, keepTurnsAfterSummary: 1 } });
-  t.after(() => h.plugin.dispose());
-  const requests = [];
-  h.services.register("model.text", async (messages) => {
-    requests.push(messages);
-    return requests.length === 1 ? pending.promise : "next summary";
-  });
-  await h.record("one");
-  await h.record("two");
-  await settle();
-  assert.equal(requests.length, 1);
-  await h.record("arrived during summary");
-  assert.equal(requests.length, 1);
-  pending.resolve("first summary");
-  await h.plugin.whenIdle();
-  const state = h.plugin.getState();
-  assert.equal(state.sessionSummary, "first summary");
-  assert.equal(state.summarizedThrough, 2);
-  assert.equal(state.totalTurns, 3);
-  assert.deepEqual(state.turns.map(({ reply }) => reply), ["two", "arrived during summary"]);
-  await h.record("four");
-  await h.plugin.whenIdle();
-  assert.equal(requests.length, 2);
-  assert.match(requests[1][1].content, /arrived during summary/);
-  assert.equal(h.plugin.getState().summarizedThrough, 4);
-});
 
-test("summary and extraction run serially and extraction sees turns folded by the summary", async (t) => {
-  const pending = deferred();
-  const added = [];
-  const h = harness({
-    summary: { enabled: true, everyNTurns: 2, keepTurnsAfterSummary: 0 },
-    longTerm: { enabled: true, extractEveryNTurns: 2 },
-  }, { longTerm: fakeDurable(added) });
-  t.after(() => h.plugin.dispose());
-  const requests = [];
-  h.services.register("model.text", async (messages, settings) => {
-    requests.push(messages);
-    assert.ok(settings.signal instanceof AbortSignal);
-    if (requests.length === 1) return pending.promise;
-    return JSON.stringify([{ type: "preference", text: "用户喜欢喝咖啡", tags: ["咖啡"], importance: 3 }]);
-  });
-  await h.record("one");
-  await h.record("two");
-  await settle();
-  assert.equal(requests.length, 1);
-  pending.resolve("summary");
-  await h.plugin.whenIdle();
-  assert.equal(requests.length, 2);
-  assert.match(requests[1][1].content, /one/);
-  assert.match(requests[1][1].content, /two/);
-  assert.equal(added.length, 1);
-  assert.equal(h.plugin.getState().turns.length, 0);
-  assert.equal(h.plugin.getState().extractedThrough, 2);
-});
 
-test("failed maintenance keeps pending turns and retries on the next completed turn", async (t) => {
-  const h = harness({ summary: { enabled: true, everyNTurns: 2, keepTurnsAfterSummary: 1 } });
-  t.after(() => h.plugin.dispose());
-  let calls = 0;
-  h.services.register("model.text", async () => {
-    if (++calls === 1) throw new Error("model unavailable");
-    return "recovered summary";
-  });
-  await h.record("one");
-  await h.record("two");
-  await h.plugin.whenIdle();
-  assert.equal(h.plugin.getState().summarizedThrough, 0);
-  assert.equal(h.plugin.getState().turns.length, 2);
-  await h.record("three");
-  await h.plugin.whenIdle();
-  assert.equal(calls, 2);
-  assert.equal(h.plugin.getState().summarizedThrough, 3);
-});
 
-test("failed extraction retries original turns even after a successful summary has folded them", async (t) => {
-  const added = [];
-  const h = harness({
-    summary: { enabled: true, everyNTurns: 2, keepTurnsAfterSummary: 0 },
-    longTerm: { enabled: true, extractEveryNTurns: 2 },
-  }, { longTerm: fakeDurable(added) });
-  t.after(() => h.plugin.dispose());
-  const requests = [];
-  h.services.register("model.text", async (messages) => {
-    requests.push(messages);
-    if (requests.length === 1) return "completed summary";
-    if (requests.length === 2) throw new Error("extraction unavailable");
-    return '[{"text":"用户喜欢喝咖啡"}]';
-  });
-  await h.record("original one");
-  await h.record("original two");
-  await h.plugin.whenIdle();
-  assert.equal(h.plugin.getState().turns.length, 0);
-  assert.equal(h.plugin.getState().pendingFacts.length, 2);
-  await h.record("new three");
-  await h.plugin.whenIdle();
-  assert.equal(requests.length, 3);
-  assert.match(requests[2][1].content, /original one/);
-  assert.match(requests[2][1].content, /original two/);
-  assert.match(requests[2][1].content, /new three/);
-  assert.equal(added.length, 1);
-  assert.equal(h.plugin.getState().pendingFacts.length, 0);
-});
+
+
+
+
 
 test("extraction preserves arrivals after its snapshot and processes each later batch once", async (t) => {
   const pending = deferred();
@@ -219,13 +126,13 @@ test("extraction preserves arrivals after its snapshot and processes each later 
   const requests = [];
   h.services.register("model.text", async (messages) => {
     requests.push(messages);
-    return requests.length === 1 ? pending.promise : "[]";
+    return requests.length === 1 ? pending.promise : '{"update":[],"add":[]}';
   });
   await h.record("one");
   await h.record("two");
   await settle();
   await h.record("new three");
-  pending.resolve("[]");
+  pending.resolve('{"update":[],"add":[]}');
   await h.plugin.whenIdle();
   assert.equal(requests.length, 1);
   assert.deepEqual(h.plugin.getState().pendingFacts.map(({ reply }) => reply), ["new three"]);
@@ -259,64 +166,47 @@ test("missing text services retain recent context and durable memory without cha
   assert.deepEqual(await h.contexts.collect({}), []);
 });
 
-test("text generation recovers when a service becomes available without losing buffered turns", async (t) => {
-  const h = harness({ summary: { enabled: true, everyNTurns: 2 } });
+test("long-term updates recover when their service becomes available without losing buffered turns", async (t) => {
+  const h = harness({ longTerm: { enabled: true, extractEveryNTurns: 2 } }, { longTerm: fakeDurable([]) });
   t.after(() => h.plugin.dispose());
-  await h.record("one");
-  await h.record("two");
-  await h.plugin.whenIdle();
-  assert.equal(h.plugin.getState().summarizedThrough, 0);
-  h.services.register("model.text", async () => "late summary");
-  await h.contexts.collect({});
-  await h.plugin.whenIdle();
-  assert.equal(h.plugin.getState().sessionSummary, "late summary");
-  assert.equal(h.plugin.getState().summarizedThrough, 2);
+  await h.record("one"); await h.record("two"); await h.plugin.whenIdle();
+  assert.equal(h.plugin.getState().pendingFacts.length, 2);
+  h.services.register("model.text", async () => '{"update":[],"add":[]}');
+  await h.contexts.collect({}); await h.plugin.whenIdle();
+  assert.equal(h.plugin.getState().pendingFacts.length, 0);
+  assert.equal(h.plugin.getState().extractedThrough, 2);
 });
 
-test("disposal aborts model requests and rejects late summary or extraction results", async (t) => {
-  for (const summarize of [true, false]) {
-    const pending = deferred();
-    const added = [];
-    const h = harness({
-      summary: { enabled: summarize, everyNTurns: 2 },
-      longTerm: { enabled: !summarize, extractEveryNTurns: 1 },
-    }, { longTerm: fakeDurable(added) });
-    t.after(() => h.plugin.dispose());
-    let signal;
-    h.services.register("model.text", async (_messages, settings) => {
-      signal = settings.signal;
-      return pending.promise;
-    });
-    await h.record("one");
-    if (summarize) await h.record("two");
-    await settle();
-    assert.ok(signal);
-    h.plugin.dispose();
-    assert.equal(signal.aborted, true);
-    pending.resolve(summarize ? "obsolete summary" : '[{"text":"obsolete fact"}]');
-    await h.plugin.whenIdle();
-    assert.equal(h.plugin.getState().sessionSummary, "");
-    assert.equal(h.plugin.getState().turns.length, 0);
-    assert.equal(added.length, 0);
-    assert.deepEqual(await h.contexts.collect({}), []);
-  }
+test("disposal aborts model requests and rejects late long-term updates", async (t) => {
+  const pending = deferred(), added = [];
+  const h = harness({ longTerm: { enabled: true, extractEveryNTurns: 1 } }, { longTerm: fakeDurable(added) });
+  t.after(() => h.plugin.dispose());
+  let signal, response;
+  h.services.register("model.text", async (messages, settings) => {
+    signal = settings.signal; response = addition(messages, [{ text: "obsolete fact" }]);
+    return pending.promise;
+  });
+  await h.record("one"); await settle();
+  assert.ok(signal); h.plugin.dispose(); assert.equal(signal.aborted, true);
+  pending.resolve(response); await h.plugin.whenIdle();
+  assert.equal(h.plugin.getState().turns.length, 0);
+  assert.equal(added.length, 0);
+  assert.deepEqual(await h.contexts.collect({}), []);
 });
 
-test("disabled plugins produce no memory; summary works independently of recent-dialogue injection", async (t) => {
-  const disabled = harness({ enabled: false });
-  t.after(() => disabled.plugin.dispose());
+test("disabled plugins produce no memory; long-term updates work without recent-dialogue injection", async (t) => {
+  const disabled = harness({ enabled: false }); t.after(() => disabled.plugin.dispose());
   await disabled.record("not recorded");
   assert.equal(disabled.plugin.getState().turns.length, 0);
   assert.deepEqual(await disabled.contexts.collect({}), []);
-  const h = harness({ shortTerm: { enabled: false }, summary: { enabled: true, everyNTurns: 2 } });
+  const added = [];
+  const h = harness({ shortTerm: { enabled: false }, longTerm: { enabled: true, extractEveryNTurns: 2 } }, { longTerm: fakeDurable(added) });
   t.after(() => h.plugin.dispose());
-  h.services.register("model.text", async () => "session continuity");
-  await h.record("one");
-  await h.record("two");
-  await h.plugin.whenIdle();
+  h.services.register("model.text", async (messages) => addition(messages, [{ text: "用户偏好先看结论" }]));
+  await h.record("one"); await h.record("two"); await h.plugin.whenIdle();
   const blocks = await h.contexts.collect({});
   assert.ok(!blocks.some(({ id }) => id.endsWith("recent-dialogue")));
-  assert.equal(blocks.find(({ id }) => id.endsWith("session-summary")).text, "session continuity");
+  assert.equal(added.length, 1);
 });
 
 test("activation failures roll back context, services and subscriptions", async () => {

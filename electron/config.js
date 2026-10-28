@@ -54,7 +54,9 @@ function normalizeConfig(input) {
       }
       if (plugin.longTerm?.path != null) throw new Error("memory.longTerm 请使用 legacyPath 指定 JSONL 导入来源");
     }
-    plugins.set(plugin.name, { ...plugin });
+    const current = { ...plugin };
+    if (plugin.name === "memory") delete current.summary; // Accept and discard obsolete configuration.
+    plugins.set(plugin.name, current);
   }
   if (input.decision?.enabled != null && typeof input.decision.enabled !== "boolean") throw new Error("decision.enabled 必须是布尔值");
   function put(name, options) { plugins.set(name, { ...plugins.get(name), ...options, name }); }
@@ -63,8 +65,8 @@ function normalizeConfig(input) {
     for (const key of ["endpoint", "apiKey", "model", "proxy"]) {
       if (options.ai[key] != null && typeof options.ai[key] !== "string") throw new Error(`ai.${key} 必须是字符串`);
     }
-    options.ai.timeoutMs = number(options.ai.timeoutMs, 30000, 1000, 600000, "ai.timeoutMs");
-    options.ai.retryBudgetMs = number(options.ai.retryBudgetMs, 90000, 1000, 1200000, "ai.retryBudgetMs");
+    options.ai.timeoutMs = number(options.ai.timeoutMs, 120000, 1000, 600000, "ai.timeoutMs");
+    options.ai.retryBudgetMs = number(options.ai.retryBudgetMs, 360000, 1000, 1200000, "ai.retryBudgetMs");
     put("ai-conversation", { enabled: plugins.get("ai-conversation")?.enabled !== false, ...options });
   }
   const { intervalMs, ...screen } = screenOptions(input);

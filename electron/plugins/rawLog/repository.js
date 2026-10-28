@@ -1,3 +1,5 @@
+const { normalizeUsage, responseUsage } = require("./usage");
+
 function createRawLogRepository(storage) {
   storage.migrate("raw-log", [(db) => db.exec(`
     CREATE TABLE ai_requests (
@@ -25,16 +27,22 @@ function createRawLogRepository(storage) {
       if (before !== null && (!Number.isSafeInteger(before) || before <= 0)) throw new Error("无效的分页游标");
       const size = Math.max(1, Math.min(100, Math.floor(Number(limit) || 50)));
       const rows = storage.prepare(`SELECT sequence, id, session_id AS sessionId, created_at AS t,
-        label, model, finished_at AS finishedAt, status, error FROM ai_requests
+        label, model, finished_at AS finishedAt, status, error,
+        CASE WHEN json_type(response_json) = 'text' AND json_valid(json_extract(response_json, '$'))
+          THEN json_extract(json_extract(response_json, '$'), '$.usage')
+          ELSE json_extract(response_json, '$.usage') END AS usageJson FROM ai_requests
         ${before === null ? "" : "WHERE sequence < ?"} ORDER BY sequence DESC LIMIT ?`)
         .all(...(before === null ? [] : [before]), size + 1);
-      return { entries: rows.slice(0, size), nextCursor: rows.length > size ? rows[size - 1].sequence : null };
+      return { entries: rows.slice(0, size).map(({ usageJson, ...row }) => ({ ...row,
+        usage: normalizeUsage(usageJson) })),
+        nextCursor: rows.length > size ? rows[size - 1].sequence : null };
     },
     get(id) {
       if (typeof id !== "string" || id.length > 100) throw new Error("无效的请求 ID");
       const row = storage.prepare("SELECT request_json, response_json FROM ai_requests WHERE id = ?").get(id);
       if (!row) throw new Error("请求日志不存在");
-      return { request: JSON.parse(row.request_json), response: row.response_json === null ? null : JSON.parse(row.response_json) };
+      const response = row.response_json === null ? null : JSON.parse(row.response_json);
+      return { request: JSON.parse(row.request_json), response, usage: responseUsage(response) };
     },
   };
 }

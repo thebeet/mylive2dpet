@@ -121,17 +121,6 @@ function createScreenPerceptionPlugin(context, dependencies = {}) {
   }
 
   const unregisterSource = context.perception.registerSource("screen", capture);
-  const unregisterMenu = context.menu.register(() => [{
-    label: "截取全屏",
-    click: async () => {
-      try {
-        const shot = await capture({ trigger: "manual-capture", enqueue: false });
-        context.logger.info("screenshot saved:", shot.path);
-      } catch (error) {
-        context.logger.error("screenshot failed:", error);
-      }
-    },
-  }]);
 
   return {
     start, stop,
@@ -139,7 +128,6 @@ function createScreenPerceptionPlugin(context, dependencies = {}) {
       disposed = true;
       const done = stop();
       unregisterSource();
-      unregisterMenu();
       return done.then(async () => {
         await context.perception.discard((item) => item.source === "screen", "plugin-unloaded");
         unsubscribeRelease();

@@ -2,6 +2,11 @@ const EVENTS = require("../architecture/events");
 
 /** Connect decisions to the pet's visible and spoken output. */
 function registerExecutionModule(bus, { sendBubble }) {
+  const unsubscribeBubble = bus.subscribe(EVENTS.BUBBLE_OUTPUT_REQUESTED, ({ text, type = "say" }) => {
+    if (typeof text !== "string" || !text.trim() || !["say", "error"].includes(type)) return;
+    sendBubble({ type, text });
+  }, { owner: "core:execution" });
+
   const unsubscribeDecisionStarted = bus.subscribe(
     EVENTS.DECISION_STARTED,
     async () => {
@@ -54,6 +59,7 @@ function registerExecutionModule(bus, { sendBubble }) {
   }, { owner: "core:execution" });
 
   return () => {
+    unsubscribeBubble();
     unsubscribeDecisionStarted();
     unsubscribeDecision();
     unsubscribeFailure();

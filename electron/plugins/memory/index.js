@@ -2,9 +2,10 @@ const path = require("path");
 const EVENTS = require("../../architecture/events");
 const { getOptions } = require("./options");
 const { createShortTermStore } = require("./shortTerm");
-const { createSummarizer } = require("./summarizer");
-const extractor = require("./extractor");
+const { updateWithLlm } = require("./updater");
+const { createUpdateBuffer } = require("./updateBuffer");
 const longTerm = require("./longTerm");
+const { organizeWithLlm } = require("./organizer");
 const { formatRecentDialogue, buildContextBlocks } = require("./context");
 const { createMemoryViewer } = require("./viewer");
 const { createWorkMemory } = require("./workMemory");
@@ -12,12 +13,10 @@ const { createWorkMemory } = require("./workMemory");
 /** Owns all memory state and reacts to successful, validated decisions. */
 function createMemoryPlugin(context, dependencies = {}) {
   const buffer = createShortTermStore({ now: dependencies.now || Date.now });
-  // Facts awaiting extraction survive compression of the visible recent buffer.
-  const extractionBuffer = createShortTermStore({ now: dependencies.now || Date.now });
-  const summarizer = createSummarizer();
+  // Complete dialogues awaiting updates are independent of the visible recent buffer.
+  let extractionBuffer = createUpdateBuffer();
   let durable = dependencies.longTerm || null;
   let totalTurns = 0;
-  let summarizedThrough = 0;
   let extractedThrough = 0;
   let generation = 0;
   let active = true;
@@ -27,17 +26,30 @@ function createMemoryPlugin(context, dependencies = {}) {
   let controller = null;
   let warnedService = null;
   let clearing = null;
+  let organizing = null;
+  let organizationController = null;
   let confirmation = null;
   let confirmationController = null;
   const inFlightDecisions = new Set();
   const ignoredDecisions = new Set();
 
   const options = () => getOptions(context.config.get());
+  function pendingBuffer() {
+    if (!extractionBuffer.durable && options().longTerm.enabled) {
+      const storage = context.services.get(options().storageService);
+      if (storage) {
+        const next = createUpdateBuffer(storage);
+        storage.transaction(() => {
+          for (const turn of extractionBuffer.list()) next.restoreTurn(turn);
+          next.stageEvidence(extractionBuffer.evidence());
+        });
+        extractionBuffer = next;
+      }
+    }
+    return extractionBuffer;
+  }
   const work = createWorkMemory(context, { options, now: dependencies.now || Date.now,
     isAvailable: () => active && !disposed && !clearing });
-  if (options().work.enabled) {
-    try { summarizer.set(work.restoreSummary()); } catch (error) { context.logger.warn("work memory initialization failed:", error); }
-  }
   function getDurable() {
     if (durable) return durable;
     const config = options();
@@ -53,6 +65,14 @@ function createMemoryPlugin(context, dependencies = {}) {
   if (options().enabled && options().longTerm.enabled) {
     try { getDurable(); } catch (error) { context.logger.warn("long-term storage initialization deferred:", error); }
   }
+  function migratePersonProfiles() {
+    if (!options().enabled || !options().work.enabled || !options().longTerm.enabled) return;
+    try {
+      const moved = work.migrateWorkDetails(getDurable()).moved;
+      if (moved) context.logger.info(`person profiles cleaned; moved ${moved} work records to long-term memory`);
+    } catch (error) { context.logger.warn("person profile migration deferred:", error); }
+  }
+  migratePersonProfiles();
 
   function valid(snapshot) {
     return active && !disposed && !clearing && snapshot.generation === generation && options().enabled &&
@@ -62,16 +82,10 @@ function createMemoryPlugin(context, dependencies = {}) {
   async function maintainSnapshot() {
     const config = options();
     if (!active || disposed || !config.enabled) return;
-    const turns = buffer.list(config.shortTerm);
-    const turnsText = formatRecentDialogue(turns);
-    const extractionTurns = extractionBuffer.list(config.shortTerm);
-    const extractionText = formatRecentDialogue(extractionTurns);
-    const summarize = Boolean(turnsText) && config.summary.enabled &&
-      summarizer.shouldSummarize(config.summary, totalTurns - summarizedThrough, turns.length);
-    const extract = Boolean(extractionText) && config.longTerm.enabled &&
-      extractor.shouldExtract(config.longTerm, totalTurns - extractedThrough);
+    const extractionTurns = config.longTerm.enabled ? pendingBuffer().list() : [];
+    const extract = config.longTerm.enabled && extractionTurns.length >= config.longTerm.extractEveryNTurns;
     const extractWork = work.due();
-    if (!summarize && !extract && !extractWork) return;
+    if (!extract && !extractWork) return;
 
     const generate = context.services.get(config.textService);
     if (typeof generate !== "function") {
@@ -82,62 +96,41 @@ function createMemoryPlugin(context, dependencies = {}) {
       return;
     }
     warnedService = null;
-    const snapshot = { turns, extractionTurns, through: totalTurns, generation, options: config, generate };
+    const snapshot = { extractionTurns, through: totalTurns, generation, options: config, generate };
     const abortController = new AbortController();
     controller = abortController;
     const callChat = (messages, settings) => generate(messages, {
       ...settings, signal: abortController.signal,
     });
     try {
-      if (summarize) {
-        try {
-          const next = await summarizer.summarizeWithLlm({
-            previousSummary: summarizer.get(), turnsText, callChat,
-            maxTokens: config.summary.maxTokens,
-          });
-          if (next && valid(snapshot) && options().summary.enabled) {
-            summarizer.set(next);
-            work.saveSummary(next);
-            summarizedThrough = snapshot.through;
-            buffer.foldSnapshot(snapshot.turns, config.summary.keepTurnsAfterSummary, config.shortTerm);
-            context.logger.info("session summary updated:", next.slice(0, 120));
-          }
-        } catch (error) {
-          if (valid(snapshot)) context.logger.warn("summary failed:", error);
-        }
-      }
       if (!valid(snapshot)) return;
       if (extract && options().longTerm.enabled) {
         try {
-          // Failed extraction keeps these originals for a later attempt.
-          const facts = await extractor.extractWithLlm({
-            turnsText: extractionText, callChat, maxTokens: config.longTerm.maxTokens,
-          });
+          const store = getDurable(), entries = store.list();
+          const evidence = pendingBuffer().evidence();
+          const plan = await updateWithLlm({ entries, turns: extractionTurns, evidence, callChat,
+            maxTokens: config.longTerm.maxTokens, maxEntries: config.longTerm.maxEntries });
           if (!valid(snapshot) || !options().longTerm.enabled) return;
-          const store = getDurable();
-          let added = 0;
-          if (typeof store.appendBatch === "function") {
-            added = store.appendBatch(facts, config.longTerm, {
-              sourceDecisionIds: [...new Set(snapshot.extractionTurns.map((turn) => turn.decisionId).filter(Boolean))],
-              sourceSessionIds: [...new Set(snapshot.extractionTurns.map((turn) => turn.sessionId).filter(Boolean))],
-            });
-          } else {
-            // Injected repositories may implement the simpler per-fact interface.
-            for (const fact of facts) {
-              if (store.isDuplicate(fact.text, config.longTerm)) continue;
-              store.append(fact, config.longTerm);
-              added += 1;
-            }
-          }
+          const apply = () => {
+            const result = store.updateFromDialogue(plan, entries, extractionTurns, evidence, config.longTerm);
+            pendingBuffer().consume(extractionTurns, evidence);
+            return result;
+          };
+          const storage = context.services.get(config.storageService);
+          const result = storage ? storage.transaction(apply) : apply();
           extractedThrough = snapshot.through;
-          extractionBuffer.foldSnapshot(snapshot.extractionTurns, 0, config.shortTerm);
-          if (added) context.logger.info(`long-term +${added} fact(s)`);
+          context.logger.info(`long-term updated after ${extractionTurns.length} dialogue(s): updated=${result.updated}, added=${result.added}`);
         } catch (error) {
-          if (valid(snapshot)) context.logger.warn("extraction failed:", error);
+          if (valid(snapshot)) context.logger.warn("long-term update failed:", error);
         }
       }
       if (extractWork && valid(snapshot)) {
-        try { await work.maintain({ callChat, valid: () => valid(snapshot) }); }
+        try {
+          await work.maintain({ callChat, valid: () => valid(snapshot),
+            applyMemory: (memory, evidence) => {
+              if (options().longTerm.enabled) pendingBuffer().stageEvidence(evidence);
+            } });
+        }
         catch (error) { if (valid(snapshot)) context.logger.warn("work extraction failed:", error); }
       }
     } finally {
@@ -148,6 +141,7 @@ function createMemoryPlugin(context, dependencies = {}) {
   function scheduleMaintenance() {
     if (!active || disposed || clearing) return;
     requested = true;
+    if (organizing) return;
     if (task) return;
     task = Promise.resolve().then(async () => {
       while (requested && active && !disposed) {
@@ -170,7 +164,7 @@ function createMemoryPlugin(context, dependencies = {}) {
     try {
       const config = options();
       if (!active || disposed || !config.enabled ||
-          !(config.shortTerm.enabled || config.summary.enabled || config.longTerm.enabled || config.work.enabled)) return;
+          !(config.shortTerm.enabled || config.longTerm.enabled || config.work.enabled)) return;
       const userMessage = observations.filter(({ role }) => role === "user")
         .flatMap(({ content }) => content.filter(({ type }) => type === "text"))
         .map(({ text }) => text.trim()).filter(Boolean).join("\n");
@@ -184,7 +178,7 @@ function createMemoryPlugin(context, dependencies = {}) {
         trigger: trigger || observations.map((item) => item.trigger).filter(Boolean).join(","),
       }, { ...config.shortTerm, enabled: true });
       if (!turn) { if (config.work.enabled) scheduleMaintenance(); return; }
-      if (config.longTerm.enabled) extractionBuffer.append(turn, { ...config.shortTerm, enabled: true });
+      if (config.longTerm.enabled && turn.speak !== false) pendingBuffer().append(turn);
       totalTurns += 1;
       scheduleMaintenance();
     } catch (error) {
@@ -197,29 +191,28 @@ function createMemoryPlugin(context, dependencies = {}) {
     const config = options();
     if (!active || disposed || clearing || !config.enabled) return [];
     const turnsText = formatRecentDialogue(buffer.list(config.shortTerm));
-    const sessionSummary = config.summary.enabled ? summarizer.get() : "";
     let longTermMemory = "";
     if (config.longTerm.enabled) {
       try {
         const query = [...observations
           .flatMap(({ content }) => content.filter(({ type }) => type === "text"))
-          .map(({ text }) => text), sessionSummary, turnsText].filter(Boolean).join("\n");
+          .map(({ text }) => text), turnsText].filter(Boolean).join("\n");
         const store = getDurable();
         longTermMemory = store.formatForPrompt(store.retrieve(query, config.longTerm));
       } catch (error) {
         context.logger.warn("retrieval failed:", error);
       }
     }
-    if (totalTurns || config.work.enabled) scheduleMaintenance();
+    if (totalTurns || config.work.enabled || config.longTerm.enabled && pendingBuffer().list().length) scheduleMaintenance();
     const blocks = buildContextBlocks({
-      longTermMemory, sessionSummary,
+      longTermMemory,
       recentDialogue: config.shortTerm.enabled ? turnsText : "",
     });
     try {
       const query = [...observations.flatMap((o) => o.content.filter((p) => p.type === "text").map((p) => p.text)),
         ...buffer.list(config.shortTerm).slice(-2).map((t) => t.summaries.work || t.summaries.screen || "")].join("\n");
       const text = work.context(query);
-      if (text) blocks.unshift({ id: "work-profiles", title: "人物与项目画像（猜测可修正）", text });
+      if (text) blocks.unshift({ id: "work-profiles", title: "人物画像（猜测可修正）", text });
     } catch (error) { context.logger.warn("work context failed:", error); }
     return blocks;
   }
@@ -245,15 +238,17 @@ function createMemoryPlugin(context, dependencies = {}) {
     generation += 1;
     requested = false;
     controller?.abort();
+    organizationController?.abort(new Error("记忆整理已取消"));
     for (const id of inFlightDecisions) ignoredDecisions.add(id);
     buffer.clear();
-    extractionBuffer.clear();
-    summarizer.clear();
+    pendingBuffer().clear();
     void context.bus.notify(EVENTS.MEMORY_CLEARED, {});
-    totalTurns = summarizedThrough = extractedThrough = 0;
+    totalTurns = extractedThrough = 0;
     const maintenance = task;
+    const organization = organizing;
     clearing = Promise.resolve().then(async () => {
       if (maintenance) await maintenance;
+      if (organization) await organization.catch(() => {});
       work.clear();
       const config = options();
       const legacyPath = path.resolve(context.paths?.projectRoot || path.resolve(__dirname, "../../.."), config.longTerm.legacyPath);
@@ -261,6 +256,8 @@ function createMemoryPlugin(context, dependencies = {}) {
         const store = getDurable();
         if (typeof store.clear !== "function") throw new Error("记忆存储未提供清空能力");
         const deleted = store.clear(legacyPath);
+        const storage = context.services.get(config.storageService);
+        if (storage) createUpdateBuffer(storage).clear();
         context.logger.info(`all memory cleared; long-term removed=${deleted}`);
         return { deleted };
       }
@@ -268,6 +265,79 @@ function createMemoryPlugin(context, dependencies = {}) {
     }).finally(() => { clearing = null; context.menu?.refresh(); });
     context.menu?.refresh();
     return clearing;
+  }
+
+  function organize() {
+    if (organizing) return organizing;
+    const config = options();
+    if (!active || disposed || !config.enabled) return Promise.reject(new Error("记忆插件已停止"));
+    if (clearing || confirmation) return Promise.reject(new Error("正在清空记忆，请稍后再整理"));
+    if (!config.longTerm.enabled && !config.work.enabled) return Promise.reject(new Error("长期记忆已关闭，人物画像也未启用"));
+    const snapshotGeneration = generation;
+    const maintenance = task;
+    const abortController = new AbortController();
+    organizationController = abortController;
+    organizing = Promise.resolve().then(async () => {
+      if (maintenance) await maintenance;
+      const current = options();
+      const generate = context.services.get(current.textService);
+      const snapshot = { generation: snapshotGeneration, options: current, generate };
+      const isValid = () => !abortController.signal.aborted && valid(snapshot) &&
+        options().longTerm.enabled === current.longTerm.enabled && options().work.enabled === current.work.enabled;
+      if (!isValid()) throw new Error("记忆整理已取消");
+      const store = current.longTerm.enabled ? getDurable() : null;
+      if (store && (typeof store.list !== "function" || typeof store.organize !== "function")) throw new Error("记忆存储不支持整理");
+      const entries = store ? store.list() : [];
+      const profiles = current.work.enabled ? work.organizationSnapshot() : undefined;
+      const empty = { before: 0, after: 0, merged: 0, archived: 0 };
+      if (!entries.length && !profiles?.length) return { ...empty, ...(profiles ? { work: { ...empty } } : {}) };
+      if (typeof generate !== "function") throw new Error("AI 文本服务不可用，请稍后重试");
+      context.logger.info(`memory organization: ${entries.length} facts, ${profiles?.length || 0} work profiles`);
+      const plan = await organizeWithLlm({ entries, profiles, signal: abortController.signal,
+        callChat: (messages, settings) => generate(messages, {
+          ...settings, signal: abortController.signal,
+        }) });
+      if (!isValid()) throw new Error("记忆整理已取消");
+      let result;
+      if (profiles !== undefined) {
+        const storage = context.services.get(current.storageService);
+        if (!storage) throw new Error("人物记忆存储不可用");
+        result = storage.transaction(() => ({ ...(store ? store.organize(plan, entries) : empty),
+          work: work.organize(plan.workProfiles, profiles) }));
+        void context.bus.notify(EVENTS.WORK_MEMORY_UPDATED, {});
+      } else result = store.organize(plan, entries);
+      context.logger.info(`long-term organized: ${result.before} -> ${result.after}; merged=${result.merged} archived=${result.archived}`);
+      if (result.work) context.logger.info(`work profiles organized: ${result.work.before} -> ${result.work.after}; merged=${result.work.merged} archived=${result.work.archived}`);
+      return result;
+    }).finally(() => {
+      organizing = null;
+      if (organizationController === abortController) organizationController = null;
+      context.menu?.refresh();
+      if (requested && active && !disposed && !clearing) scheduleMaintenance();
+    });
+    context.menu?.refresh();
+    return organizing;
+  }
+
+  async function organizeFromMenu() {
+    const snapshotGeneration = generation;
+    try {
+      const result = await organize();
+      if (!active || disposed || clearing || generation !== snapshotGeneration) return;
+      const hasMemory = result.before || result.work?.before;
+      const details = [`长期事实：整理前 ${result.before} 条，整理后 ${result.after} 条；合并 ${result.merged} 组，归档 ${result.archived} 条。`];
+      if (result.work) details.push(`人物画像：整理前 ${result.work.before} 条，整理后 ${result.work.after} 条；合并 ${result.work.merged} 组，归档 ${result.work.archived} 条。`);
+      details.push("原始记录可在「查看当前记忆」的长期记忆页和人物画像页查看。");
+      await context.bus.notify(EVENTS.BUBBLE_OUTPUT_REQUESTED, {
+        text: hasMemory ? `记忆整理完成。\n${details.join("\n")}` : "暂无记忆可整理。",
+      });
+    } catch (error) {
+      if (!active || disposed || clearing || generation !== snapshotGeneration) return;
+      context.logger.warn("manual memory organization failed:", error);
+      await context.bus.notify(EVENTS.BUBBLE_OUTPUT_REQUESTED, {
+        type: "error", text: `记忆整理未完成，原始记忆已保留，可以稍后重试。\n${error.message || error}`,
+      });
+    }
   }
   function confirmClear() {
     if (confirmation || clearing) return confirmation || clearing;
@@ -279,7 +349,7 @@ function createMemoryPlugin(context, dependencies = {}) {
       if (signal.aborted) return;
       const { response } = await context.dialogs.showMessageBox({
         type: "warning", title: "清空全部记忆", message: "确定要清空全部记忆吗？",
-        detail: "近期对话、会话摘要、长期记忆、工作画像、观察证据和提问记录将被永久清除；保留历史对话。此操作无法撤销。",
+        detail: "近期对话、长期记忆、人物画像、观察证据和提问记录将被永久清除；保留历史对话。此操作无法撤销。",
         buttons: ["取消", "清空全部记忆"], defaultId: 0, cancelId: 0, noLink: true, signal,
       });
       if (response === 1 && !signal.aborted && active && !disposed && generation === currentGeneration) {
@@ -297,9 +367,13 @@ function createMemoryPlugin(context, dependencies = {}) {
   function getSnapshot() {
     const config = options();
     let entries = [];
+    let organizationHistory = [];
     let error = null;
     try {
-      if (durable?.list) entries = durable.list();
+      if (durable?.list) {
+        entries = durable.list();
+        organizationHistory = durable.history?.() || [];
+      }
       else {
         const storage = context.services.get(config.storageService);
         if (!storage) throw new Error("长期记忆存储不可用");
@@ -310,23 +384,27 @@ function createMemoryPlugin(context, dependencies = {}) {
     try { workSnapshot = work.snapshot(); }
     catch (cause) { workSnapshot = { enabled: options().work.enabled, error: String(cause.message || cause), profiles: [], questions: [], recentEvidence: [], pending: 0 }; }
     return {
-      enabled: config.enabled, totalTurns, maintaining: Boolean(task), clearing: Boolean(clearing),
+      enabled: config.enabled, totalTurns, maintaining: Boolean(task || organizing), organizing: Boolean(organizing), clearing: Boolean(clearing),
       shortTerm: { enabled: config.shortTerm.enabled, maxTurns: config.shortTerm.maxTurns,
         ttlMs: config.shortTerm.ttlMs, turns: buffer.list(config.shortTerm) },
-      summary: { enabled: config.summary.enabled, text: summarizer.get() },
-      longTerm: { enabled: config.longTerm.enabled, maxEntries: config.longTerm.maxEntries,
-        entries, error },
-      pendingFacts: extractionBuffer.list(config.shortTerm).length,
+      longTerm: { enabled: config.longTerm.enabled, maxEntries: config.longTerm.maxEntries, updateEveryNTurns: config.longTerm.extractEveryNTurns,
+        entries, organizationHistory, error },
+      pendingFacts: pendingBuffer().list().length,
       work: workSnapshot,
     };
   }
   const viewer = createMemoryViewer(context, { getSnapshot, isAvailable: () => active && !disposed && !clearing,
-    correctProfile: (id, text) => work.api.correctProfile(id, text) });
+    correctProfile: (id, text) => work.api.correctProfile(id, text),
+    deleteQuestion: (id) => work.api.deleteQuestion(id), deleteAnswer: (questionId, answerId) => work.api.deleteAnswer(questionId, answerId) });
   const unregisterClear = context.services.register?.("clear", clear) || (() => {});
   const unregisterWork = context.services.register?.("work", work.api) || (() => {});
+  const unregisterOrganize = context.services.register?.("organize", organize) || (() => {});
   const unregisterMenu = context.menu?.register(() => [{ label: "记忆", submenu: [
     { label: "查看当前记忆…", enabled: active && !disposed, click: viewer.show },
     { label: "查看提问记录…", enabled: active && !disposed, click: () => viewer.show("question-history") },
+    { label: organizing ? "正在整理记忆…" : "整理",
+      enabled: active && !disposed && !organizing && !clearing && !confirmation && options().enabled && (options().longTerm.enabled || options().work.enabled) &&
+        Boolean(durable || context.services.get(options().storageService)), click: organizeFromMenu },
     { type: "separator" },
     {
       label: clearing ? "正在清空记忆…" : "清空全部记忆",
@@ -342,21 +420,23 @@ function createMemoryPlugin(context, dependencies = {}) {
     requested = false;
     generation += 1;
     controller?.abort();
+    organizationController?.abort(new Error("记忆整理已取消"));
     controller = null;
     if (maintenanceTimer) clearInterval(maintenanceTimer);
     maintenanceTimer = null;
-    return Promise.allSettled([task, clearing].filter(Boolean));
+    return Promise.allSettled([task, clearing, organizing].filter(Boolean));
   }
 
   return {
     start() {
       if (disposed) return;
       active = true;
+      migratePersonProfiles();
       if (options().work.enabled && !maintenanceTimer) {
         maintenanceTimer = setInterval(() => scheduleMaintenance(), 30000);
         maintenanceTimer.unref?.();
       }
-      if (totalTurns || options().work.enabled) scheduleMaintenance();
+      if (totalTurns || options().work.enabled || options().longTerm.enabled && pendingBuffer().list().length) scheduleMaintenance();
     },
     stop,
     dispose() {
@@ -370,24 +450,24 @@ function createMemoryPlugin(context, dependencies = {}) {
       if (maintenanceTimer) clearInterval(maintenanceTimer);
       unregisterClear();
       unregisterWork();
+      unregisterOrganize();
       unregisterMenu();
       viewer.dispose();
       buffer.clear();
-      extractionBuffer.clear();
-      summarizer.clear();
+      if (!extractionBuffer.durable) extractionBuffer.clear();
       inFlightDecisions.clear();
       ignoredDecisions.clear();
       return done;
     },
     getState: () => ({
       turns: buffer.list(options().shortTerm),
-      pendingFacts: extractionBuffer.list(options().shortTerm),
-      sessionSummary: summarizer.get(),
-      totalTurns, summarizedThrough, extractedThrough,
+      pendingFacts: pendingBuffer().list(),
+      totalTurns, extractedThrough,
     }),
     clear,
+    organize,
     getSnapshot,
-    async whenIdle() { while (task || clearing) await Promise.all([task, clearing].filter(Boolean)); },
+    async whenIdle() { while (task || clearing || organizing) await Promise.allSettled([task, clearing, organizing].filter(Boolean)); },
   };
 }
 

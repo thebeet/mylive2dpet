@@ -149,7 +149,7 @@ test("AI keeps system messages stable while memory and other context move into u
     content: [{ type: "text", text: "本轮用户问题" }, { type: "image", path: "/virtual/image.jpg" }] };
   const context = [
     { id: "memory:long-term-memory", title: "长期记忆", text: "用户偏好 TypeScript" },
-    { id: "memory:session-summary", title: "会话摘要", text: "正在处理发布任务" },
+    { id: "memory:long-term-memory", title: "长期记忆", text: "正在处理发布任务" },
     { id: "memory:recent-dialogue", title: "近期对话", text: "用户：测试已经通过" },
     { id: "sensor:context", title: "其它上下文", text: "正在使用文档窗口" },
   ];
@@ -283,7 +283,8 @@ test("screen plugin owns its cadence, skips unchanged images and keeps manual ca
   assert.equal(h.bus.queueSize(EVENTS.PERCEPTION_OBSERVATION), 0);
   assert.deepEqual(h.removed, ["/virtual/2.jpg"]);
   const comparisons = h.getComparisons();
-  await h.getMenu()[0].click();
+  assert.equal(h.getMenu(), undefined);
+  await h.perception.capture("screen", { trigger: "manual-capture", enqueue: false });
   assert.equal(h.getComparisons(), comparisons);
   assert.equal(h.getCaptures(), 3);
   assert.equal(h.bus.queueSize(EVENTS.PERCEPTION_OBSERVATION), 0);

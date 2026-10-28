@@ -114,6 +114,23 @@ test("ASR aborts on timeout and accepts services without authentication", async 
   } }), /超时/);
 });
 
+test("known Whisper subtitle hallucinations are filtered before observation ingress without removing normal speech", async () => {
+  const options = { provider: "whisper-asr-webservice", endpoint: "http://localhost:9000", vadFilter: true, timeoutMs: 1000 };
+  const transcribe = (data) => transcribeAudio({ pcm: pcm(600) }, options, {
+    fetchImpl: async () => ({ ok: true, json: async () => data }),
+  });
+  for (const text of ["字幕by索兰娅", "字幕 by 索兰娅。", "字幕：BY 索蘭婭", "字幕由索兰娅"]) {
+    assert.equal((await transcribe({ text })).text, "");
+  }
+  const mixed = await transcribe({ text: "字幕by索兰娅我们先核对接口", segments: [
+    { text: "字幕by索兰娅", avg_logprob: -0.1 },
+    { text: "我们先核对接口", avg_logprob: -0.2 },
+  ] });
+  assert.equal(mixed.text, "我们先核对接口");
+  const normal = "刚才的字幕by索兰娅是识别错误，请忽略";
+  assert.equal((await transcribe({ text: normal })).text, normal);
+});
+
 test("Whisper container provider uses /asr query parameters and audio_file without a request model", async () => {
   const options = {
     provider: "whisper-asr-webservice", endpoint: "http://127.0.0.1:9000/asr/?custom=value",

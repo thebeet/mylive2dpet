@@ -1,4 +1,13 @@
 let busy = false;
+let engaged = false;
+function engage() {
+  if (engaged) return;
+  engaged = true;
+  void window.petQuestions.activity().catch(() => { engaged = false; });
+}
+for (const type of ["pointerdown", "keydown", "input", "focusin"]) {
+  document.addEventListener(type, engage, true);
+}
 async function answer(input) {
   if (busy) return;
   busy = true;
@@ -10,7 +19,7 @@ async function answer(input) {
     document.querySelectorAll("button").forEach((b) => { b.disabled = false; });
   }
 }
-for (const action of ["unknown", "skip", "defer"]) document.getElementById(action).addEventListener("click", () => void answer({ action }));
+for (const action of ["unknown", "skip", "defer", "remove"]) document.getElementById(action).addEventListener("click", () => void answer({ action }));
 document.getElementById("close").addEventListener("click", () => void answer({ action: "defer" }));
 document.getElementById("custom").addEventListener("submit", (event) => {
   event.preventDefault();

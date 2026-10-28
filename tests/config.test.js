@@ -12,9 +12,16 @@ test("current example is valid, immutable and does not change when normalized ag
   const config = normalizeConfig(input);
   assert.deepEqual(normalizeConfig(config), config);
   assert.ok(Object.isFrozen(getPlugin(config, "memory").longTerm));
-  assert.equal(getPlugin(config, "ai-conversation").ai.timeoutMs, 30000);
+  assert.equal(getPlugin(config, "ai-conversation").ai.timeoutMs, 120000);
+  assert.equal(getPlugin(config, "ai-conversation").ai.retryBudgetMs, 360000);
   assert.equal(getPlugin(config, "screen-perception").enabled, true);
   assert.equal(input.plugins.find(({ name }) => name === "screen-perception").intervalMs, undefined);
+});
+
+test("obsolete session-summary configuration is accepted but removed from normalized memory options", () => {
+  const memory = getPlugin(normalizeConfig({ plugins: [{ name: "memory", summary: { enabled: true, maxTokens: 4096 } }] }), "memory");
+  assert.equal(Object.hasOwn(memory, "summary"), false);
+  assert.equal(memory.longTerm.extractEveryNTurns, 20);
 });
 
 test("configuration rejects root feature options and flat memory parameters", () => {

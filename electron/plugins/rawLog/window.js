@@ -24,6 +24,15 @@ function statusText(entry) {
   return entry.finishedAt === null ? "发送中…" : entry.error ? "失败" : "成功";
 }
 
+const tokenText = (count) => count == null ? "未提供" : count.toLocaleString("zh-CN");
+function renderUsage(parent, usage, pending = false) {
+  if (!usage) { addText(parent, "span", "usage-summary", pending ? "Token 用量：等待返回" : "Token 用量：接口未提供"); return; }
+  addText(parent, "span", "usage-summary", `输入 ${tokenText(usage.inputTokens)} · 输出 ${tokenText(usage.outputTokens)} · 合计 ${tokenText(usage.totalTokens)} token`);
+  addText(parent, "span", "usage-summary", `输入缓存：命中 ${tokenText(usage.cachedTokens)} · 未命中 ${tokenText(usage.uncachedTokens)}`);
+  if (usage.cacheWriteTokens != null) addText(parent, "span", "usage-summary", `缓存写入 ${tokenText(usage.cacheWriteTokens)} token`);
+  if (usage.reasoningTokens != null) addText(parent, "span", "usage-summary", `输出中推理 ${tokenText(usage.reasoningTokens)} token`);
+}
+
 function renderList() {
   requestsEl.replaceChildren();
   countEl.textContent = `已显示 ${entries.length} 次请求 · 每 2 秒自动更新`;
@@ -40,6 +49,7 @@ function renderList() {
     addText(button, "span", "", `#${entry.sequence} · ${labels[entry.label] || entry.label}`);
     addText(button, "time", "muted", new Date(entry.t).toLocaleString("zh-CN"));
     addText(button, "span", "muted", `${entry.model} · ${statusText(entry)}`);
+    renderUsage(button, entry.usage, entry.finishedAt === null);
     button.addEventListener("click", () => void select(entry));
     requestsEl.appendChild(button);
   }
@@ -101,6 +111,7 @@ async function select(entry, preserveScroll = false) {
     metaEl.replaceChildren();
     const elapsed = entry.finishedAt === null ? "" : ` · ${Math.max(0, entry.finishedAt - entry.t)} ms`;
     addText(metaEl, "div", "", `#${entry.sequence} · ${new Date(entry.t).toLocaleString("zh-CN")} · ${statusText(entry)}${entry.status ? ` · HTTP ${entry.status}` : ""}${elapsed}`);
+    renderUsage(metaEl, result.usage, entry.finishedAt === null);
     const parameters = Object.fromEntries(Object.entries(result.request).filter(([key]) => key !== "messages"));
     const details = document.createElement("details");
     addText(details, "summary", "", "请求参数");

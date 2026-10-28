@@ -15,10 +15,9 @@ function formatRecentDialogue(turns) {
   }).join("\n");
 }
 
-function buildContextBlocks({ longTermMemory = "", sessionSummary = "", recentDialogue = "" }) {
+function buildContextBlocks({ longTermMemory = "", recentDialogue = "" }) {
   return [
     { id: "long-term-memory", title: "长期记忆", text: longTermMemory },
-    { id: "session-summary", title: "会话摘要", text: sessionSummary },
     { id: "recent-dialogue", title: "近期对话", text: recentDialogue },
   ].filter(({ text }) => text.trim());
 }

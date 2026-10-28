@@ -17,6 +17,11 @@ function validateAsrOptions(options) {
   return endpoint;
 }
 
+function isKnownSubtitleHallucination(text) {
+  const normalized = String(text || "").replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
+  return /^字幕(?:by|由)?索[兰蘭][娅婭]$/.test(normalized);
+}
+
 /** Transcribe in memory; raw PCM is never logged or written to disk. */
 async function transcribeAudio(segment, options, { fetchImpl = globalThis.fetch, signal } = {}) {
   let endpoint = validateAsrOptions(options);
@@ -56,14 +61,15 @@ async function transcribeAudio(segment, options, { fetchImpl = globalThis.fetch,
     const segments = Array.isArray(data.segments) ? data.segments : [];
     const usable = segments.filter((part) =>
       !(typeof part.no_speech_prob === "number" && part.no_speech_prob > 0.8) &&
-      !(typeof part.avg_logprob === "number" && part.avg_logprob < -1.5),
+      !(typeof part.avg_logprob === "number" && part.avg_logprob < -1.5) &&
+      !isKnownSubtitleHallucination(part.text),
     );
     const text = (segments.length
       ? usable.map((part) => String(part.text || "")).join("")
       : data.text).trim().slice(0, 6000);
     const logprobs = usable.map((part) => part.avg_logprob).filter(Number.isFinite);
     return {
-      text,
+      text: isKnownSubtitleHallucination(text) ? "" : text,
       language: String(data.language || options.language || ""),
       confidence: logprobs.length
         ? Math.exp(logprobs.reduce((sum, value) => sum + value, 0) / logprobs.length)

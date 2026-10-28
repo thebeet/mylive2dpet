@@ -122,7 +122,7 @@ function createChatService({ getConfig, getExpressions, logger = console,
   /**
    * @param {string} url
    * @param {RequestInit} init
-   * @param {{ maxRetries?: number, label?: string }} [opts]
+   * @param {{ maxRetries?: number, label?: string, timeoutMs?: number }} [opts]
    */
   async function fetchChatJson(url, init, opts = {}) {
     const maxRetries =
@@ -153,7 +153,7 @@ function createChatService({ getConfig, getExpressions, logger = console,
           response = text;
           signal.throwIfAborted();
           return { res, text };
-        }, { signal: init.signal, timeoutMs: Number(ai.timeoutMs) || 30000 });
+        }, { signal: init.signal, timeoutMs: Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : Number(ai.timeoutMs) || 120000 });
         init.signal?.throwIfAborted();
         let data;
         try {
@@ -223,7 +223,7 @@ function createChatService({ getConfig, getExpressions, logger = console,
    * Lightweight text-only chat/completions call (memory summary / extract).
    * Uses current config endpoint; does not touch short-term memory.
    * @param {object[]} messages
-   * @param {{ max_tokens?: number, temperature?: number, signal?: AbortSignal }} [opts]
+   * @param {{ max_tokens?: number, temperature?: number, signal?: AbortSignal, timeoutMs?: number, retryBudgetMs?: number, maxRetries?: number }} [opts]
    */
   async function callChatCompletions(messages, opts = {}) {
     opts.signal?.throwIfAborted();
@@ -263,10 +263,19 @@ function createChatService({ getConfig, getExpressions, logger = console,
         },
         body: JSON.stringify(body),
       },
-      { label: "ai:text" },
+      { label: "ai:text", timeoutMs: opts.timeoutMs, maxRetries: opts.maxRetries },
     );
 
-    return messageContentToText(data?.choices?.[0]?.message?.content).trim();
+    const choice = data?.choices?.[0];
+    const text = messageContentToText(choice?.message?.content).trim();
+    if (choice?.finish_reason === "length" || !text) {
+      const reason = choice?.finish_reason || "unknown";
+      const usage = data?.usage;
+      const details = `model=${data?.model || ai.model}, finish_reason=${reason}, max_tokens=${maxTokens}, ` +
+        `completion_tokens=${usage?.completion_tokens ?? "unknown"}, reasoning_tokens=${usage?.completion_tokens_details?.reasoning_tokens ?? "unknown"}`;
+      throw new Error(`${reason === "length" ? "AI 文本输出达到 token 上限，内容不完整；请增大 maxTokens" : "AI 文本接口返回空正文"}（${details}）`);
+    }
+    return text;
   }
 
   /**
@@ -402,15 +411,15 @@ function createChatService({ getConfig, getExpressions, logger = console,
   }
 
 
-  function boundedOperation(operation, signal) {
+  function boundedOperation(operation, signal, retryBudgetMs) {
     const { ai } = getOptions(getConfig());
-    return withTimeout(operation, { signal, timeoutMs: Number(ai.retryBudgetMs) || 90000, label: "AI 整轮请求" });
+    return withTimeout(operation, { signal, timeoutMs: Number(retryBudgetMs) > 0 ? Number(retryBudgetMs) : Number(ai.retryBudgetMs) || 360000, label: "AI 整轮请求" });
   }
   return {
     decideFromObservations: (observations, options = {}) => boundedOperation(
       (signal) => decideFromObservations(observations, { ...options, signal }), options.signal),
     callChatCompletions: (messages, options = {}) => boundedOperation(
-      (signal) => callChatCompletions(messages, { ...options, signal }), options.signal),
+      (signal) => callChatCompletions(messages, { ...options, signal }), options.signal, options.retryBudgetMs),
   };
 }
 

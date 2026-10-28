@@ -15,6 +15,7 @@ function harness(t) {
   const bus = new MessageBus({ logger: quiet }), windowService = mockWindows(), handlers = new Map();
   const config = { plugins: [{ name: "questions", enabled: true, cooldownMs: 100, deferMs: 100, timeoutMs: 90000 }] };
   let menu, timers = 0;
+  const expiries = [];
   const api = { nextQuestion: (config) => repo.nextQuestion(config), getQuestion: repo.getQuestion,
     markShown: repo.markShown, answer: repo.answer,
     pauseQuestions: (until) => repo.setState("questionsPausedUntil", until),
@@ -27,7 +28,9 @@ function harness(t) {
       getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }) },
     menu: { register: (provide) => { menu = provide; return () => { menu = null; }; }, refresh() {} },
     ipc: { handle: (name, handler) => { handlers.set(name, handler); return () => handlers.delete(name); } },
-  }, { now: () => clock, setTimer: () => { timers++; return { unref() {} }; }, clearTimer: () => { timers--; } });
+  }, { now: () => clock, setTimer: () => { timers++; return { unref() {} }; }, clearTimer: () => { timers--; },
+    setExpiryTimer: (callback, ms) => { const timer = { callback, ms, cleared: false, unref() {} }; expiries.push(timer); return timer; },
+    clearExpiryTimer: (timer) => { timer.cleared = true; } });
   t.after(() => { plugin.dispose(); db.close(); });
   function seed(name = "张琳") {
     repo.addEvidence({ id: name, source: "screen", text: `${name}参与支付讨论` });
@@ -36,7 +39,7 @@ function harness(t) {
   }
   return { repo, storage, plugin, bus, handlers, windows: windowService.windows, config, seed,
     idle: (value) => { idle = value; }, advance: (ms) => { clock += ms; }, now: () => clock,
-    menu: () => menu(), timers: () => timers };
+    menu: () => menu(), timers: () => timers, expiries };
 }
 
 test("automatic questions wait for idle, silence and meeting cooldown, without stealing focus", async (t) => {
@@ -54,8 +57,58 @@ test("automatic questions wait for idle, silence and meeting cooldown, without s
   assert.equal(win.options.webPreferences.sandbox, true);
   h.idle(0); h.plugin.tick(); assert.equal(win.destroyed, false);
   await h.bus.notify(EVENTS.PERCEPTION_OBSERVATION_QUEUED, { observation: { source: "audio-output" } });
+  assert.equal(win.destroyed, false);
+});
+
+test("background decisions, speech and observations preserve the displayed question and allow answering", async (t) => {
+  const h = harness(t); h.seed(); h.plugin.tick();
+  const win = h.windows[0]; win.emit("ready-to-show");
+  const question = h.handlers.get("current")({ sender: win.webContents });
+  await h.bus.notify(EVENTS.DECISION_STARTED, { id: "background" });
+  await h.bus.notify(EVENTS.SPEECH_OUTPUT_STATE, { state: "start", playbackId: "voice" });
+  for (const observation of [{ source: "audio-output" }, { role: "user", source: "chat" }]) {
+    await h.bus.notify(EVENTS.PERCEPTION_OBSERVATION_QUEUED, { observation });
+  }
+  await h.bus.notify(EVENTS.WORK_MEMORY_UPDATED, {});
+  h.idle(0); h.plugin.tick();
+  assert.equal(win.destroyed, false);
+  assert.equal(h.handlers.get("current")({ sender: win.webContents }).id, question.id);
+  assert.deepEqual(h.repo.snapshot().questionHistory[0].records.map((event) => event.action), ["shown"]);
+  h.handlers.get("answer")({ sender: win.webContents }, { action: "answer", text: "主要负责开发" });
+  assert.equal(h.repo.profiles()[0].value, "主要负责开发");
   assert.equal(win.destroyed, true);
+  h.seed("李明"); h.idle(20); h.advance(1000); h.plugin.tick();
+  assert.equal(h.windows.length, 1); // Background work still gates the next popup.
+  await h.bus.notify(EVENTS.DECISION_COMPLETED, { id: "background" });
+  await h.bus.notify(EVENTS.SPEECH_OUTPUT_STATE, { state: "end", playbackId: "voice" });
+  h.plugin.tick(); assert.equal(h.windows.length, 2);
+});
+
+test("only untouched automatic questions expire; focus, input and manual opening protect answers", (t) => {
+  const h = harness(t); h.seed(); h.plugin.tick();
+  const untouched = h.windows[0]; untouched.emit("ready-to-show");
+  assert.equal(h.expiries[0].ms, 90000);
+  h.expiries[0].callback(); assert.equal(untouched.destroyed, true);
   assert.ok(h.repo.snapshot().questions[0].nextAt > h.now());
+  for (const interaction of ["focus", "activity", "manual"]) {
+    h.advance(1000); h.plugin.tick();
+    const win = h.windows.at(-1); win.emit("ready-to-show");
+    const expiry = h.expiries.at(-1);
+    const activity = h.handlers.get("activity");
+    assert.throws(() => activity({ sender: {} }), /来源无效/);
+    if (interaction === "focus") win.emit("focus");
+    else if (interaction === "activity") activity({ sender: win.webContents });
+    else h.plugin.show({ manual: true });
+    assert.equal(expiry.cleared, true);
+    expiry.callback(); // Even an already queued timeout cannot destroy an active answer.
+    h.advance(90001); h.plugin.tick(); assert.equal(win.destroyed, false);
+    h.handlers.get("answer")({ sender: win.webContents }, { action: "defer" });
+  }
+  h.advance(1000); h.plugin.show({ manual: true });
+  const manual = h.windows.at(-1), count = h.expiries.length;
+  manual.emit("ready-to-show"); assert.equal(h.expiries.length, count);
+  h.advance(90001); h.plugin.tick(); assert.equal(manual.destroyed, false);
+  assert.throws(() => h.handlers.get("activity")({ sender: untouched.webContents }), /来源无效/);
 });
 
 test("answers validate sender and selected option, update profile immediately, and close only once", (t) => {
@@ -86,6 +139,59 @@ test("stopping and clearing reject late answers and late window readiness", asyn
   reopened.emit("ready-to-show"); assert.equal(reopened.shows, 0);
   assert.throws(() => answer({ sender: reopened.webContents }, { action: "answer", optionIndex: 0 }), /已关闭/);
   assert.equal(h.repo.profiles().length, 0);
+});
+
+test("removing a displayed question deletes its history without recording an answer or updating memory", (t) => {
+  const h = harness(t); h.seed(); h.seed("李明");
+  const selected = h.repo.nextQuestion({ manual: true });
+  h.repo.markShown(selected.id);
+  h.repo.answer(selected.id, { action: "defer" }, { deferMs: 100 });
+  h.advance(1000);
+  h.plugin.tick();
+  const win = h.windows[0]; win.emit("ready-to-show");
+  const question = h.handlers.get("current")({ sender: win.webContents });
+  assert.equal(question.id, selected.id);
+  const before = h.repo.snapshot();
+  const daily = h.repo.getState("questionDaily");
+  const lastQuestionAt = h.repo.getState("lastQuestionAt");
+  const answer = h.handlers.get("answer");
+  assert.throws(() => answer({ sender: {} }, { action: "remove" }), /来源无效/);
+  assert.equal(win.destroyed, false);
+  const result = answer({ sender: win.webContents }, { action: "remove", text: "不应记录的草稿", optionIndex: 0 });
+  assert.deepEqual(result, { ok: true, action: "remove" });
+  assert.equal(win.destroyed, true);
+  assert.equal(h.expiries[0].cleared, true);
+  h.expiries[0].callback(); // A late expiry must not turn removal into deferral.
+  assert.throws(() => answer({ sender: win.webContents }, { action: "remove" }), /已关闭/);
+  assert.throws(() => h.repo.getQuestion(question.id), /不存在/);
+  assert.equal(h.storage.prepare("SELECT COUNT(*) AS count FROM work_question_answers WHERE question_id = ?").get(question.id).count, 0);
+  const after = h.repo.snapshot();
+  assert.deepEqual(after.profiles, before.profiles);
+  assert.deepEqual(after.recentEvidence, before.recentEvidence);
+  assert.equal(after.questions.length, 1);
+  assert.ok(after.questions.every((q) => q.id !== question.id));
+  assert.deepEqual(after.questionHistory, before.questionHistory.filter((q) => q.id !== question.id));
+  assert.deepEqual(h.repo.getState("questionDaily"), daily);
+  assert.equal(h.repo.getState("lastQuestionAt"), lastQuestionAt);
+  const reopened = createWorkStore(h.storage, { now: h.now });
+  assert.throws(() => reopened.getQuestion(question.id), /不存在/);
+  assert.ok(reopened.nextQuestion({ manual: true }));
+  assert.ok(reopened.nextQuestion({ manual: true }).id !== question.id);
+});
+
+test("removal fails atomically and keeps the popup open when deleting the question fails", (t) => {
+  const h = harness(t); h.seed(); h.plugin.show({ manual: true });
+  const win = h.windows[0]; win.emit("ready-to-show");
+  const before = h.repo.snapshot();
+  h.storage.exec(`CREATE TRIGGER prevent_question_removal BEFORE DELETE ON work_questions
+    BEGIN SELECT RAISE(ABORT, 'delete failed'); END`);
+  assert.throws(() => h.handlers.get("answer")({ sender: win.webContents }, { action: "remove" }), /delete failed/);
+  assert.equal(win.destroyed, false);
+  assert.deepEqual(h.repo.snapshot(), before);
+  h.storage.exec("DROP TRIGGER prevent_question_removal");
+  h.handlers.get("answer")({ sender: win.webContents }, { action: "remove" });
+  assert.equal(win.destroyed, true);
+  assert.deepEqual(h.repo.snapshot().questions, []);
 });
 
 test("manual questions remain open when automatic questions are disabled", (t) => {

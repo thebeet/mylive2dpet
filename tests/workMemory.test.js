@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { workStorage } = require("./helpers/workStorage");
 const { createWorkStore } = require("../electron/plugins/memory/workStore");
-const { parseWorkJson } = require("../electron/plugins/memory/workExtractor");
+const { parseWorkJson, extractWork } = require("../electron/plugins/memory/workExtractor");
 const { parseFactsJson } = require("../electron/plugins/memory/extractor");
 const { createLongTermStore } = require("../electron/plugins/memory/longTerm");
 const { createMemoryPlugin } = require("../electron/plugins/memory");
@@ -74,11 +74,11 @@ test("queue, rate limits and pending evidence survive reconstruction; unknown an
   repo.addEvidence({ id: "first", source: "screen", text: "张琳对接接口" });
   repo.applyExtraction(extraction(repo.pending()), repo.pending());
   repo.addEvidence({ id: "pending", source: "audio-output", text: "下一场会议还有待整理的事项" });
-  repo.setState("sessionSummary", "正在推进支付改造");
+  repo.setState("attentionNote", "正在推进支付改造");
   const q = repo.nextQuestion(); repo.markShown(q.id);
   const reopened = createWorkStore(storage, { now: () => clock });
   assert.equal(reopened.pending()[0].id, "pending");
-  assert.equal(reopened.getState("sessionSummary"), "正在推进支付改造");
+  assert.equal(reopened.getState("attentionNote"), "正在推进支付改造");
   assert.equal(reopened.nextQuestion({ cooldownMs: 1800000, dailyLimit: 3 }), null);
   repo.answer(q.id, { action: "unknown" }, { deferMs: 100, maxSkips: 2 });
   assert.equal(repo.profiles()[0].basis, "inference");
@@ -98,6 +98,135 @@ test("unrelated long-term facts are filtered and malformed fact JSON is retryabl
   assert.equal(repo.retrieve("咖啡").length, 1);
   assert.throws(() => parseFactsJson('[{"text":"用户喜欢喝咖啡"'), /无效 JSON/);
   assert.deepEqual(parseFactsJson("[]"), []);
+});
+
+test("questions prefer stable user profiles, respect deferral, and retain other questions as fallback", (t) => {
+  const { repo } = storeHarness(t);
+  const user = { kind: "user", name: "用户" };
+  repo.applyExtraction({ entities: [], claims: [], questions: [
+    { ...question, priority: 10 },
+    { ...question, subject: user, field: "task", prompt: "你正在处理什么任务？", priority: 10 },
+    { ...question, subject: user, field: "communication", scope: "", prompt: "你更喜欢怎样的沟通方式？", priority: 1 },
+  ] }, []);
+  const profile = repo.nextQuestion();
+  assert.equal(profile.subject.kind, "user");
+  assert.equal(profile.field, "communication");
+  assert.equal(repo.nextQuestion({ manual: true }).id, profile.id);
+  repo.answer(profile.id, { action: "defer" });
+  assert.equal(repo.nextQuestion().subject.kind, "person");
+  assert.equal(repo.nextQuestion({ manual: true }).subject.kind, "person");
+});
+
+test("work details become pending sources while relationship information stays in profiles", async (t) => {
+  const { storage } = storeHarness(t);
+  const h = memoryHarness(storage, async (messages) => {
+    const { evidence } = JSON.parse(messages[1].content);
+    return JSON.stringify({ entities: [], questions: [], claims: [
+      { subject: { kind: "user", name: "用户" }, field: "task", scope: "支付项目", value: "已确认接口重试需要幂等校验", basis: "observation", evidenceIds: [evidence[0].id] },
+      { subject: { kind: "person", name: "张琳" }, field: "relationship", scope: "", value: "用户经常协作的同事", basis: "observation", evidenceIds: [evidence[0].id] },
+    ], summary: "正在讨论支付项目，确认重试需要幂等校验。" });
+  });
+  h.config.plugins[0].longTerm.enabled = true;
+  t.after(() => h.plugin.dispose());
+  await h.bus.notify(EVENTS.PERCEPTION_OBSERVATION_QUEUED, { observation: { id: "routing", role: "user", source: "manual-input",
+    content: [{ type: "text", text: "我和同事张琳确认支付项目接口重试需要幂等校验" }] } });
+  await h.plugin.whenIdle();
+  const snapshot = h.plugin.getSnapshot();
+  assert.equal(snapshot.work.profiles.length, 1);
+  assert.equal(snapshot.work.profiles[0].field, "relationship");
+  assert.equal(Object.hasOwn(snapshot, "summary"), false);
+  assert.equal(snapshot.longTerm.entries.length, 0);
+  const sources = require("../electron/plugins/memory/updateBuffer").createUpdateBuffer(storage).evidence();
+  assert.equal(sources[0].id, "routing");
+  assert.match(sources[0].text, /支付项目.*幂等校验/);
+  assert.equal(snapshot.work.pending, 0);
+});
+
+test("failed pending-source staging preserves evidence and does not update profiles", async (t) => {
+  const { storage } = storeHarness(t);
+  const h = memoryHarness(storage, async (messages) => {
+    const { evidence } = JSON.parse(messages[1].content);
+    return JSON.stringify({ entities: [], questions: [], claims: [], summary: "不应保存的摘要",
+      facts: [{ text: "接口结论待确认", type: "event", tags: [], importance: 2, evidenceIds: [evidence[0].id] }] });
+  });
+  h.config.plugins[0].longTerm.enabled = true;
+  createLongTermStore(storage);
+  require("../electron/plugins/memory/updateBuffer").createUpdateBuffer(storage);
+  storage.exec(`CREATE TRIGGER reject_routed_fact BEFORE INSERT ON memory_update_sources BEGIN SELECT RAISE(ABORT, 'blocked'); END`);
+  t.after(() => h.plugin.dispose());
+  await h.bus.notify(EVENTS.PERCEPTION_OBSERVATION_QUEUED, { observation: { id: "pending-route", source: "audio-output", role: "context",
+    content: [{ type: "text", text: "讨论接口结论" }] } });
+  await h.plugin.whenIdle();
+  assert.equal(Object.hasOwn(h.plugin.getState(), "sessionSummary"), false);
+  assert.equal(h.plugin.getSnapshot().work.pending, 1);
+  assert.deepEqual(h.plugin.getSnapshot().longTerm.entries, []);
+});
+
+test("legacy work details migrate without losing confirmed content or unrelated long-term facts", (t) => {
+  const { repo, storage } = storeHarness(t);
+  const long = createLongTermStore(storage);
+  long.appendBatch([{ text: "用户喜欢阅读技术书籍" }]);
+  repo.applyExtraction({ entities: [], questions: [], claims: [
+    { subject: { kind: "user", name: "用户" }, field: "task", scope: "支付项目", value: "确认使用幂等校验", evidenceIds: ["legacy"] },
+    { subject: { kind: "person", name: "同事" }, field: "relationship", scope: "", value: "用户的同事", evidenceIds: ["legacy"] },
+  ] }, [{ id: "legacy" }]);
+  const task = repo.profiles().find((p) => p.field === "task");
+  repo.correctProfile(task.id, "重试必须进行幂等校验");
+  const confirmed = repo.profiles().find((p) => p.field === "task");
+  assert.deepEqual(repo.migrateWorkDetails(long), { moved: 1 });
+  assert.equal(repo.profiles().length, 1);
+  assert.equal(repo.profiles()[0].field, "relationship");
+  const migrated = long.list().find((fact) => fact.text.includes("幂等校验"));
+  assert.equal(migrated.metadata.basis, "user_answer");
+  assert.deepEqual(migrated.metadata.sourceProfileIds, [confirmed.id]);
+  assert.ok(long.list().some((fact) => fact.text === "用户喜欢阅读技术书籍"));
+  assert.deepEqual(repo.migrateWorkDetails(long), { moved: 0 });
+});
+
+test("history deletion removes answers and whole questions while retaining confirmed profiles", (t) => {
+  const { repo, storage } = storeHarness(t);
+  repo.addEvidence({ id: "history-delete", source: "screen", text: "张琳负责接口" });
+  repo.applyExtraction(extraction(repo.pending()), repo.pending());
+  const q = repo.nextQuestion(); repo.markShown(q.id);
+  repo.answer(q.id, { action: "answer", optionIndex: 0 });
+  const before = repo.profiles();
+  const records = repo.snapshot().questionHistory[0].records;
+  const answer = records.find((r) => r.action === "answer");
+  assert.throws(() => repo.deleteAnswer("foreign-question", answer.id), /不存在/);
+  assert.throws(() => repo.deleteAnswer(q.id, records.find((r) => r.action === "shown").id), /答案不存在/);
+  repo.deleteAnswer(q.id, answer.id);
+  assert.deepEqual(repo.snapshot().questionHistory[0].records.map((r) => r.action), ["shown"]);
+  assert.deepEqual(repo.profiles(), before);
+  repo.deleteQuestion(q.id);
+  assert.deepEqual(repo.snapshot().questionHistory, []);
+  assert.deepEqual(repo.profiles(), before);
+  assert.equal(storage.prepare("SELECT COUNT(*) AS count FROM work_question_answers").get().count, 0);
+});
+
+test("user profiles survive crowded extraction context and answers update the user profile", async (t) => {
+  const { repo } = storeHarness(t);
+  const user = { subject: { kind: "user", name: "用户" }, field: "responsibility", scope: "",
+    value: "服务端开发", basis: "user_answer", aliases: [] };
+  const others = Array.from({ length: 45 }, (_, i) => ({ ...user,
+    subject: { kind: "person", name: `同事${i}` }, basis: "inference" }));
+  const profiles = [...others, user];
+  const result = await extractWork({ evidence: [{ id: "chat", source: "user", text: "我喜欢直接看结论" }], profiles,
+    callChat: async (messages) => {
+      const input = JSON.parse(messages[1].content);
+      assert.equal(input.currentProfiles.length, 40);
+      assert.deepEqual(input.currentProfiles[0].subject, user.subject);
+      assert.equal(input.currentProfiles[0].basis, "user_answer");
+      return JSON.stringify({ entities: [], claims: [], questions: [{ ...question,
+        subject: user.subject, field: "communication", scope: "", prompt: "你更喜欢先给结论还是完整过程？",
+        options: [{ label: "先给结论", value: "先给结论再补充必要细节" }, { label: "完整过程", value: "说明完整过程" }] }] });
+    } });
+  assert.equal(profiles[0].subject.kind, "person");
+  repo.applyExtraction(result, []);
+  const q = repo.nextQuestion();
+  repo.answer(q.id, { action: "answer", optionIndex: 0 });
+  assert.equal(repo.profiles()[0].subject.kind, "user");
+  assert.equal(repo.profiles()[0].field, "communication");
+  assert.equal(repo.profiles()[0].value, "先给结论再补充必要细节");
 });
 
 test("question history preserves every display and response across reopening and excludes unasked candidates", (t) => {
@@ -127,7 +256,7 @@ function memoryHarness(storage, generate, clock = Date.now) {
   const bus = new MessageBus({ logger: quiet });
   const services = new Map([["storage-sqlite.database", storage], ["model.text", generate]]);
   const config = { plugins: [{ name: "memory", enabled: true, textService: "model.text",
-    summary: { enabled: false }, longTerm: { enabled: false }, work: { enabled: true, extractEveryNObservations: 1 } }] };
+    longTerm: { enabled: false }, work: { enabled: true, extractEveryNObservations: 1 } }] };
   let provide;
   const plugin = createMemoryPlugin({ bus, logger: quiet, config: { get: () => config },
     services: { get: (name) => services.get(name), register: (name, service) => { services.set(`memory.${name}`, service); return () => services.delete(`memory.${name}`); } },
@@ -178,18 +307,20 @@ test("late extraction cannot repopulate cleared memory or its question queue", a
   assert.equal(h.plugin.getSnapshot().work.pending, 0);
 });
 
-test("work observations and summary are restored after plugin disposal", async (t) => {
+test("work observations survive disposal while legacy session summaries are removed", async (t) => {
   const { storage } = storeHarness(t);
   const h = memoryHarness(storage, async () => "not-json");
   await h.bus.notify(EVENTS.PERCEPTION_OBSERVATION_QUEUED, { observation: { id: "persist", source: "audio-output", role: "context",
     content: [{ type: "text", text: "张琳负责支付接口" }] } });
   await h.plugin.whenIdle();
   createWorkStore(storage).setState("sessionSummary", "支付改造还在联调");
+  storage.prepare("UPDATE test_migrations SET version = 2 WHERE namespace = ?").run("work-memory");
   await h.plugin.dispose();
   const reopened = memoryHarness(storage, async (messages) => JSON.stringify(extraction(JSON.parse(messages[1].content).evidence)));
   t.after(() => reopened.plugin.dispose());
-  assert.equal(reopened.plugin.getState().sessionSummary, "支付改造还在联调");
+  assert.equal(Object.hasOwn(reopened.plugin.getState(), "sessionSummary"), false);
   assert.equal(reopened.plugin.getSnapshot().work.pending, 1);
+  assert.equal(storage.prepare("SELECT value FROM work_memory_state WHERE key = ?").get("sessionSummary"), undefined);
   reopened.plugin.start(); await reopened.plugin.whenIdle();
   assert.equal(reopened.plugin.getSnapshot().work.profiles[0].subject.name, "张琳");
 });

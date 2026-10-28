@@ -42,8 +42,8 @@
         "model": "gpt-4o",
         "apiKey": "sk-xxx",
         "max_tokens": 1024,
-        "timeoutMs": 30000,
-        "retryBudgetMs": 90000
+        "timeoutMs": 120000,
+        "retryBudgetMs": 360000
       },
       "character": {
         "cardName": "后辈",
@@ -121,22 +121,16 @@
         "ttlMs": 1800000,
         "_comment": "近期对话与观察缓冲，注入用户消息的补充上下文；不存旧截图"
       },
-      "summary": {
-        "enabled": true,
-        "everyNTurns": 6,
-        "keepTurnsAfterSummary": 3,
-        "maxTokens": 256,
-        "_comment": "滚动会话摘要，拉长有效关联窗口"
-      },
       "longTerm": {
         "maxInject": 5,
-        "extractEveryNTurns": 3,
-        "maxTokens": 256,
+        "extractEveryNTurns": 20,
+        "maxTokens": 16384,
         "maxEntries": 500,
         "enabled": true,
-        "legacyPath": "logs/memory.jsonl"
+        "legacyPath": "logs/memory.jsonl",
+        "_comment": "每20次非静默对话，将完整待处理对话和现有长期记忆一起更新；优先修改已有条目，新增要求高价值且有明确来源"
       },
-      "_comment": "统一记忆插件：enabled 控制整个插件；shortTerm/summary/longTerm 可独立关闭。",
+      "_comment": "统一记忆插件：enabled 控制整个插件；shortTerm/longTerm 可独立关闭。",
       "storageService": "storage-sqlite.database",
       "work": {
         "enabled": true,

@@ -5,6 +5,7 @@ module.exports = Object.freeze({
   PERCEPTION_OBSERVATION_QUEUED: "perception.observation.queued",
   PERCEPTION_OBSERVATION_RELEASED: "perception.observation.released",
   PERCEPTION_SKIPPED: "perception.skipped",
+  BUBBLE_OUTPUT_REQUESTED: "execution.bubble.requested",
   SPEECH_OUTPUT_REQUESTED: "execution.speech.requested",
   SPEECH_OUTPUT_STOP_REQUESTED: "execution.speech.stop.requested",
   SPEECH_OUTPUT_STATE: "execution.speech.state",
