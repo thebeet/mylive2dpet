@@ -1,17 +1,16 @@
+const { getPlugin } = require("../registry");
+
 function bounded(value, fallback, min, max) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
 }
 
 function getAudioOutputOptions(config = {}) {
-  const plugin = (Array.isArray(config.plugins) ? config.plugins : [])
-    .find((item) => item?.name === "audio-output-perception") || null;
-  const audio = plugin ||
-    // Transitional support for existing user configs using the old location.
-    config.perception?.audioOutput || {};
+  const plugin = getPlugin(config, "audio-output-perception");
+  const audio = plugin || {};
   const asr = audio.asr || {};
   return {
-    enabled: plugin ? plugin.enabled !== false : audio.enabled === true,
+    enabled: Boolean(plugin && plugin.enabled !== false),
     source: String(audio.source || "default"),
     sampleRate: 16000,
     frameMs: 20,

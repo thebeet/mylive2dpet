@@ -1,10 +1,13 @@
 const { createChatService } = require("./chat");
+const EVENTS = require("../../architecture/events");
 
 function activate(context) {
   const chat = createChatService({
     getConfig: context.config.get,
     getExpressions: context.pet.getExpressions,
     logger: context.logger,
+    onRequest: (entry) => context.bus.notify(EVENTS.AI_REQUEST_STARTED, entry),
+    onResult: (entry) => context.bus.notify(EVENTS.AI_REQUEST_FINISHED, entry),
   });
   const controllers = new Set();
   const tasks = new Set();

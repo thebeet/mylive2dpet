@@ -1,4 +1,6 @@
 module.exports = Object.freeze({
+  AI_REQUEST_STARTED: "ai.request.started",
+  AI_REQUEST_FINISHED: "ai.request.finished",
   PERCEPTION_OBSERVATION: "perception.observation",
   PERCEPTION_OBSERVATION_QUEUED: "perception.observation.queued",
   PERCEPTION_OBSERVATION_RELEASED: "perception.observation.released",
@@ -12,4 +14,6 @@ module.exports = Object.freeze({
   DECISION_STARTED: "decision.started",
   DECISION_COMPLETED: "decision.completed",
   PIPELINE_FAILED: "pipeline.failed",
+  WORK_MEMORY_UPDATED: "memory.work.updated",
+  MEMORY_CLEARED: "memory.cleared",
 });

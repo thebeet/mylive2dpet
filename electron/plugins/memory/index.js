@@ -6,6 +6,8 @@ const { createSummarizer } = require("./summarizer");
 const extractor = require("./extractor");
 const longTerm = require("./longTerm");
 const { formatRecentDialogue, buildContextBlocks } = require("./context");
+const { createMemoryViewer } = require("./viewer");
+const { createWorkMemory } = require("./workMemory");
 
 /** Owns all memory state and reacts to successful, validated decisions. */
 function createMemoryPlugin(context, dependencies = {}) {
@@ -25,10 +27,17 @@ function createMemoryPlugin(context, dependencies = {}) {
   let controller = null;
   let warnedService = null;
   let clearing = null;
+  let confirmation = null;
+  let confirmationController = null;
   const inFlightDecisions = new Set();
   const ignoredDecisions = new Set();
 
   const options = () => getOptions(context.config.get());
+  const work = createWorkMemory(context, { options, now: dependencies.now || Date.now,
+    isAvailable: () => active && !disposed && !clearing });
+  if (options().work.enabled) {
+    try { summarizer.set(work.restoreSummary()); } catch (error) { context.logger.warn("work memory initialization failed:", error); }
+  }
   function getDurable() {
     if (durable) return durable;
     const config = options();
@@ -61,7 +70,8 @@ function createMemoryPlugin(context, dependencies = {}) {
       summarizer.shouldSummarize(config.summary, totalTurns - summarizedThrough, turns.length);
     const extract = Boolean(extractionText) && config.longTerm.enabled &&
       extractor.shouldExtract(config.longTerm, totalTurns - extractedThrough);
-    if (!summarize && !extract) return;
+    const extractWork = work.due();
+    if (!summarize && !extract && !extractWork) return;
 
     const generate = context.services.get(config.textService);
     if (typeof generate !== "function") {
@@ -87,6 +97,7 @@ function createMemoryPlugin(context, dependencies = {}) {
           });
           if (next && valid(snapshot) && options().summary.enabled) {
             summarizer.set(next);
+            work.saveSummary(next);
             summarizedThrough = snapshot.through;
             buffer.foldSnapshot(snapshot.turns, config.summary.keepTurnsAfterSummary, config.shortTerm);
             context.logger.info("session summary updated:", next.slice(0, 120));
@@ -125,6 +136,10 @@ function createMemoryPlugin(context, dependencies = {}) {
           if (valid(snapshot)) context.logger.warn("extraction failed:", error);
         }
       }
+      if (extractWork && valid(snapshot)) {
+        try { await work.maintain({ callChat, valid: () => valid(snapshot) }); }
+        catch (error) { if (valid(snapshot)) context.logger.warn("work extraction failed:", error); }
+      }
     } finally {
       if (controller === abortController) controller = null;
     }
@@ -150,22 +165,25 @@ function createMemoryPlugin(context, dependencies = {}) {
   function recordDecision({ id, sessionId, observations, result, trigger }) {
     inFlightDecisions.delete(id);
     if (ignoredDecisions.delete(id) || clearing) return;
+    try { work.ingestDecision({ id, sessionId, observations, result, trigger }); }
+    catch (error) { context.logger.warn("work observation record failed:", error); }
     try {
       const config = options();
       if (!active || disposed || !config.enabled ||
-          !(config.shortTerm.enabled || config.summary.enabled || config.longTerm.enabled)) return;
+          !(config.shortTerm.enabled || config.summary.enabled || config.longTerm.enabled || config.work.enabled)) return;
       const userMessage = observations.filter(({ role }) => role === "user")
         .flatMap(({ content }) => content.filter(({ type }) => type === "text"))
         .map(({ text }) => text.trim()).filter(Boolean).join("\n");
       const turn = buffer.append({
         decisionId: id, sessionId,
         reply: result.reply,
+        speak: result.speak,
         expression: result.expression,
         summaries: result.summaries,
         userMessage,
         trigger: trigger || observations.map((item) => item.trigger).filter(Boolean).join(","),
       }, { ...config.shortTerm, enabled: true });
-      if (!turn) return;
+      if (!turn) { if (config.work.enabled) scheduleMaintenance(); return; }
       if (config.longTerm.enabled) extractionBuffer.append(turn, { ...config.shortTerm, enabled: true });
       totalTurns += 1;
       scheduleMaintenance();
@@ -183,23 +201,34 @@ function createMemoryPlugin(context, dependencies = {}) {
     let longTermMemory = "";
     if (config.longTerm.enabled) {
       try {
-        const query = [sessionSummary, turnsText, ...observations
-          .filter(({ role }) => role === "user")
+        const query = [...observations
           .flatMap(({ content }) => content.filter(({ type }) => type === "text"))
-          .map(({ text }) => text)].filter(Boolean).join("\n");
+          .map(({ text }) => text), sessionSummary, turnsText].filter(Boolean).join("\n");
         const store = getDurable();
         longTermMemory = store.formatForPrompt(store.retrieve(query, config.longTerm));
       } catch (error) {
         context.logger.warn("retrieval failed:", error);
       }
     }
-    if (totalTurns) scheduleMaintenance();
-    return buildContextBlocks({
+    if (totalTurns || config.work.enabled) scheduleMaintenance();
+    const blocks = buildContextBlocks({
       longTermMemory, sessionSummary,
       recentDialogue: config.shortTerm.enabled ? turnsText : "",
     });
+    try {
+      const query = [...observations.flatMap((o) => o.content.filter((p) => p.type === "text").map((p) => p.text)),
+        ...buffer.list(config.shortTerm).slice(-2).map((t) => t.summaries.work || t.summaries.screen || "")].join("\n");
+      const text = work.context(query);
+      if (text) blocks.unshift({ id: "work-profiles", title: "人物与项目画像（猜测可修正）", text });
+    } catch (error) { context.logger.warn("work context failed:", error); }
+    return blocks;
   }
 
+  const unsubscribeObservation = context.bus.subscribe(EVENTS.PERCEPTION_OBSERVATION_QUEUED, ({ observation }) => {
+    try { work.ingestObservation(observation); if (options().work.enabled) scheduleMaintenance(); }
+    catch (error) { context.logger.warn("work evidence record failed:", error); }
+  });
+  let maintenanceTimer = null;
   const unregisterContext = context.decisionContext.register(provideContext);
   const unsubscribeStarted = context.bus.subscribe(EVENTS.DECISION_STARTED, ({ id }) => {
     inFlightDecisions.add(id);
@@ -220,10 +249,12 @@ function createMemoryPlugin(context, dependencies = {}) {
     buffer.clear();
     extractionBuffer.clear();
     summarizer.clear();
+    void context.bus.notify(EVENTS.MEMORY_CLEARED, {});
     totalTurns = summarizedThrough = extractedThrough = 0;
     const maintenance = task;
     clearing = Promise.resolve().then(async () => {
       if (maintenance) await maintenance;
+      work.clear();
       const config = options();
       const legacyPath = path.resolve(context.paths?.projectRoot || path.resolve(__dirname, "../../.."), config.longTerm.legacyPath);
       if (durable || context.services.get(config.storageService)) {
@@ -238,24 +269,94 @@ function createMemoryPlugin(context, dependencies = {}) {
     context.menu?.refresh();
     return clearing;
   }
+  function confirmClear() {
+    if (confirmation || clearing) return confirmation || clearing;
+    if (!active || disposed) return Promise.reject(new Error("记忆插件已停止"));
+    const currentGeneration = generation;
+    confirmationController = new AbortController();
+    const signal = confirmationController.signal;
+    confirmation = Promise.resolve().then(async () => {
+      if (signal.aborted) return;
+      const { response } = await context.dialogs.showMessageBox({
+        type: "warning", title: "清空全部记忆", message: "确定要清空全部记忆吗？",
+        detail: "近期对话、会话摘要、长期记忆、工作画像、观察证据和提问记录将被永久清除；保留历史对话。此操作无法撤销。",
+        buttons: ["取消", "清空全部记忆"], defaultId: 0, cancelId: 0, noLink: true, signal,
+      });
+      if (response === 1 && !signal.aborted && active && !disposed && generation === currentGeneration) {
+        return clear();
+      }
+    }).finally(() => {
+      confirmation = null;
+      confirmationController = null;
+      context.menu?.refresh();
+    });
+    context.menu?.refresh();
+    return confirmation;
+  }
+
+  function getSnapshot() {
+    const config = options();
+    let entries = [];
+    let error = null;
+    try {
+      if (durable?.list) entries = durable.list();
+      else {
+        const storage = context.services.get(config.storageService);
+        if (!storage) throw new Error("长期记忆存储不可用");
+        entries = longTerm.listEntries(storage);
+      }
+    } catch (cause) { error = String(cause.message || cause); }
+    let workSnapshot;
+    try { workSnapshot = work.snapshot(); }
+    catch (cause) { workSnapshot = { enabled: options().work.enabled, error: String(cause.message || cause), profiles: [], questions: [], recentEvidence: [], pending: 0 }; }
+    return {
+      enabled: config.enabled, totalTurns, maintaining: Boolean(task), clearing: Boolean(clearing),
+      shortTerm: { enabled: config.shortTerm.enabled, maxTurns: config.shortTerm.maxTurns,
+        ttlMs: config.shortTerm.ttlMs, turns: buffer.list(config.shortTerm) },
+      summary: { enabled: config.summary.enabled, text: summarizer.get() },
+      longTerm: { enabled: config.longTerm.enabled, maxEntries: config.longTerm.maxEntries,
+        entries, error },
+      pendingFacts: extractionBuffer.list(config.shortTerm).length,
+      work: workSnapshot,
+    };
+  }
+  const viewer = createMemoryViewer(context, { getSnapshot, isAvailable: () => active && !disposed && !clearing,
+    correctProfile: (id, text) => work.api.correctProfile(id, text) });
   const unregisterClear = context.services.register?.("clear", clear) || (() => {});
-  const unregisterMenu = context.menu?.register(() => [{ label: "记忆", submenu: [{
-    label: clearing ? "正在清空记忆…" : "清空全部记忆",
-    enabled: active && !clearing && !disposed && Boolean(durable || context.services.get(options().storageService)),
-    click: clear,
-  }] }]) || (() => {});
+  const unregisterWork = context.services.register?.("work", work.api) || (() => {});
+  const unregisterMenu = context.menu?.register(() => [{ label: "记忆", submenu: [
+    { label: "查看当前记忆…", enabled: active && !disposed, click: viewer.show },
+    { type: "separator" },
+    {
+      label: clearing ? "正在清空记忆…" : "清空全部记忆",
+      enabled: active && !clearing && !confirmation && !disposed && Boolean(durable || context.services.get(options().storageService)),
+      click: confirmClear,
+    },
+  ] }]) || (() => {});
 
   function stop() {
     active = false;
+    confirmationController?.abort();
+    viewer.close();
     requested = false;
     generation += 1;
     controller?.abort();
     controller = null;
+    if (maintenanceTimer) clearInterval(maintenanceTimer);
+    maintenanceTimer = null;
     return Promise.allSettled([task, clearing].filter(Boolean));
   }
 
   return {
-    start() { if (!disposed) { active = true; if (totalTurns) scheduleMaintenance(); } },
+    start() {
+      if (disposed) return;
+      active = true;
+      if (options().work.enabled && !maintenanceTimer) {
+        maintenanceTimer = setInterval(() => scheduleMaintenance(), 30000);
+        maintenanceTimer.unref?.();
+      }
+      if (totalTurns || options().work.enabled) scheduleMaintenance();
+    },
     stop,
     dispose() {
       const done = stop();
@@ -264,8 +365,12 @@ function createMemoryPlugin(context, dependencies = {}) {
       unsubscribeStarted();
       unsubscribeDecision();
       unsubscribeFailed();
+      unsubscribeObservation();
+      if (maintenanceTimer) clearInterval(maintenanceTimer);
       unregisterClear();
+      unregisterWork();
       unregisterMenu();
+      viewer.dispose();
       buffer.clear();
       extractionBuffer.clear();
       summarizer.clear();
@@ -280,6 +385,7 @@ function createMemoryPlugin(context, dependencies = {}) {
       totalTurns, summarizedThrough, extractedThrough,
     }),
     clear,
+    getSnapshot,
     async whenIdle() { while (task || clearing) await Promise.all([task, clearing].filter(Boolean)); },
   };
 }

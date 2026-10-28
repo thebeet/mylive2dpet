@@ -36,6 +36,9 @@ function extractChatPayload(raw, allowedExpressions = []) {
       response: response || null,
       screenSummary: screenSummary || null,
       audioSummary: String(fromJson.audioSummary || "").trim() || null,
+      workSummary: String(fromJson.workSummary || "").trim() || null,
+      shouldSpeak: fromJson.shouldSpeak !== false,
+      structured: true,
       raw: text,
     };
   }

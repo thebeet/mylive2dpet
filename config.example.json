@@ -8,7 +8,7 @@
     "provider": "ai-conversation",
     "enabled": true,
     "interval_ms": 10000,
-    "_comment": "选择已注册的决策插件；每次结束后等待 interval_ms，负数关闭自动决策，保留手动触发。兼容旧 chat.enabled/interval_ms。"
+    "_comment": "选择已注册的决策插件；每次结束后等待 interval_ms，负数关闭自动决策，保留手动触发。"
   },
   "plugins": [
     {
@@ -27,6 +27,11 @@
       "enabled": true,
       "storageService": "storage-sqlite.database",
       "legacyPath": "logs/dialogue-history.jsonl"
+    },
+    {
+      "name": "raw-log",
+      "enabled": true,
+      "_comment": "原始请求日志：按聊天消息查看每次模型请求，包含图片、重试与返回结果，保存到 SQLite；默认启用。"
     },
     {
       "name": "ai-conversation",
@@ -51,7 +56,7 @@
         "rules": "【规则——必须严格遵守】\n1. 只回复1-2句话……",
         "language": "中文"
       },
-      "_comment": "AI 对话插件：模型请求、提示词与结果解析；ai/character 兼容旧根节点配置。"
+      "_comment": "AI 对话插件：模型请求、提示词与结果解析。"
     },
     {
       "name": "screen-perception",
@@ -62,12 +67,12 @@
         "hashSize": 8,
         "threshold": 4
       },
-      "_comment": "视觉感知插件：enabled 控制自动截图，手动截图仍可用；兼容旧 perception.enabled/interval_ms 与 chat.changeDetect。",
+      "_comment": "视觉感知插件：enabled 控制自动截图，手动截图仍可用。",
       "observationTtlMs": 60000
     },
     {
       "name": "audio-output-perception",
-      "enabled": false,
+      "enabled": true,
       "source": "default",
       "speechThresholdDb": -40,
       "minSpeechMs": 400,
@@ -88,7 +93,7 @@
     },
     {
       "name": "tts",
-      "enabled": true,
+      "enabled": false,
       "provider": "gpt-sovits",
       "interruptOnNewChat": true,
       "_comment_provider": "system | gpt-sovits。gpt-sovits 需本机先启动 GPT-SoVITS api_v2.py（默认 9880）",
@@ -114,7 +119,7 @@
         "enabled": true,
         "maxTurns": 8,
         "ttlMs": 1800000,
-        "_comment": "进程内近期独白缓冲，注入 system；不存旧截图"
+        "_comment": "近期对话与观察缓冲，注入用户消息的补充上下文；不存旧截图"
       },
       "summary": {
         "enabled": true,
@@ -131,8 +136,33 @@
         "enabled": true,
         "legacyPath": "logs/memory.jsonl"
       },
-      "_comment": "统一记忆插件：enabled 控制整个插件；shortTerm/summary/longTerm 可独立关闭。旧根节点 memory 与旧插件平铺长期参数仍兼容。",
-      "storageService": "storage-sqlite.database"
+      "_comment": "统一记忆插件：enabled 控制整个插件；shortTerm/summary/longTerm 可独立关闭。",
+      "storageService": "storage-sqlite.database",
+      "work": {
+        "enabled": true,
+        "extractEveryNObservations": 3,
+        "flushAfterMs": 120000,
+        "batchSize": 16,
+        "maxTokens": 1800,
+        "maxEvidence": 2000,
+        "maxQuestions": 30,
+        "maxClaims": 20,
+        "maxContextChars": 8000,
+        "_comment": "从飞书截图、文档和会议转写完善人物与项目画像，允许可修正的猜测"
+      }
+    },
+    {
+      "name": "questions",
+      "enabled": true,
+      "auto": true,
+      "dailyLimit": 3,
+      "cooldownMs": 1800000,
+      "deferMs": 1800000,
+      "minIdleSeconds": 8,
+      "maxIdleSeconds": 300,
+      "maxSkips": 3,
+      "pollMs": 15000,
+      "timeoutMs": 90000
     }
   ],
   "observations": {

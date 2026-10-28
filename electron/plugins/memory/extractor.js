@@ -26,7 +26,7 @@ function shouldExtract(cfg = {}, pendingTurns = 0) {
  */
 function parseFactsJson(raw) {
   const text = String(raw || "").trim();
-  if (!text) return [];
+  if (!text) throw new Error("事实提取返回空内容");
 
   let jsonText = text;
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -42,9 +42,9 @@ function parseFactsJson(raw) {
   try {
     arr = JSON.parse(jsonText);
   } catch {
-    return [];
+    throw new Error("事实提取返回无效 JSON");
   }
-  if (!Array.isArray(arr)) return [];
+  if (!Array.isArray(arr)) throw new Error("事实提取必须返回 JSON 数组");
 
   /** @type {{ type: string, text: string, tags: string[], importance: number }[]} */
   const out = [];

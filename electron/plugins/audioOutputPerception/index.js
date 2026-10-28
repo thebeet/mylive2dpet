@@ -4,6 +4,7 @@ const { getAudioOutputOptions } = require("./options");
 const { AudioSegmenter } = require("./segmenter");
 const { resolveMonitorSource, startLinuxCapture } = require("./capture/linux");
 const { transcribeAudio, validateAsrOptions } = require("./transcribe");
+const { createLiveWindow } = require("./liveWindow");
 
 const isAudio = (observation) => observation.source === "audio-output";
 
@@ -27,6 +28,7 @@ function registerAudioOutputPerceptionPlugin(bus, dependencies = {}) {
   }
   let options = getAudioOutputOptions(readConfig());
   let state = { enabled: false, status: "disabled", source: "", error: "" };
+  const liveWindow = createLiveWindow({ ...dependencies, logger });
   let captureHandle = null;
   let segmenter = null;
   let retryTimer = null;
@@ -42,6 +44,7 @@ function registerAudioOutputPerceptionPlugin(bus, dependencies = {}) {
     const next = { ...state, ...update };
     if (JSON.stringify(next) === JSON.stringify(state)) return;
     state = next;
+    liveWindow.setState(state);
     dependencies.menu?.refresh?.();
     logger.info(
       "audio state:",
@@ -85,6 +88,7 @@ function registerAudioOutputPerceptionPlugin(bus, dependencies = {}) {
           });
           if (!state.enabled || generation !== sessionGeneration) return;
           if (!result.text || Date.now() - Date.parse(segment.endedAt) > options.observationTtlMs) continue;
+          liveWindow.addTranscript({ text: result.text, capturedAt: segment.endedAt });
           const normalized = result.text.replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
           const now = Date.now();
           for (const [text, at] of recentTranscripts) {
@@ -168,6 +172,7 @@ function registerAudioOutputPerceptionPlugin(bus, dependencies = {}) {
 
   function stop() {
     generation += 1;
+    liveWindow.stop();
     clearTimeout(retryTimer);
     retryTimer = null;
     const captureStopped = captureHandle?.stop();
@@ -215,6 +220,7 @@ function registerAudioOutputPerceptionPlugin(bus, dependencies = {}) {
       const done = stop();
       unsubscribeTts();
       unregisterMenuContribution();
+      liveWindow.dispose();
       playbacks.clear();
       return done;
     },
@@ -241,6 +247,15 @@ function registerAudioOutputPerceptionPlugin(bus, dependencies = {}) {
               checked: !audioState.enabled,
               click: () => plugin.stop(),
             },
+            {
+              label: "实时显示内容",
+              submenu: [
+                { label: "开启", type: "radio", checked: liveWindow.isEnabled(),
+                  click: () => liveWindow.setEnabled(true) },
+                { label: "关闭", type: "radio", checked: !liveWindow.isEnabled(),
+                  click: () => liveWindow.setEnabled(false) },
+              ],
+            },
             { type: "separator" },
             {
               label: `设备音频：${audioStatusLabel(audioState, platform)}`,
@@ -262,6 +277,9 @@ function activate(context) {
     menu: context.menu,
     logger: context.logger,
     perception: context.perception,
+    windows: context.windows,
+    screen: context.screen,
+    ipc: context.ipc,
   });
 }
 

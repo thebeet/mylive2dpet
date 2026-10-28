@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'" />
+    <title>设备语音实时内容</title>
+    <style>
+      :root { color-scheme: dark; color: #eef0f6; background: #10131a;
+        font-family: "Noto Sans SC", "Microsoft YaHei", sans-serif; }
+      * { box-sizing: border-box; }
+      body { margin: 0; height: 100vh; display: flex; flex-direction: column; border: 1px solid #ffffff22; }
+      header { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+        padding: 12px 14px 8px; -webkit-app-region: drag; }
+      h1 { margin: 0; font-size: 14px; font-weight: 600; }
+      button { -webkit-app-region: no-drag; color: #a6a9b8; background: transparent; border: 0;
+        border-radius: 5px; font: inherit; font-size: 19px; line-height: 1; cursor: pointer; padding: 3px 6px; }
+      button:hover { background: #ffffff12; color: #fff; }
+      #status { margin: 0; padding: 0 14px 10px; font-size: 11px; color: #a6a9b8; }
+      #status[data-status="listening"] { color: #8bdbad; }
+      #status[data-status="error"] { color: #ff9eae; }
+      main { min-height: 0; overflow-y: auto; flex: 1; padding: 0 14px 14px; border-top: 1px solid #ffffff12; }
+      article { padding-top: 10px; }
+      article + article { margin-top: 10px; border-top: 1px solid #ffffff0d; }
+      time { color: #9096a8; font-size: 10px; }
+      .text { margin: 4px 0 0; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .empty { color: #a6a9b8; padding-top: 16px; font-size: 12px; line-height: 1.6; }
+    </style>
+  </head>
+  <body>
+    <header><h1>设备语音</h1><button id="close" type="button" aria-label="关闭实时显示" title="关闭实时显示">×</button></header>
+    <p id="status" role="status">正在读取监听状态…</p>
+    <main id="entries" role="log" aria-live="polite"></main>
+    <script src="live.js"></script>
+  </body>
+</html>

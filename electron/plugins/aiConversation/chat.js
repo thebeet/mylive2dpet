@@ -1,4 +1,5 @@
 const path = require("path");
+const { randomUUID } = require("crypto");
 const { buildSystemPrompt } = require("./prompt");
 const { extractChatPayload } = require("./parseChatText");
 const { getOptions } = require("./options");
@@ -11,6 +12,8 @@ function createChatService({ getConfig, getExpressions, logger = console,
   fetchImpl,
   encodeImage,
   writeLog,
+  onRequest,
+  onResult,
   configureProxy = null,
 }) {
   function getNetworkSession() {
@@ -67,6 +70,12 @@ function createChatService({ getConfig, getExpressions, logger = console,
   const RETRY_BASE_MS = 800;
   const OPENAI_LOG_PATH = path.join(__dirname, "../../../logs/openai.jsonl");
   const appendLog = writeLog || createRotatingLog(OPENAI_LOG_PATH);
+  const sessionId = randomUUID();
+
+  async function notifyLog(observer, entry) {
+    try { await observer?.(entry); }
+    catch (error) { logger.warn("[ai:raw-log] record failed:", error.message); }
+  }
 
   function sleep(ms, signal) {
     return new Promise((resolve, reject) => {
@@ -124,12 +133,24 @@ function createChatService({ getConfig, getExpressions, logger = console,
     let lastError;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      let requestId;
+      let startedAt;
+      let status = null;
+      let response = null;
       try {
         init.signal?.throwIfAborted();
         const { ai } = getOptions(getConfig());
         const { res, text } = await withTimeout(async (signal) => {
+          signal.throwIfAborted();
+          requestId = randomUUID();
+          startedAt = Date.now();
+          await notifyLog(onRequest, { id: requestId, sessionId, t: startedAt,
+            label, request: JSON.parse(init.body) });
+          signal.throwIfAborted();
           const res = await fetchChat(url, { ...init, signal });
+          status = res.status;
           const text = await res.text();
+          response = text;
           signal.throwIfAborted();
           return { res, text };
         }, { signal: init.signal, timeoutMs: Number(ai.timeoutMs) || 30000 });
@@ -176,8 +197,12 @@ function createChatService({ getConfig, getExpressions, logger = console,
           ).trim(),
           body: data,
         });
+        await notifyLog(onResult, { id: requestId, status, response: data,
+          finishedAt: Date.now(), error: "" });
         return data;
       } catch (err) {
+        if (requestId) await notifyLog(onResult, { id: requestId, status, response,
+          finishedAt: Date.now(), error: String(err?.message || err) });
         if (init.signal?.aborted) throw err;
         lastError = err;
         const canRetry = attempt < maxRetries && isRetryableError(err);
@@ -267,7 +292,6 @@ function createChatService({ getConfig, getExpressions, logger = console,
     const inputs = prepareObservations(observations, encode);
     const systemPrompt = buildSystemPrompt(character, {
       expressions,
-      context,
     });
     const url = normalizeEndpoint(ai.endpoint);
     const headers = {
@@ -276,11 +300,13 @@ function createChatService({ getConfig, getExpressions, logger = console,
       Authorization: `Bearer ${ai.apiKey}`,
     };
 
-    const body = buildRequestBody(ai, systemPrompt, inputs);
+    const body = buildRequestBody(ai, systemPrompt, inputs, context);
     let response = "";
     let expression = "neutral";
     let screenSummary = "";
     let audioSummary = "";
+    let workSummary = "";
+    let silent = false;
     let raw = "";
     let lastParseError = null;
     const hasImages = observations.some(({ content }) => content.some(({ type }) => type === "image"));
@@ -306,8 +332,10 @@ function createChatService({ getConfig, getExpressions, logger = console,
         expression = parsed.expression || "neutral";
         screenSummary = hasImages ? (parsed.screenSummary || "").trim() : "";
         audioSummary = hasAudio ? (parsed.audioSummary || "").trim() : "";
+        workSummary = hasImages ? (parsed.workSummary || "").trim() : "";
+        silent = parsed.shouldSpeak === false && observations.every((o) => o.role !== "user");
 
-        if (!response && raw.trim()) {
+        if (!response && !silent && !parsed.structured && raw.trim()) {
           const lines = raw.trim().split(/\r?\n/);
           if (
             lines.length === 1 &&
@@ -318,7 +346,7 @@ function createChatService({ getConfig, getExpressions, logger = console,
           }
         }
 
-        if (!response) {
+        if (!response && !silent) {
           const error = new Error('API 未返回有效台词（需要 JSON：{"expression":"...","response":"...","screenSummary":"..."}）');
           error.retryable = true;
           throw error;
@@ -342,7 +370,7 @@ function createChatService({ getConfig, getExpressions, logger = console,
       }
     }
 
-    if (!response) {
+    if (!response && !silent) {
       throw (
         lastParseError ||
         new Error(
@@ -353,9 +381,10 @@ function createChatService({ getConfig, getExpressions, logger = console,
 
     signal?.throwIfAborted();
     return {
-      reply: response,
+      reply: silent ? "" : response,
+      ...(silent ? { speak: false } : {}),
       expression,
-      summaries: { screen: screenSummary, audio: audioSummary },
+      summaries: { screen: screenSummary, audio: audioSummary, ...(workSummary ? { work: workSummary } : {}) },
       metadata: {
         raw,
         observationCount: observations.length,

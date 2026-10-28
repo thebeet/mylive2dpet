@@ -8,7 +8,7 @@ const EVENTS = require("./architecture/events");
 
 /** Loads built-in plugins and supplies only the host capabilities they need. */
 function createPluginHost({ bus, getConfig, perception, decisions, requestDecision, screen, pet,
-  paths = {}, windows = {}, ipc = {},
+  paths = {}, windows = {}, dialogs = {}, ipc = {}, attention = {},
   services = createServiceRegistry(),
   contextProviders = decisions?.contextProviders || createContextProviders(),
   platform = process.platform, logger = console, definitions = pluginDefinitions }) {
@@ -88,6 +88,7 @@ function createPluginHost({ bus, getConfig, perception, decisions, requestDecisi
       bus: scopedBus,
       platform,
       paths,
+      attention: { getIdleSeconds: () => { assertAvailable(); return attention.getIdleSeconds?.(); } },
       windows: {
         create: (options) => {
           assertAvailable();
@@ -96,6 +97,13 @@ function createPluginHost({ bus, getConfig, perception, decisions, requestDecisi
           const release = track(() => { if (!win.isDestroyed()) win.destroy(); });
           win.once("closed", release);
           return win;
+        },
+      },
+      dialogs: {
+        showMessageBox: (options) => {
+          assertAvailable();
+          if (typeof dialogs.showMessageBox !== "function") throw new Error("dialog service unavailable");
+          return dialogs.showMessageBox(options);
         },
       },
       ipc: {

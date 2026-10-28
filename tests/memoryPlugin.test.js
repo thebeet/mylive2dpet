@@ -49,29 +49,23 @@ const fakeDurable = (added) => ({
   append: (fact) => added.push(fact),
 });
 
-test("legacy switches migrate to longTerm while unified switches control the whole plugin", () => {
-  const legacy = {
-    memory: { shortTerm: { maxTurns: 12 }, summary: { enabled: false } },
-    plugins: [{ name: "memory", enabled: false, path: "existing.jsonl", maxInject: 7 }],
-  };
-  const options = getOptions(legacy);
+test("memory uses nested plugin options and the whole-plugin switch", () => {
+  const config = { plugins: [{ name: "memory", enabled: true,
+    shortTerm: { maxTurns: 12 }, summary: { enabled: false },
+    longTerm: { enabled: false, legacyPath: "existing.jsonl", maxInject: 7 },
+  }] };
+  const options = getOptions(config);
   assert.equal(options.enabled, true);
   assert.equal(options.shortTerm.enabled, true);
   assert.equal(options.shortTerm.maxTurns, 12);
   assert.equal(options.summary.enabled, false);
   assert.equal(options.longTerm.enabled, false);
-  assert.equal(options.longTerm.path, "existing.jsonl");
+  assert.equal(options.longTerm.legacyPath, "existing.jsonl");
   assert.equal(options.longTerm.maxInject, 7);
-  const disabled = getOptions({ ...legacy, plugins: [{
-    name: "memory", enabled: false, shortTerm: {}, summary: {}, longTerm: {},
-  }] });
-  assert.equal(disabled.enabled, false);
-  assert.equal(getOptions({ plugins: [{ name: "memory", enabled: false }] }).enabled, false);
+  config.plugins[0].enabled = false;
+  assert.equal(getOptions(config).enabled, false);
   assert.equal(getOptions({ plugins: [] }).enabled, false);
-  assert.equal(getOptions({ ai: { model: "legacy" } }).enabled, true);
-  assert.equal(getOptions({ memory: {
-    shortTerm: { enabled: false }, summary: { enabled: false }, longTerm: { enabled: false },
-  } }).enabled, false);
+  assert.equal(getOptions({ plugins: [{ name: "memory" }] }).enabled, true);
 });
 
 test("buffers are isolated, honor expiry and fold only snapshot turn IDs", () => {
@@ -349,21 +343,26 @@ test("activation failures roll back context, services and subscriptions", async 
 
 test("text model service forwards cancellation and aborts retry backoff", async () => {
   let calls = 0;
+  let requestSignal;
   const controller = new AbortController();
   const chat = createChatService({
     getConfig: () => ({ plugins: [{ name: "ai-conversation", ai: {
       endpoint: "https://model.example/v1", apiKey: "test-key", model: "test-model",
     } }] }),
     getExpressions: () => [], configureProxy: async () => {}, writeLog: () => {},
-    logger: { ...quiet, warn: () => controller.abort() },
+    logger: { ...quiet, warn: () => queueMicrotask(() => controller.abort()) },
     fetchImpl: async (_url, init) => {
       calls += 1;
-      assert.equal(init.signal, controller.signal);
+      requestSignal = init.signal;
+      assert.ok(requestSignal instanceof AbortSignal);
+      assert.equal(requestSignal.aborted, false);
       return { ok: false, status: 503, text: async () => '{"error":{"message":"busy"}}' };
     },
   });
   await assert.rejects(chat.callChatCompletions([{ role: "user", content: "summarize" }], {
     signal: controller.signal,
-  }), { name: "AbortError" });
+  }), (error) => error === controller.signal.reason);
+  assert.equal(requestSignal.aborted, true);
+  assert.equal(requestSignal.reason, controller.signal.reason);
   assert.equal(calls, 1);
 });

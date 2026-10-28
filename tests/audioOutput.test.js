@@ -8,6 +8,7 @@ const { resolveMonitorSource } = require("../electron/plugins/audioOutputPercept
 const { transcribeAudio, transcriptionEndpoint, validateAsrOptions } = require("../electron/plugins/audioOutputPerception/transcribe");
 const { registerAudioOutputPerceptionPlugin } = require("../electron/plugins/audioOutputPerception");
 const { registerDecisionModule } = require("../electron/modules/decision");
+const { createPerceptionService } = require("../electron/architecture/perceptionService");
 const { buildRequestBody } = require("../electron/plugins/aiConversation/request");
 const { extractChatPayload } = require("../electron/plugins/aiConversation/parseChatText");
 const { createShortTermStore } = require("../electron/plugins/memory/shortTerm");
@@ -31,11 +32,11 @@ function deferred() {
 function harness(overrides = {}, configOverrides = {}) {
   const bus = new MessageBus();
   const captures = [];
-  const config = { perception: { audioOutput: {
+  const config = { plugins: [{ name: "audio-output-perception",
     enabled: true, ttsCooldownMs: 100,
     asr: { endpoint: "https://asr.example/v1", model: "whisper-1" },
     ...configOverrides,
-  } } };
+  }] };
   const controller = registerAudioOutputPerceptionPlugin(bus, {
     platform: "linux", loadConfig: () => config,
     resolveSource: async () => "output.monitor",
@@ -70,7 +71,7 @@ test("silence and short bursts are skipped; arbitrary PCM chunks preserve comple
 });
 
 test("continuous output is split into bounded segments; reset discards partial speech", () => {
-  const options = getAudioOutputOptions({ perception: { audioOutput: { maxSegmentMs: 3000 } } });
+  const options = getAudioOutputOptions({ plugins: [{ name: "audio-output-perception", maxSegmentMs: 3000 }] });
   const segments = [];
   const segmenter = new AudioSegmenter(options, (segment) => segments.push(segment));
   segmenter.push(pcm(9100));
@@ -302,32 +303,32 @@ test("bounded audio enqueue retains screenshots and discards expired observation
   assert.equal(items[1].i, 10);
 });
 
-test("decision consumes audio-only batches and retries valid observations in chronological order", async () => {
+test("decision consumes audio-only batches and retries valid observations in chronological order", async (t) => {
   const bus = new MessageBus();
+  const perception = createPerceptionService(bus);
   const queue = EVENTS.PERCEPTION_OBSERVATION;
-  const earlier = { source: "audio-output", content: [{ type: "text", text: "earlier" }], capturedAt: "2026-10-23T00:00:01Z" };
-  const later = { source: "audio-output", content: [{ type: "text", text: "later" }], capturedAt: "2026-10-23T00:00:02Z" };
-  bus.enqueue(queue, later);
-  bus.enqueue(queue, { text: "expired", expiresAt: Date.now() - 1 });
-  bus.enqueue(queue, earlier);
+  const later = await perception.submit({ source: "audio-output", content: [{ type: "text", text: "later" }], capturedAt: "2026-10-23T00:00:02Z" });
+  await perception.submit({ source: "audio-output", content: [{ type: "text", text: "expired" }], expiresAt: 0 });
+  const earlier = await perception.submit({ source: "audio-output", content: [{ type: "text", text: "earlier" }], capturedAt: "2026-10-23T00:00:01Z" });
   let attempts = 0;
   let failure;
   let completed;
-  bus.subscribe(EVENTS.PIPELINE_FAILED, (event) => { failure = event; });
-  bus.subscribe(EVENTS.DECISION_COMPLETED, (event) => { completed = event; });
-  const unsubscribe = registerDecisionModule(bus, { decide: async (items) => {
+  t.after(bus.subscribe(EVENTS.PIPELINE_FAILED, (event) => { failure = event; }));
+  t.after(bus.subscribe(EVENTS.DECISION_COMPLETED, (event) => { completed = event; }));
+  t.after(registerDecisionModule(bus, { perception, decide: async (items) => {
     assert.deepEqual(items, [earlier, later]);
-    if (++attempts === 1) throw new Error("service temporarily unavailable");
+    if (++attempts === 1) throw Object.assign(new Error("service temporarily unavailable"), { status: 503 });
     return { reply: "heard", summaries: { audio: "external speech" } };
-  } });
+  } }));
   await bus.publish(EVENTS.DECISION_REQUESTED);
   assert.equal(failure.stage, "decision");
   assert.equal(failure.observationCount, 2);
+  assert.equal(failure.retried, 2);
+  assert.equal(failure.rejected, 0);
   assert.equal(bus.queueSize(queue), 2);
   await bus.publish(EVENTS.DECISION_REQUESTED);
   assert.equal(bus.queueSize(queue), 0);
   assert.equal(completed.result.reply, "heard");
-  unsubscribe();
 });
 
 test("request content supports both audio-only and mixed observations; audio summaries retain their source", () => {

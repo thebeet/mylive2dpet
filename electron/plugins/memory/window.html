@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'" />
+    <title>当前记忆</title>
+    <style>
+      :root { color-scheme: dark; font-family: "Noto Sans SC", "Microsoft YaHei", sans-serif;
+        color: #eef0f6; background: #10131a; }
+      * { box-sizing: border-box; }
+      body { margin: 0; }
+      .toolbar { position: sticky; top: 0; z-index: 1; background: #10131a; }
+      header { display: flex; align-items: center; justify-content: space-between;
+        gap: 16px; padding: 20px 24px; border-bottom: 1px solid #ffffff14; background: #10131a; }
+      h1 { margin: 0; font-size: 20px; }
+      h2 { margin: 0; font-size: 16px; }
+      button { font: inherit; padding: 8px 14px; border: 1px solid #ffffff22; border-radius: 8px;
+        color: inherit; background: #ffffff0d; cursor: pointer; }
+      button:hover { background: #ffffff18; }
+      button:disabled { opacity: .5; cursor: default; }
+      .tabs { display: flex; gap: 8px; padding: 8px 24px 0; border-bottom: 1px solid #ffffff14; }
+      .tabs button { flex: 1; padding: 12px 8px; border: 0; border-bottom: 2px solid transparent;
+        border-radius: 8px 8px 0 0; color: #a6a9b8; background: transparent; }
+      .tabs button:hover { color: #eef0f6; background: #ffffff08; }
+      .tabs button[aria-selected="true"] { color: #dfcfff; border-bottom-color: #b99aff; background: #b99aff12; }
+      button:focus-visible, [role="tabpanel"]:focus-visible { outline: 2px solid #b99aff; outline-offset: 3px; }
+      main { display: grid; gap: 20px; padding: 20px 24px 32px; }
+      section { min-width: 0; padding: 18px; border: 1px solid #ffffff14; border-radius: 12px; background: #ffffff06; }
+      .muted { color: #a6a9b8; font-size: 12px; line-height: 1.6; margin: 6px 0 0; }
+      .content { margin-top: 14px; }
+      article + article { margin-top: 14px; padding-top: 14px; border-top: 1px solid #ffffff12; }
+      .text { margin-top: 7px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; font-size: 14px; }
+      .error { color: #ff9eae; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .profile-edit { margin: 6px 0; padding: 4px 10px; font-size: 12px; }
+      .profile-form { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+      .profile-form textarea { width: 100%; min-height: 70px; padding: 8px; resize: vertical; font: inherit; color: inherit; background: #ffffff08; border: 1px solid #ffffff22; border-radius: 8px; }
+      [hidden] { display: none; }
+    </style>
+  </head>
+  <body>
+    <div class="toolbar">
+      <header>
+        <div><h1>当前记忆</h1><p id="status" class="muted" aria-live="polite">正在读取…</p></div>
+        <button id="refresh" type="button">刷新</button>
+      </header>
+      <nav class="tabs" role="tablist" aria-label="记忆分类">
+        <button id="recent-tab" type="button" role="tab" aria-selected="true" aria-controls="recent-panel">近期对话</button>
+        <button id="summary-tab" type="button" role="tab" aria-selected="false" aria-controls="summary-panel" tabindex="-1">会话摘要</button>
+        <button id="long-tab" type="button" role="tab" aria-selected="false" aria-controls="long-panel" tabindex="-1">长期记忆</button>
+        <button id="work-tab" type="button" role="tab" aria-selected="false" aria-controls="work-panel" tabindex="-1">工作画像</button>
+      </nav>
+    </div>
+    <main>
+      <p id="error" class="error" role="alert" hidden></p>
+      <section id="recent-panel" role="tabpanel" aria-labelledby="recent-tab" tabindex="0"><h2>近期对话</h2><p id="recent-info" class="muted"></p><div id="recent" class="content"></div></section>
+      <section id="summary-panel" role="tabpanel" aria-labelledby="summary-tab" tabindex="0" hidden><h2>会话摘要</h2><p id="summary-info" class="muted"></p><div id="summary" class="content"></div></section>
+      <section id="long-panel" role="tabpanel" aria-labelledby="long-tab" tabindex="0" hidden><h2>长期记忆</h2><p id="long-info" class="muted"></p><div id="long" class="content"></div></section>
+      <section id="work-panel" role="tabpanel" aria-labelledby="work-tab" tabindex="0" hidden><h2>人物与项目</h2><p id="work-info" class="muted"></p><div id="profiles" class="content"></div><h2 style="margin-top:24px">待提问</h2><div id="questions" class="content"></div><h2 style="margin-top:24px">最近观察</h2><div id="evidence" class="content"></div></section>
+    </main>
+    <script src="window.js"></script>
+  </body>
+</html>

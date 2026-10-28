@@ -54,7 +54,7 @@ test("provider selection runs exactly one implementation and unregister makes it
   await assert.rejects(providers.decide({ observations: [] }), /未加载: second/);
 });
 
-test("failed or invalid decisions preserve the batch ahead of observations arriving during a request", async (t) => {
+test("retryable decision failures preserve the batch ahead of observations arriving during a request", async (t) => {
   const bus = new MessageBus();
   const perception = createPerceptionService(bus);
   const older = await perception.submit(textInput("older", { capturedAt: "2026-10-23T00:00:01Z" }));
@@ -66,11 +66,11 @@ test("failed or invalid decisions preserve the batch ahead of observations arriv
   bus.subscribe(EVENTS.DECISION_COMPLETED, (event) => { complete = event; });
   let attempt = 0;
   let arriving;
-  const unregister = registerDecisionModule(bus, { decide: async (observations) => {
+  const unregister = registerDecisionModule(bus, { perception, decide: async (observations) => {
     if (++attempt === 1) {
       assert.deepEqual(observations, [older, newer]);
       arriving = await perception.submit(textInput("arrived"));
-      return { reply: "" };
+      throw Object.assign(new Error("service temporarily unavailable"), { status: 503 });
     }
     assert.deepEqual(observations, [older, newer, arriving]);
     return { reply: "recovered" };
@@ -79,10 +79,48 @@ test("failed or invalid decisions preserve the batch ahead of observations arriv
   await bus.publish(EVENTS.DECISION_REQUESTED, { trigger: "manual" });
   assert.equal(errors[0].stage, "decision");
   assert.equal(errors[0].observationCount, 2);
+  assert.equal(errors[0].retried, 2);
+  assert.equal(errors[0].rejected, 0);
+  assert.deepEqual(perception.getRejected(), []);
   assert.equal(bus.queueSize(EVENTS.PERCEPTION_OBSERVATION), 3);
   await bus.publish(EVENTS.DECISION_REQUESTED);
   assert.equal(complete.result.reply, "recovered");
   assert.equal(bus.queueSize(EVENTS.PERCEPTION_OBSERVATION), 0);
+});
+
+test("invalid decision results reject and release their batch while preserving new arrivals", async (t) => {
+  const bus = new MessageBus();
+  const perception = createPerceptionService(bus);
+  const inputs = [await perception.submit(textInput("older")), await perception.submit(textInput("newer"))];
+  const released = [];
+  let failure;
+  let completed;
+  let arriving;
+  t.after(bus.subscribe(EVENTS.PERCEPTION_OBSERVATION_RELEASED, (event) => released.push(event)));
+  t.after(bus.subscribe(EVENTS.PIPELINE_FAILED, (event) => { failure = event; }));
+  t.after(bus.subscribe(EVENTS.DECISION_COMPLETED, (event) => { completed = event; }));
+  t.after(registerDecisionModule(bus, { perception, decide: async (observations) => {
+    if (!arriving) {
+      assert.deepEqual(observations, inputs);
+      arriving = await perception.submit(textInput("arrived"));
+      return { reply: "" };
+    }
+    assert.deepEqual(observations, [arriving]);
+    return { reply: "new message answered" };
+  } }));
+  await bus.publish(EVENTS.DECISION_REQUESTED);
+  assert.equal(failure.retried, 0);
+  assert.equal(failure.rejected, 2);
+  assert.equal(completed, undefined);
+  assert.deepEqual(perception.getRejected().map(({ observation }) => observation.id), inputs.map(({ id }) => id));
+  assert.deepEqual(released.map(({ observation, reason }) => ({ id: observation.id, reason })),
+    inputs.map(({ id }) => ({ id, reason: "failed" })));
+  assert.equal(perception.pendingCount(), 1);
+  await bus.publish(EVENTS.DECISION_REQUESTED);
+  assert.equal(completed.result.reply, "new message answered");
+  assert.equal(perception.pendingCount(), 0);
+  assert.equal(released.at(-1).observation.id, arriving.id);
+  assert.equal(released.at(-1).reason, "completed");
 });
 
 function chatHarness(response) {
@@ -104,6 +142,41 @@ function chatHarness(response) {
   });
   return { chat, requests };
 }
+
+test("AI keeps system messages stable while memory and other context move into user input", async () => {
+  const h = chatHarness({ response: "reply", expression: "neutral" });
+  const observation = { id: "input", source: "manual", role: "user",
+    content: [{ type: "text", text: "本轮用户问题" }, { type: "image", path: "/virtual/image.jpg" }] };
+  const context = [
+    { id: "memory:long-term-memory", title: "长期记忆", text: "用户偏好 TypeScript" },
+    { id: "memory:session-summary", title: "会话摘要", text: "正在处理发布任务" },
+    { id: "memory:recent-dialogue", title: "近期对话", text: "用户：测试已经通过" },
+    { id: "sensor:context", title: "其它上下文", text: "正在使用文档窗口" },
+  ];
+  await h.chat.decideFromObservations([observation], { context });
+  await h.chat.decideFromObservations([observation], {
+    context: context.map((block) => ({ ...block, text: `更新后的${block.text}` })),
+  });
+  await h.chat.decideFromObservations([observation]);
+  const system = h.requests[0].body.messages[0];
+  assert.equal(system.role, "system");
+  assert.match(system.content, /记忆使用说明/);
+  for (const request of h.requests) assert.deepEqual(request.body.messages[0], system);
+  for (const block of context) assert.ok(!system.content.includes(block.text));
+  const user = h.requests[0].body.messages[1];
+  assert.equal(user.role, "user");
+  const background = user.content.find(({ text }) => text?.startsWith("# 补充上下文"));
+  for (const block of context) {
+    assert.ok(background.text.includes(block.title));
+    assert.ok(background.text.includes(block.text));
+  }
+  const currentIndex = user.content.findIndex(({ text }) => text === "# 本次输入");
+  assert.ok(user.content.indexOf(background) < currentIndex);
+  assert.ok(user.content.slice(currentIndex + 1).some(({ text }) => text?.includes("本轮用户问题")));
+  assert.equal(user.content.at(-1).image_url.url, "data:image/jpeg;base64,encoded");
+  assert.ok(h.requests[1].body.messages[1].content.some(({ text }) => text?.includes("更新后的用户偏好 TypeScript")));
+  assert.ok(!h.requests[2].body.messages[1].content.some(({ text }) => text?.includes("# 补充上下文")));
+});
 
 test("text-only manual and audio inputs reach output and memory without image encoding", async (t) => {
   const h = chatHarness({ response: "heard", expression: "smile", screenSummary: "invented image", audioSummary: "external video" });
@@ -149,8 +222,10 @@ test("text-only manual and audio inputs reach output and memory without image en
   assert.equal(speech[0].text, "heard");
   await perception.submit(textInput("continue", { role: "user" }));
   await bus.publish(EVENTS.DECISION_REQUESTED);
-  assert.match(h.requests[1].body.messages[0].content, /用户：hello pet/);
-  assert.match(h.requests[1].body.messages[0].content, /设备音频：external video/);
+  assert.deepEqual(h.requests[1].body.messages[0], h.requests[0].body.messages[0]);
+  const memoryText = h.requests[1].body.messages[1].content.find(({ text }) => text?.startsWith("# 补充上下文")).text;
+  assert.match(memoryText, /用户：hello pet/);
+  assert.match(memoryText, /设备音频：external video/);
 });
 
 test("AI provider accepts images from new sources and rejects unsupported parts before calling the model", async () => {
@@ -255,25 +330,24 @@ test("host registration hooks connect and dispose a provider and its contributed
   assert.ok(!menuHooks.getMenuContributions().some(({ label }) => label === "test provider"));
 });
 
-test("plugin options override legacy configuration while old configurations remain usable", () => {
-  const legacy = { ai: { model: "old", apiKey: "legacy-key" }, character: { name: "old pet" },
-    perception: { enabled: false, interval_ms: 100 }, chat: { changeDetect: { threshold: 9 } } };
-  assert.equal(getAiOptions(legacy).ai.model, "old");
-  assert.equal(getScreenOptions(legacy).enabled, false);
-  const config = { ...legacy, plugins: [
-    { name: "ai-conversation", ai: { model: "new" }, character: { name: "new pet" } },
-    { name: "screen-perception", enabled: true, interval_ms: 200, changeDetect: { threshold: 2 } },
+test("plugin options come from their named plugin configuration", () => {
+  const config = { plugins: [
+    { name: "ai-conversation", ai: { model: "model", apiKey: "test-key" }, character: { name: "pet" } },
+    { name: "screen-perception", enabled: false, interval_ms: 200, changeDetect: { threshold: 2 } },
   ] };
-  assert.equal(getAiOptions(config).ai.model, "new");
-  assert.equal(getAiOptions(config).ai.apiKey, "legacy-key");
-  assert.equal(getAiOptions(config).character.name, "new pet");
-  assert.deepEqual(getScreenOptions(config), { enabled: true, intervalMs: 200, changeDetect: { threshold: 2 } });
+  assert.equal(getAiOptions(config).ai.model, "model");
+  assert.equal(getAiOptions(config).ai.apiKey, "test-key");
+  assert.equal(getAiOptions(config).character.name, "pet");
+  assert.deepEqual(getScreenOptions(config), {
+    enabled: false, intervalMs: 200, observationTtlMs: 60000, changeDetect: { threshold: 2 },
+  });
+  assert.deepEqual(getAiOptions({}), { ai: {}, character: {} });
 });
 
-test("the actual plugin manifest loads AI and manual screenshot capabilities with old and new configurations", async (t) => {
+test("the actual plugin manifest loads AI and manual screenshot capabilities with plugin configurations", async (t) => {
   const ai = { endpoint: "https://model.example/v1", apiKey: "test-key", model: "test-model" };
   for (const config of [
-    { ai, perception: { enabled: false } },
+    { plugins: [{ name: "ai-conversation", ai }, { name: "screen-perception", enabled: false }] },
     { decision: { provider: "ai-conversation" }, plugins: [
       { name: "ai-conversation", enabled: true, ai },
       { name: "screen-perception", enabled: false },

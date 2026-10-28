@@ -6,6 +6,8 @@ const {
   Tray,
   Menu,
   nativeImage,
+  dialog,
+  powerMonitor,
 } = require("electron");
 const path = require("path");
 const { loadConfig } = require("./config");
@@ -158,6 +160,9 @@ const pluginHost = createPluginHost({
   contextProviders,
   paths: { getUserData: () => app.getPath("userData"), projectRoot: path.resolve(__dirname, "..") },
   windows: { create: (options) => new BrowserWindow(options) },
+  attention: { getIdleSeconds: () => powerMonitor.getSystemIdleTime() },
+  dialogs: { showMessageBox: (options) => mainWindow && !mainWindow.isDestroyed()
+    ? dialog.showMessageBox(mainWindow, options) : dialog.showMessageBox(options) },
   ipc: {
     handle: (channel, handler) => {
       ipcMain.handle(channel, handler);

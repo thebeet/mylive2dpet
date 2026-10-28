@@ -50,6 +50,17 @@ function formatForPrompt(items) {
   return items.map((e) => `- (${e.type || "fact"}) ${e.text}`).join("\n");
 }
 
+function decodeEntry(row) {
+  return { id: row.id, type: row.type, text: row.text, tags: JSON.parse(row.tags_json),
+    importance: row.importance, createdAt: row.created_at, metadata: JSON.parse(row.metadata_json) };
+}
+
+/** Inspect stored facts without initializing storage or applying retrieval limits. */
+function listEntries(storage) {
+  if (!storage.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_entries'").get()) return [];
+  return storage.prepare("SELECT * FROM memory_entries ORDER BY sequence DESC").all().map(decodeEntry);
+}
+
 function createLongTermStore(storage) {
   storage.migrate("memory", [(db) => db.exec(`
     CREATE TABLE memory_entries (
@@ -111,14 +122,15 @@ function createLongTermStore(storage) {
     if (config.enabled === false) return [];
     const items = storage.prepare("SELECT * FROM memory_entries ORDER BY sequence DESC LIMIT ?")
       .all(Math.max(1, Math.floor(Number(config.maxEntries) || 500)))
-      .map((row) => ({ id: row.id, type: row.type, text: row.text, tags: JSON.parse(row.tags_json),
-        importance: row.importance, createdAt: row.created_at, metadata: JSON.parse(row.metadata_json) }));
+      .map(decodeEntry);
     const tokens = tokenize(queryText);
     const maxInject = Math.max(1, Math.floor(Number(config.maxInject) || 5));
     if (!tokens.length) {
       return items.sort((left, right) => right.importance - left.importance || right.createdAt - left.createdAt).slice(0, maxInject);
     }
-    return items.map((item) => ({ item, score: scoreItem(item, tokens) }))
+    return items.filter((item) => tokens.some((tok) => String(item.text).toLowerCase().includes(tok) ||
+      item.tags.some((tag) => tag.includes(tok) || tok.includes(tag))))
+      .map((item) => ({ item, score: scoreItem(item, tokens) }))
       .filter(({ score }) => score > 0.5).sort((left, right) => right.score - left.score)
       .slice(0, maxInject).map(({ item }) => item);
   }
@@ -148,7 +160,7 @@ function createLongTermStore(storage) {
     });
   }
 
-  return { appendBatch, retrieve, isDuplicate, formatForPrompt, importLegacy, clear };
+  return { appendBatch, retrieve, list: () => listEntries(storage), isDuplicate, formatForPrompt, importLegacy, clear };
 }
 
-module.exports = { getDefaults, tokenize, formatForPrompt, createLongTermStore };
+module.exports = { getDefaults, tokenize, formatForPrompt, listEntries, createLongTermStore };

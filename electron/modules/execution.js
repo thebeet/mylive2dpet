@@ -17,6 +17,7 @@ function registerExecutionModule(bus, { sendBubble }) {
     EVENTS.DECISION_COMPLETED,
     async ({ result, trigger, observations }) => {
       try {
+        if (result.speak === false) { sendBubble({ type: "hide" }); return; }
         sendBubble({
           type: "say",
           text: result.reply,

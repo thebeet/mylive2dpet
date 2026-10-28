@@ -16,13 +16,14 @@ function createShortTermStore({ now = Date.now } = {}) {
   function append(input, config = {}) {
     if (config.enabled === false) return null;
     const reply = String(input.reply || "").trim();
-    if (!reply) return null;
+    if (!reply && !(input.speak === false && Object.values(input.summaries || {}).some((text) => typeof text === "string" && text.trim()))) return null;
     const turn = {
       id: ++nextId,
       decisionId: input.decisionId || null,
       sessionId: input.sessionId || null,
       t: input.t ?? now(),
       reply,
+      ...(input.speak === false ? { speak: false } : {}),
       userMessage: String(input.userMessage || "").trim(),
       expression: input.expression || "neutral",
       trigger: input.trigger || "",

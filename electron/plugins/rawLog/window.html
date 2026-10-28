@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'" />
+  <title>OpenAI 原始日志</title>
+  <style>
+    :root { color-scheme: dark; font: 14px 'Noto Sans SC', 'Microsoft YaHei', sans-serif; color: #eef0f6; background: #10131a; }
+    * { box-sizing: border-box; }
+    body { margin: 0; height: 100vh; display: flex; flex-direction: column; }
+    header { padding: 18px 24px; border-bottom: 1px solid #ffffff18; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    h1 { margin: 0 0 5px; font-size: 19px; }
+    .muted, #count { color: #a6a9b8; font-size: 12px; }
+    button { color: inherit; font: inherit; border: 1px solid #ffffff22; border-radius: 8px; background: #ffffff08; padding: 8px 12px; cursor: pointer; }
+    button:hover { background: #ffffff14; }
+    button:disabled { opacity: .5; cursor: default; }
+    .layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 270px 1fr; }
+    aside { overflow: auto; padding: 12px; border-right: 1px solid #ffffff18; }
+    #requests { display: grid; gap: 8px; }
+    .request { text-align: left; width: 100%; display: grid; gap: 5px; }
+    .request[aria-pressed=true] { background: #7760bf36; border-color: #a88de8; }
+    .session { color: #a6a9b8; font-size: 12px; margin: 12px 0 2px; overflow-wrap: anywhere; }
+    #more { width: 100%; margin-top: 12px; }
+    main { overflow: auto; padding: 22px; }
+    #meta { margin-bottom: 18px; color: #a6a9b8; line-height: 1.7; overflow-wrap: anywhere; }
+    #messages { display: flex; flex-direction: column; gap: 16px; }
+    .message { width: 92%; border-radius: 12px; background: #ffffff08; border: 1px solid #ffffff14; padding: 14px 16px; }
+    .message.user { align-self: flex-end; background: #5469b429; }
+    .message.assistant { background: #32685429; }
+    .role { font-size: 12px; color: #baa8ee; margin-bottom: 8px; }
+    .content { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; margin: 0; }
+    .content + .content, img { margin-top: 10px; }
+    img { display: block; max-width: 100%; max-height: 420px; object-fit: contain; border-radius: 8px; }
+    details { margin-top: 10px; }
+    summary { cursor: pointer; color: #b5b8c8; }
+    .error { color: #ff9eae; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .empty { color: #a6a9b8; padding: 36px 0; line-height: 1.8; }
+    #error:empty { display: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>OpenAI 原始日志</h1><div id="count">正在读取…</div></div>
+    <button id="refresh" type="button">刷新</button>
+  </header>
+  <div class="layout">
+    <aside aria-label="请求列表"><div id="requests"></div><button id="more" type="button" hidden>加载更早的请求</button></aside>
+    <main><div id="error" class="error" role="alert"></div><div id="meta"></div><section id="messages" aria-label="请求消息"></section></main>
+  </div>
+  <script src="window.js"></script>
+</body>
+</html>
