@@ -35,6 +35,9 @@
       .profile-edit { margin: 6px 0; padding: 4px 10px; font-size: 12px; }
       .profile-form { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
       .profile-form textarea { width: 100%; min-height: 70px; padding: 8px; resize: vertical; font: inherit; color: inherit; background: #ffffff08; border: 1px solid #ffffff22; border-radius: 8px; }
+      .history-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+      .history-filters input, .history-filters select { font: inherit; padding: 8px; color: inherit; background: #171b25; border: 1px solid #ffffff22; border-radius: 8px; }
+      .history-filters input { flex: 1; min-width: 140px; }
       [hidden] { display: none; }
     </style>
   </head>
@@ -49,6 +52,7 @@
         <button id="summary-tab" type="button" role="tab" aria-selected="false" aria-controls="summary-panel" tabindex="-1">会话摘要</button>
         <button id="long-tab" type="button" role="tab" aria-selected="false" aria-controls="long-panel" tabindex="-1">长期记忆</button>
         <button id="work-tab" type="button" role="tab" aria-selected="false" aria-controls="work-panel" tabindex="-1">工作画像</button>
+        <button id="question-history-tab" type="button" role="tab" aria-selected="false" aria-controls="question-history-panel" tabindex="-1">提问记录</button>
       </nav>
     </div>
     <main>
@@ -57,6 +61,11 @@
       <section id="summary-panel" role="tabpanel" aria-labelledby="summary-tab" tabindex="0" hidden><h2>会话摘要</h2><p id="summary-info" class="muted"></p><div id="summary" class="content"></div></section>
       <section id="long-panel" role="tabpanel" aria-labelledby="long-tab" tabindex="0" hidden><h2>长期记忆</h2><p id="long-info" class="muted"></p><div id="long" class="content"></div></section>
       <section id="work-panel" role="tabpanel" aria-labelledby="work-tab" tabindex="0" hidden><h2>人物与项目</h2><p id="work-info" class="muted"></p><div id="profiles" class="content"></div><h2 style="margin-top:24px">待提问</h2><div id="questions" class="content"></div><h2 style="margin-top:24px">最近观察</h2><div id="evidence" class="content"></div></section>
+      <section id="question-history-panel" role="tabpanel" aria-labelledby="question-history-tab" tabindex="0" hidden>
+        <h2>问过的问题</h2><p id="question-history-info" class="muted"></p>
+        <div class="history-filters"><input id="history-search" type="search" aria-label="搜索提问记录" placeholder="搜索问题、人物、项目或回答…" /><select id="history-status" aria-label="筛选提问状态"><option value="all">全部状态</option><option value="answered">已回答</option><option value="pending">待继续询问</option><option value="dismissed">已停止询问</option></select></div>
+        <div id="question-history" class="content"></div>
+      </section>
     </main>
     <script src="window.js"></script>
   </body>

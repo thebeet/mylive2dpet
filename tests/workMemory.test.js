@@ -79,7 +79,7 @@ test("queue, rate limits and pending evidence survive reconstruction; unknown an
   const reopened = createWorkStore(storage, { now: () => clock });
   assert.equal(reopened.pending()[0].id, "pending");
   assert.equal(reopened.getState("sessionSummary"), "正在推进支付改造");
-  assert.equal(reopened.nextQuestion(), null);
+  assert.equal(reopened.nextQuestion({ cooldownMs: 1800000, dailyLimit: 3 }), null);
   repo.answer(q.id, { action: "unknown" }, { deferMs: 100, maxSkips: 2 });
   assert.equal(repo.profiles()[0].basis, "inference");
   assert.equal(repo.nextQuestion({ manual: true }), null);
@@ -98,6 +98,29 @@ test("unrelated long-term facts are filtered and malformed fact JSON is retryabl
   assert.equal(repo.retrieve("咖啡").length, 1);
   assert.throws(() => parseFactsJson('[{"text":"用户喜欢喝咖啡"'), /无效 JSON/);
   assert.deepEqual(parseFactsJson("[]"), []);
+});
+
+test("question history preserves every display and response across reopening and excludes unasked candidates", (t) => {
+  let clock = Date.now();
+  const { repo, storage } = storeHarness(t, () => clock);
+  repo.addEvidence({ id: "chat-history", source: "screen", text: "张琳与王哲讨论支付分工" });
+  const batch = extraction(repo.pending());
+  batch.questions.push({ ...question, subject: { kind: "person", name: "王哲" }, prompt: "王哲负责什么？" });
+  repo.applyExtraction(batch, repo.pending());
+  const q = repo.nextQuestion();
+  repo.markShown(q.id); clock += 1;
+  repo.answer(q.id, { action: "defer" }, { deferMs: 10 }); clock += 11;
+  repo.markShown(q.id); clock += 1;
+  repo.answer(q.id, { action: "answer", text: "负责项目协调" });
+  const reopened = createWorkStore(storage, { now: () => clock });
+  const history = reopened.snapshot().questionHistory;
+  assert.equal(history.length, 1);
+  assert.equal(history[0].prompt, question.prompt);
+  assert.equal(history[0].status, "answered");
+  assert.deepEqual(history[0].records.map((r) => r.action), ["shown", "defer", "shown", "answer"]);
+  assert.equal(history[0].records.at(-1).value, "负责项目协调");
+  reopened.clear();
+  assert.deepEqual(reopened.snapshot().questionHistory, []);
 });
 
 function memoryHarness(storage, generate, clock = Date.now) {

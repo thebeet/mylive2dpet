@@ -161,14 +161,14 @@ function createWorkStore(storage, { now = Date.now } = {}) {
       evidenceIds: JSON.parse(r.evidence_ids_json), status: r.status, updatedAt: r.updated_at }));
   }
   function questions() { return storage.prepare("SELECT * FROM work_questions ORDER BY priority DESC, created_at").all().map(decodeQuestion); }
-  function nextQuestion({ manual = false, cooldownMs = 1800000, dailyLimit = 3, maxAgeMs = 604800000 } = {}) {
+  function nextQuestion({ manual = false, cooldownMs = 0, dailyLimit = 0, maxAgeMs = 604800000 } = {}) {
     const t = now();
     if (!manual) {
       const since = getState("lastQuestionAt");
-      if (since != null && t - since < cooldownMs) return null;
+      if (cooldownMs > 0 && since != null && t - since < cooldownMs) return null;
       const start = new Date(t); start.setHours(0, 0, 0, 0);
       const count = getState("questionDaily", { day: start.getTime(), count: 0 });
-      if (count.day === start.getTime() && count.count >= dailyLimit) return null;
+      if (dailyLimit > 0 && count.day === start.getTime() && count.count >= dailyLimit) return null;
     }
     return questions().find((q) => q.status === "pending" && q.nextAt <= t && (manual || t - q.createdAt <= maxAgeMs)) || null;
   }
@@ -181,12 +181,25 @@ function createWorkStore(storage, { now = Date.now } = {}) {
       setState("lastQuestionAt", t);
       setState("questionDaily", { day: start.getTime(), count: previous.day === start.getTime() ? previous.count + 1 : 1 });
       storage.prepare("UPDATE work_questions SET last_shown_at = ? WHERE id = ?").run(t, id);
+      storage.prepare("INSERT INTO work_question_answers(id, question_id, value, outcome, created_at) VALUES (?, ?, '', 'shown', ?)")
+        .run(randomUUID(), id, t);
     });
   }
   function getQuestion(id) {
     const row = storage.prepare("SELECT * FROM work_questions WHERE id = ?").get(id);
     if (!row) throw new Error("问题不存在或已清空");
     return decodeQuestion(row);
+  }
+  function questionHistory() {
+    const grouped = new Map();
+    for (const row of storage.prepare("SELECT * FROM work_question_answers ORDER BY created_at, rowid").all()) {
+      const records = grouped.get(row.question_id) || [];
+      records.push({ id: row.id, value: row.value, action: row.outcome, createdAt: row.created_at });
+      grouped.set(row.question_id, records);
+    }
+    return questions().map((q) => ({ ...q, records: grouped.get(q.id) || [] }))
+      .filter((q) => q.lastShownAt != null || q.records.length)
+      .sort((a, b) => Math.max(b.lastShownAt || 0, b.records.at(-1)?.createdAt || 0) - Math.max(a.lastShownAt || 0, a.records.at(-1)?.createdAt || 0));
   }
   function answer(id, { action, optionIndex, text }, { deferMs = 1800000, maxSkips = 3 } = {}) {
     const q = getQuestion(id);
@@ -243,7 +256,7 @@ function createWorkStore(storage, { now = Date.now } = {}) {
       return row ? { source: row.source, capturedAt: row.captured_at, text: row.text.slice(0, 400) } : null;
     };
     return { profiles: profiles().map((p) => ({ ...p, evidence: p.evidenceIds.slice(-3).map(evidenceFor).filter(Boolean) })),
-      questions: questions(), pending: storage.prepare("SELECT COUNT(*) AS count FROM work_evidence WHERE processed = 0").get().count,
+      questions: questions(), questionHistory: questionHistory(), pending: storage.prepare("SELECT COUNT(*) AS count FROM work_evidence WHERE processed = 0").get().count,
       recentEvidence: storage.prepare("SELECT * FROM work_evidence ORDER BY sequence DESC LIMIT 30").all()
         .map((r) => ({ id: r.id, source: r.source, capturedAt: r.captured_at, text: r.text, metadata: JSON.parse(r.metadata_json), processed: Boolean(r.processed) })) };
   }

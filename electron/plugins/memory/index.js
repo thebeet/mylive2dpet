@@ -326,6 +326,7 @@ function createMemoryPlugin(context, dependencies = {}) {
   const unregisterWork = context.services.register?.("work", work.api) || (() => {});
   const unregisterMenu = context.menu?.register(() => [{ label: "记忆", submenu: [
     { label: "查看当前记忆…", enabled: active && !disposed, click: viewer.show },
+    { label: "查看提问记录…", enabled: active && !disposed, click: () => viewer.show("question-history") },
     { type: "separator" },
     {
       label: clearing ? "正在清空记忆…" : "清空全部记忆",

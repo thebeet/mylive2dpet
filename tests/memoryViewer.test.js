@@ -33,6 +33,7 @@ function harness({ storage, durable, showMessageBox } = {}) {
     } },
   }, { longTerm: durable });
   return { bus, plugin, handlers, windows, config, view: () => menu()[0].submenu[0].click(),
+    history: () => menu()[0].submenu.find((item) => item.label === "查看提问记录…").click(),
     clearItem: () => menu()[0].submenu.at(-1) };
 }
 
@@ -81,6 +82,16 @@ test("stop closes the viewer, blocks late readiness and requests, and restart ca
   await h.plugin.dispose();
   assert.equal(h.windows[1].destroyed, true);
   assert.equal(h.handlers.size, 0);
+});
+
+test("question-history menu opens its tab and reuses the memory window", async (t) => {
+  const h = harness(); t.after(() => h.plugin.dispose());
+  h.history();
+  const win = h.windows[0];
+  assert.equal(h.handlers.get("snapshot")({ sender: win.webContents }).viewTab, "question-history");
+  h.view(); h.history();
+  assert.equal(h.windows.length, 1);
+  assert.equal(h.handlers.get("snapshot")({ sender: win.webContents }).viewTab, "question-history");
 });
 
 test("long-term inspection handles missing tables and missing storage without hiding recent memory", (t) => {

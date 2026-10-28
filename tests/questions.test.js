@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const { workStorage, mockWindows } = require("./helpers/workStorage");
 const { createWorkStore } = require("../electron/plugins/memory/workStore");
 const { createQuestionsPlugin } = require("../electron/plugins/questions");
+const { getOptions } = require("../electron/plugins/questions/options");
 const { MessageBus } = require("../electron/architecture/messageBus");
 const EVENTS = require("../electron/architecture/events");
 const quiet = { info() {}, warn() {}, error() {} };
@@ -105,6 +106,22 @@ test("daily limits survive repository reopening; manual selection can bypass the
   const reopened = createWorkStore(h.storage, { now: h.now });
   assert.equal(reopened.nextQuestion({ cooldownMs: 100, dailyLimit: 3 }), null);
   assert.ok(reopened.nextQuestion({ manual: true }));
+});
+
+test("default automatic questions have no daily cap or interval but preserve per-question deferral", (t) => {
+  const h = harness(t);
+  const options = getOptions({ plugins: [{ name: "questions", enabled: true }] });
+  assert.equal(options.dailyLimit, 0);
+  assert.equal(options.cooldownMs, 0);
+  assert.equal(options.deferMs, 1800000);
+  for (const name of ["张琳", "王哲", "李明", "小周", "小陈"]) h.seed(name);
+  for (let i = 0; i < 4; i++) {
+    const q = h.repo.nextQuestion(options);
+    assert.ok(q); h.repo.markShown(q.id); h.repo.answer(q.id, { action: "answer", optionIndex: 0 });
+  }
+  const deferred = h.repo.nextQuestion(options); assert.ok(deferred);
+  h.repo.answer(deferred.id, { action: "defer" }, options);
+  assert.equal(h.repo.nextQuestion(options), null);
 });
 
 test("pause-today menu suppresses automatic questions and can resume them", (t) => {

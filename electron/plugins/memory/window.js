@@ -7,6 +7,8 @@ const basisLabel = (basis) => ({ user_answer: "用户回答", inference: "暂时
 const typeLabel = (type) => ({ fact: "事实", preference: "偏好", habit: "习惯", event: "事件", user: "用户信息", world: "环境信息" }[type] || type);
 const time = (stamp) => new Date(stamp).toLocaleString("zh-CN");
 const tabs = [...document.querySelectorAll('[role="tab"]')];
+let historyItems = [];
+let requestedTab = null;
 
 function selectTab(selected) {
   for (const tab of tabs) {
@@ -17,6 +19,34 @@ function selectTab(selected) {
   }
   window.scrollTo(0, 0);
 }
+window.petMemory.onSelectTab((tab) => {
+  const selected = element(`${tab}-tab`);
+  if (selected) { requestedTab = tab; selectTab(selected); void load(); }
+});
+
+function renderQuestionHistory() {
+  const search = element("history-search").value.trim().toLowerCase();
+  const status = element("history-status").value;
+  const filtered = historyItems.filter((q) => (status === "all" || q.status === status) &&
+    `${q.prompt} ${q.subject.name} ${q.scope} ${q.records.map((r) => r.value).join(" ")}`.toLowerCase().includes(search));
+  element("question-history-info").textContent = `共 ${historyItems.length} 个问过的问题 · 当前显示 ${filtered.length} 个 · 重启后保留`;
+  const list = element("question-history"); list.replaceChildren();
+  if (!filtered.length) addText(list, "p", "muted", historyItems.length ? "没有匹配的提问记录。" : "还没有问过的问题。选择题弹出后会记录在这里。");
+  const actionLabel = { shown: "桌宠提问", answer: "你的回答", unknown: "不清楚", skip: "跳过", defer: "稍后再问" };
+  const statusLabel = { answered: "已回答", pending: "待继续询问", dismissed: "已停止询问" };
+  for (const q of filtered) {
+    const card = addText(list, "article", "", "");
+    addText(card, "div", "text", q.prompt);
+    addText(card, "div", "muted", `${q.subject.name}${q.scope ? ` · ${q.scope}` : ""} · ${statusLabel[q.status] || q.status}`);
+    if (q.reason) addText(card, "div", "muted", q.reason);
+    addText(card, "div", "muted", `选项：${q.options.map((o) => o.label).join("／")}`);
+    if (q.lastShownAt != null && !q.records.some((r) => r.action === "shown")) addText(card, "div", "muted", `${time(q.lastShownAt)} · 桌宠提问`);
+    for (const record of q.records) addText(card, "div", record.action === "answer" ? "text" : "muted", `${time(record.createdAt)} · ${actionLabel[record.action] || record.action}${record.value ? `：${record.value}` : ""}`);
+    if (q.status === "pending" && q.nextAt > Date.now()) addText(card, "div", "muted", `延后至 ${time(q.nextAt)}`);
+  }
+}
+element("history-search").addEventListener("input", renderQuestionHistory);
+element("history-status").addEventListener("change", renderQuestionHistory);
 
 for (const [index, tab] of tabs.entries()) {
   tab.addEventListener("click", () => selectTab(tab));
@@ -39,6 +69,11 @@ function addText(parent, tag, className, value) {
 }
 
 function render(snapshot) {
+  if (snapshot.viewTab && snapshot.viewTab !== requestedTab) {
+    requestedTab = snapshot.viewTab;
+    const selected = element(`${requestedTab}-tab`);
+    if (selected) selectTab(selected);
+  }
   element("status").textContent = `${snapshot.enabled ? "记忆已启用" : "记忆已关闭"} · 本次运行 ${snapshot.totalTurns} 轮对话 · ${snapshot.clearing ? "正在清空" : snapshot.maintaining ? "正在整理记忆" : "整理空闲"} · ${time(Date.now())}`;
   const { shortTerm, summary, longTerm } = snapshot;
   element("recent-info").textContent = `${shortTerm.enabled ? "参与对话" : "对话注入已关闭"} · 当前 ${shortTerm.turns.length} / ${shortTerm.maxTurns} 轮 · 保留 ${Math.round(shortTerm.ttlMs / 60000)} 分钟`;
@@ -70,6 +105,8 @@ function render(snapshot) {
     if (entry.tags.length) addText(card, "div", "muted", `标签：${entry.tags.join("、")}`);
   }
   const work = snapshot.work || { enabled: false, profiles: [], questions: [], recentEvidence: [] };
+  historyItems = work.questionHistory || [];
+  renderQuestionHistory();
   element("work-info").textContent = work.error || (work.enabled ? `已启用 · ${work.profiles.length} 条当前画像关系 · ${work.pending} 条观察待整理` : "工作记忆已关闭");
   const profiles = element("profiles"); profiles.replaceChildren();
   if (!work.profiles.length) addText(profiles, "p", "muted", "还在了解你和同事们，工作信息会逐渐整理到这里。");
