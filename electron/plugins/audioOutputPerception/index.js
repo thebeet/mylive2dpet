@@ -5,6 +5,7 @@ const { AudioSegmenter } = require("./segmenter");
 const { resolveMonitorSource, startLinuxCapture } = require("./capture/linux");
 const { transcribeAudio, validateAsrOptions } = require("./transcribe");
 const { createLiveWindow } = require("./liveWindow");
+const { createFunAsrStream } = require("./funasr");
 
 const isAudio = (observation) => observation.source === "audio-output";
 
@@ -37,6 +38,9 @@ function registerAudioOutputPerceptionPlugin(bus, dependencies = {}) {
   let processingGeneration = null;
   let pendingSegments = [];
   let suppressedUntil = 0;
+  let activeStream = null;
+  const streams = new Set();
+  const streamFactory = dependencies.createFunAsrStream || createFunAsrStream;
   const playbacks = new Set();
   const recentTranscripts = new Map();
 
@@ -65,6 +69,78 @@ function registerAudioOutputPerceptionPlugin(bus, dependencies = {}) {
     });
   }
 
+  async function acceptResult(segment, result, sessionGeneration, transcriptId, isCurrent = () => true) {
+    const valid = () => state.enabled && generation === sessionGeneration && isCurrent();
+    if (!valid()) return;
+    if (!result.text || Date.now() - Date.parse(segment.endedAt) > options.observationTtlMs) {
+      if (transcriptId) liveWindow.removeTranscript(transcriptId);
+      return;
+    }
+    liveWindow.addTranscript({ id: transcriptId, text: result.text, capturedAt: segment.endedAt, final: true });
+    const normalized = result.text.replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
+    const now = Date.now();
+    for (const [text, at] of recentTranscripts) {
+      if (now - at > options.duplicateWindowMs) recentTranscripts.delete(text);
+    }
+    if (!normalized || recentTranscripts.has(normalized)) return;
+    const observation = {
+      source: "audio-output", trigger: "audio-output",
+      capturedAt: segment.capturedAt,
+      expiresAt: Date.parse(segment.endedAt) + options.observationTtlMs,
+      content: [{ type: "text", text: result.text }],
+      metadata: {
+        modality: "audio", label: "设备音频输出转写",
+        endedAt: segment.endedAt, durationMs: segment.durationMs,
+        language: result.language, confidence: result.confidence,
+        device: state.source,
+      },
+    };
+    await perception.discard((item) => isAudio(item) && item.expiresAt <= now, "expired");
+    if (!valid()) return;
+    recentTranscripts.set(normalized, now);
+    await perception.submit(observation, {
+      maxMatching: options.maxPendingObservations, matches: isAudio,
+    });
+    logger.info("transcript:", result.text);
+    if (captureHandle) setState({ status: suppressed() ? "suppressed" : "listening", error: "" });
+  }
+
+  function cancelStreams() {
+    for (const stream of streams) {
+      liveWindow.removeTranscript(stream.id);
+      stream.cancel();
+    }
+    streams.clear();
+    activeStream = null;
+  }
+
+  function startStream(segment, sessionGeneration) {
+    // Retain bounded concurrent finalization; never queue an unbounded live feed.
+    while (streams.size >= options.maxPendingSegments) {
+      const oldest = streams.values().next().value;
+      streams.delete(oldest);
+      liveWindow.removeTranscript(oldest.id);
+      oldest.cancel();
+    }
+    const stream = streamFactory(options.asr, {
+      socketFactory: dependencies.socketFactory,
+      maxAudioBytes: (options.maxSegmentMs + options.preRollMs + options.frameMs) * 32,
+      onPartial(result) {
+        if (streams.has(stream) && generation === sessionGeneration && state.enabled && !suppressed()) {
+          liveWindow.addTranscript({ id: stream.id, text: result.text, capturedAt: segment.capturedAt, final: false });
+        }
+      },
+    });
+    activeStream = stream;
+    streams.add(stream);
+    void track(stream.result.catch((error) => {
+      if (error.name !== "AbortError" && state.enabled && generation === sessionGeneration) {
+        liveWindow.removeTranscript(stream.id);
+        reportError(error, "audio-transcription");
+      }
+    }));
+  }
+
   async function processSegments(sessionGeneration) {
     if (processingGeneration === sessionGeneration) return;
     processingGeneration = sessionGeneration;
@@ -86,34 +162,7 @@ function registerAudioOutputPerceptionPlugin(bus, dependencies = {}) {
               return audioSession.fetch(url, init);
             }),
           });
-          if (!state.enabled || generation !== sessionGeneration) return;
-          if (!result.text || Date.now() - Date.parse(segment.endedAt) > options.observationTtlMs) continue;
-          liveWindow.addTranscript({ text: result.text, capturedAt: segment.endedAt });
-          const normalized = result.text.replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
-          const now = Date.now();
-          for (const [text, at] of recentTranscripts) {
-            if (now - at > options.duplicateWindowMs) recentTranscripts.delete(text);
-          }
-          if (!normalized || recentTranscripts.has(normalized)) continue;
-          recentTranscripts.set(normalized, now);
-          const observation = {
-            source: "audio-output", trigger: "audio-output",
-            capturedAt: segment.capturedAt,
-            expiresAt: Date.parse(segment.endedAt) + options.observationTtlMs,
-            content: [{ type: "text", text: result.text }],
-            metadata: {
-              modality: "audio", label: "设备音频输出转写",
-              endedAt: segment.endedAt, durationMs: segment.durationMs,
-              language: result.language, confidence: result.confidence,
-              device: state.source,
-            },
-          };
-          await perception.discard((item) => isAudio(item) && item.expiresAt <= now, "expired");
-          await perception.submit(observation, {
-            maxMatching: options.maxPendingObservations, matches: isAudio,
-          });
-          logger.info("transcript:", result.text);
-          if (captureHandle) setState({ status: suppressed() ? "suppressed" : "listening", error: "" });
+          await acceptResult(segment, result, sessionGeneration);
         } catch (error) {
           if (state.enabled && generation === sessionGeneration) reportError(error, "audio-transcription");
         } finally {
@@ -127,6 +176,22 @@ function registerAudioOutputPerceptionPlugin(bus, dependencies = {}) {
 
   function onSegment(segment) {
     if (!state.enabled || suppressed()) return;
+    if (options.asr.provider === "funasr") {
+      const stream = activeStream;
+      activeStream = null;
+      if (!stream) return;
+      const sessionGeneration = generation;
+      void track(stream.finish().then(async (result) => {
+        if (streams.has(stream)) {
+          if (!result.text) liveWindow.removeTranscript(stream.id);
+          await acceptResult(segment, result, sessionGeneration, stream.id,
+            () => streams.has(stream) && !suppressed());
+        }
+      }, () => {}).catch((error) => {
+        if (state.enabled && generation === sessionGeneration) reportError(error, "audio-transcription");
+      }).finally(() => streams.delete(stream)));
+      return;
+    }
     pendingSegments.push(segment);
     if (pendingSegments.length > options.maxPendingSegments) pendingSegments.shift();
     void track(processSegments(generation));
@@ -137,7 +202,14 @@ function registerAudioOutputPerceptionPlugin(bus, dependencies = {}) {
     try {
       const source = await resolveSource(options.source);
       if (!state.enabled || generation !== sessionGeneration) return;
-      segmenter = new AudioSegmenter(options, onSegment);
+      segmenter = new AudioSegmenter(options, onSegment, options.asr.provider === "funasr" ? {
+        onStart: (segment) => {
+          try { startStream(segment, sessionGeneration); }
+          catch (error) { activeStream = null; reportError(error, "audio-transcription"); }
+        },
+        onAudio: (chunk) => activeStream?.push(chunk),
+        onCancel: cancelStreams,
+      } : {});
       captureHandle = capture(source, options, {
         onData(chunk) {
           if (generation !== sessionGeneration || !state.enabled) return;
@@ -153,6 +225,7 @@ function registerAudioOutputPerceptionPlugin(bus, dependencies = {}) {
           if (captureHandle) void track(captureHandle.stop());
           captureHandle = null;
           segmenter?.reset();
+          cancelStreams();
           reportError(error, "audio-capture");
           scheduleReconnect(sessionGeneration);
         },
@@ -180,6 +253,7 @@ function registerAudioOutputPerceptionPlugin(bus, dependencies = {}) {
     captureHandle = null;
     segmenter?.reset();
     segmenter = null;
+    cancelStreams();
     abortController?.abort();
     abortController = null;
     pendingSegments = [];
@@ -209,6 +283,7 @@ function registerAudioOutputPerceptionPlugin(bus, dependencies = {}) {
     else if (!playbacks.delete(playbackId)) return;
     suppressedUntil = Date.now() + options.ttsCooldownMs;
     segmenter?.reset();
+    cancelStreams();
     if (state.enabled && captureHandle && state.status !== "error") setState({ status: "suppressed" });
   }, { allowWhileStopped: true });
 

@@ -50,6 +50,8 @@
       <nav class="tabs" role="tablist" aria-label="记忆分类">
         <button id="recent-tab" type="button" role="tab" aria-selected="true" aria-controls="recent-panel">近期对话</button>
         <button id="long-tab" type="button" role="tab" aria-selected="false" aria-controls="long-panel" tabindex="-1">长期记忆</button>
+        <button id="projects-tab" type="button" role="tab" aria-selected="false" aria-controls="projects-panel" tabindex="-1">项目状态</button>
+        <button id="lessons-tab" type="button" role="tab" aria-selected="false" aria-controls="lessons-panel" tabindex="-1">经验记忆</button>
         <button id="work-tab" type="button" role="tab" aria-selected="false" aria-controls="work-panel" tabindex="-1">人物画像</button>
         <button id="question-history-tab" type="button" role="tab" aria-selected="false" aria-controls="question-history-panel" tabindex="-1">提问记录</button>
       </nav>
@@ -58,6 +60,8 @@
       <p id="error" class="error" role="alert" hidden></p>
       <section id="recent-panel" role="tabpanel" aria-labelledby="recent-tab" tabindex="0"><h2>近期对话</h2><p id="recent-info" class="muted"></p><div id="recent" class="content"></div></section>
       <section id="long-panel" role="tabpanel" aria-labelledby="long-tab" tabindex="0" hidden><h2>长期记忆</h2><p id="long-info" class="muted"></p><div id="long" class="content"></div></section>
+      <section id="projects-panel" role="tabpanel" aria-labelledby="projects-tab" tabindex="0" hidden><h2>项目当前状态</h2><p id="projects-info" class="muted"></p><div id="projects" class="content"></div></section>
+      <section id="lessons-panel" role="tabpanel" aria-labelledby="lessons-tab" tabindex="0" hidden><h2>有来源的经验</h2><p id="lessons-info" class="muted"></p><div id="lessons" class="content"></div></section>
       <section id="work-panel" role="tabpanel" aria-labelledby="work-tab" tabindex="0" hidden><h2>人物画像</h2><p id="work-info" class="muted"></p><div id="profiles" class="content"></div></section>
       <section id="question-history-panel" role="tabpanel" aria-labelledby="question-history-tab" tabindex="0" hidden>
         <h2>待提问与提问记录</h2><p id="question-history-info" class="muted"></p>

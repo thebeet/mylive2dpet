@@ -108,7 +108,8 @@ electron/
     │   ├── index.js
     │   ├── options.js
     │   ├── segmenter.js           # PCM 能量检测、分段与 WAV 编码
-    │   ├── transcribe.js          # ASR 请求与返回处理
+    │   ├── transcribe.js          # HTTP ASR 请求与返回处理
+    │   ├── funasr.js              # WebSocket 2-pass 音频与结果处理
     │   └── capture/linux.js       # 输出监视源选择与 parec 采集
     ├── storageSqlite/             # 连接、事务、通用迁移与导入
     ├── dialogueHistory/           # 对话仓库、窗口、preload、菜单与事件记录
@@ -265,18 +266,28 @@ AI 输出新增 `workSummary` 与 `shouldSpeak`。纯观察可返回 `shouldSpea
 
 首版支持 Linux 上的 PulseAudio 或提供 PulseAudio 兼容服务的 PipeWire，依赖 `pactl` 和 `parec`（通常包含在 `pulseaudio-utils` 包中）。Windows/macOS 的采集适配器尚未实现，菜单中会显示暂不支持。
 
-在 `config.json` 的 `plugins` 数组中配置 `name=audio-output-perception`（字段示例见 `config.example.json`）。旧版 `perception.audioOutput` 暂时仍可读取；新配置使用插件项。`asr.provider` 支持 `whisper-asr-webservice` 和 `openai`（省略时沿用 `openai`）。ASR 代理独立配置，使用独立 Electron session，不改变聊天的代理。
+在 `config.json` 的 `plugins` 数组中配置 `name=audio-output-perception`（字段示例见 `config.example.json`）。旧版 `perception.audioOutput` 暂时仍可读取；新配置使用插件项。`asr.provider` 支持 `funasr`、`whisper-asr-webservice` 和 `openai`（省略时沿用 `openai`，示例配置显式选用 `funasr`）。HTTP ASR 使用独立 Electron session；FunASR 使用独立 WebSocket 与可选 HTTP(S) 代理 URL，不改变聊天的代理。
+
+### 本地 FunASR 2-pass
+
+`compose.asr.yaml` 启动官方 `funasr-runtime-sdk-online-cpu-0.1.13` 服务，在 `ws://127.0.0.1:10096` 提供中文 Paraformer 在线与离线协同识别。首次启动下载模型并保存到 `mylive2dpet-funasr-models` 卷；容器健康检查检测服务监听端口。部署和完整配置见根目录 README。
+
+`segmenter.js` 在语音能量累计达到 `minSpeechMs` 后通过 `onStart/onAudio` 回调开始发送音频，包含预录音及已累计音频，后续每帧继续发送；不会等到段尾才上传。`funasr.js` 每个本地片段建立独立连接，先发送 `mode=2pass`、`wav_format=pcm`、`audio_fs=16000`、`chunk_size`、`chunk_interval` 等 JSON 配置，再按固定块大小发送二进制 PCM。默认 `[5,10,5]`、间隔 10 对应 60ms 传输块和 600ms 在线解码窗口。
+
+`2pass-online` 是增量文字，仅更新带片段 ID 的临时字幕；`2pass-offline` 替换该句在线内容，多个服务端 VAD 句子的修正结果累计保留。本地静音或最长片段结束后发送 `is_speaking=false`、`is_end=true`；收到段尾最终标记后汇总离线文字，通过共享观察入队逻辑提交一次，字幕同条替换为最终文字。在线消息即使带 `is_final=true` 也不会成为观察。`language` 是结果标签，模型由服务端选择。
+
+最多并行 3 个连接（包括等待最终结果），满时取消最旧片段；音频缓存与发送积压受最长片段大小限制。连接和最终结果各有 `timeoutMs` 超时，单段失败后下一段重新连接。停止监听、采集异常、TTS 开始都会取消连接并清除临时字幕，旧连接不能污染新会话。
 
 ### 本地 Whisper 容器
 
-仓库根目录的 `compose.asr.yaml` 使用已有的 `onerahmet/openai-whisper-asr-webservice:latest` CPU 镜像，配置 `faster_whisper`、`small`、CPU `int8`，在 `127.0.0.1:9000` 提供服务。镜像拉取策略为 `never`，首次启动仍需下载模型，模型保存在持久化卷 `mylive2dpet-whisper-cache` 中；后续重启会复用缓存。`/openapi.json` 健康检查可用后才表示模型加载完成。
+仓库根目录的 `compose.whisper.yaml` 使用已有的 `onerahmet/openai-whisper-asr-webservice:latest` CPU 镜像，配置 `faster_whisper`、`small`、CPU `int8`，在 `127.0.0.1:9000` 提供服务。镜像拉取策略为 `never`，首次启动仍需下载模型，模型保存在持久化卷 `mylive2dpet-whisper-cache` 中；后续重启会复用缓存。`/openapi.json` 健康检查可用后才表示模型加载完成。
 
 当前网络无法直连 Hugging Face，Compose 默认通过 `https://hf-mirror.com` 下载公开模型，并禁用 Xet 下载方式。若所在网络可直连官方站点，可在启动命令前设置 `WHISPER_HF_ENDPOINT=https://huggingface.co`。此地址只用于模型下载，音频转写仍在本地容器中完成。
 
 ```sh
-docker compose -f compose.asr.yaml up -d
-docker compose -f compose.asr.yaml logs -f
-docker compose -f compose.asr.yaml ps
+docker compose -f compose.whisper.yaml up -d
+docker compose -f compose.whisper.yaml logs -f
+docker compose -f compose.whisper.yaml ps
 ```
 
 应用配置：
@@ -293,7 +304,7 @@ docker compose -f compose.asr.yaml ps
 
 该 provider 使用 multipart `POST /asr`，音频字段为 `audio_file`，通过查询参数设置 `task=transcribe`、`output=json`、`encode=true`、`language` 和 `vad_filter`。支持 API 基址或完整 `/asr` 地址。`encode=true` 保证上传的 WAV 容器经过 FFmpeg 解码；`vadFilter` 默认开启，仅适用于容器的 `faster_whisper` 引擎。语言留空会自动识别。容器不需要 API 密钥，模型由 Compose 中的 `ASR_MODEL` 选择，不在每次请求里传 `model`。修改模型后运行 `up -d` 重建服务。若要使用 GPU，需要另备 `latest-gpu` 镜像、配置 GPU 访问并修改 `ASR_DEVICE`；现有 `latest` CPU 镜像不自动使用显卡。
 
-停止服务使用 `docker compose -f compose.asr.yaml stop`；删除容器和网络使用 `down`，模型缓存卷会保留。
+停止服务使用 `docker compose -f compose.whisper.yaml stop`；删除容器和网络使用 `down`，模型缓存卷会保留。
 
 ### 兼容 OpenAI 的转写服务
 
@@ -303,16 +314,24 @@ docker compose -f compose.asr.yaml ps
 
 示例中 `plugins[name=audio-output-perception].enabled` 默认 `true`，随应用启动采集；TTS 默认关闭。配置完成后也可在托盘或桌宠右键菜单中勾选「感知设备播放的语音」，菜单开关仅影响本次运行。音频与截图开关独立，关闭截图不影响音频。转写结果等待`decision.interval_ms` 决策周期；手动决策也可消费音频观察。
 
-`source=default` 选择启动采集时默认输出设备的监视源；也可以用 `pactl --format=json list sources` 查看并指定某个 `.monitor` 名称。代码会验证输出监视源，不会退回麦克风。切换输出设备后，关闭再打开菜单开关以重新选择默认输出。音频服务或采集进程失败后，每 5 秒尝试重新连接。
+`source=default` 选择启动采集时默认输出设备的监视源；也可以用 `pactl --format=json list sources` 查看并指定某个 `.monitor` 名称。代码会验证输出监视源，不会退回麦克风。切换输出设备后，关闭再打开菜单开关以重新选择默认输出。采集进程失败后每 5 秒尝试重新连接；FunASR 单段识别失败后，在下一段语音开始时重新连接。
 
 采集规格为 16kHz 单声道 PCM16。20ms 一帧，默认高于 -40dB 的音频累计至少 400ms 才接受，静音 800ms 后结束一段，最长 15 秒。该检测基于能量，不能可靠区分语音、音乐和音效；ASR 可能对背景音乐误识别。可通过提高 `speechThresholdDb` 降低敏感度，首版主要用于视频、播客和通话中的语音内容。
 
 TTS 插件发布带播放 ID 的通用 `execution.speech.state`。桌宠语音开始时丢弃尚未完成的片段，播放期间丢弃采集数据，最后一个播放结束后额外抑制 `ttsCooldownMs`（默认 600ms），避免识别自身输出。这段时间其他应用的语音也会被跳过。
 
-原始音频只在内存中分段并发送给配置的 ASR，不创建录音文件、不写入日志。等待转写的片段最多 3 段，待决策音频队列最多保留最近 20 条，音频观察 60 秒后过期，相同转写在 15 秒内去重。关闭采集会中止转写、清空待处理音频并停止 `parec`。菜单的「实时显示内容 → 开启」会在主屏工作区右上角打开置顶小窗口，显示监听状态、错误和最近 20 条转写文字。每个语音片段转写完成后立即更新，重复文字也会显示，不受观察队列去重影响；关闭显示只关闭窗口，停止采集会关闭窗口并清空显示缓存。实时显示开关仅影响本次运行。模型生成的 `audioSummary` 与已有 `screenSummary` 一起保留在短期记忆及对话历史中，并标注为外部播放内容。
+原始音频只在内存中分段并发送给配置的 ASR，不创建录音文件、不写入日志。等待转写的片段最多 3 段，待决策音频队列最多保留最近 20 条，音频观察 60 秒后过期，相同转写在 15 秒内去重。关闭采集会中止转写、清空待处理音频并停止 `parec`。菜单的「实时显示内容 → 开启」会在主屏工作区右上角打开置顶小窗口，显示监听状态、错误和最近 20 条转写文字。FunASR 流式文字持续更新同一条字幕，段尾替换成最终修正文字；HTTP provider 在整段转写完成后更新。重复文字也会显示，不受观察队列去重影响；关闭显示只关闭窗口，停止采集会关闭窗口并清空显示缓存。实时显示开关仅影响本次运行。模型生成的 `audioSummary` 与已有 `screenSummary` 一起保留在短期记忆及对话历史中，并标注为外部播放内容。
 
 转写通过过滤和去重并入队后，音频插件会打印 `[plugin:audio-output-perception] transcript: 识别出的语音文本`，可在启动桌宠的终端日志中查看。
 
 运行 `npm run test:audio` 检查分段、转写请求、TTS 抑制、停止与重启、队列边界和混合决策行为。
 
 运行 `npm test` 检查全部音频与插件链路测试，包括通用观察、单一决策实现选择、失败重入队、纯文字/混合输入、视觉定时器与停止清理、当前配置校验和菜单卸载，以及记忆实例隔离、回合快照、维护串行化、模型服务缺失/恢复、请求取消和已有持久记忆可用性。测试使用模拟设备与模型服务，不调用真实模型或打开桌面窗口。
+
+### 项目状态与经验记忆
+
+`memory.practice` 使用 `practiceMemory.js` 管理采集、到期与更新，`practicePlanner.js` 校验模型计划和来源，`practiceStore.js` 管理独立 SQLite 表、来源队列、版本历史与上下文检索。直接用户输入、音频转写和有截图关联的观察摘要作为来源；不会保存宠物回答作为验证证据。来源达到数量或等待时间门槛后，在现有串行维护任务中执行，原有长期更新的20轮门槛不影响该任务。
+
+项目与经验 ID、范围、来源引用及验证摘录在写入前检查，旧来源不能覆盖更近的状态。来源队列消费与条目／历史保存同一事务提交，请求期间到达的新来源不被消费。手动整理通过 `organizer.js` 在原有请求中携带实践记忆和待处理来源，返回的 `practice` 计划与长期事实／人物画像统一提交；会话停止、清空或开关变化拦截迟到结果。
+
+`provideContext` 添加 `project-state` 与 `experience-memory` 上下文块，标记项目来源时间和未验证经验。查看窗口新增项目与经验页，可读原始来源和更新前版本；旧用户数据不做推测迁移，开启后从新的来源开始积累。

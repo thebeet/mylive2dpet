@@ -1,9 +1,13 @@
 const { pcmToWav } = require("./segmenter");
 
 function transcriptionEndpoint(endpoint, provider = "openai") {
-  if (!["openai", "whisper-asr-webservice"].includes(provider)) throw new Error(`不支持的 ASR provider：${provider}`);
+  if (!["openai", "whisper-asr-webservice", "funasr"].includes(provider)) throw new Error(`不支持的 ASR provider：${provider}`);
   if (!endpoint) throw new Error("请配置 plugins[name=audio-output-perception].asr.endpoint");
   const url = new URL(endpoint);
+  if (provider === "funasr") {
+    if (!["ws:", "wss:"].includes(url.protocol)) throw new Error("FunASR endpoint 必须是 WS(S) 地址");
+    return url.toString();
+  }
   if (!["https:", "http:"].includes(url.protocol)) throw new Error("ASR endpoint 必须是 HTTP(S) 地址");
   const pathname = url.pathname.replace(/\/+$/, "");
   const suffix = provider === "whisper-asr-webservice" ? "/asr" : "/audio/transcriptions";
@@ -24,6 +28,7 @@ function isKnownSubtitleHallucination(text) {
 
 /** Transcribe in memory; raw PCM is never logged or written to disk. */
 async function transcribeAudio(segment, options, { fetchImpl = globalThis.fetch, signal } = {}) {
+  if (options.provider === "funasr") throw new Error("FunASR 需通过流式客户端识别");
   let endpoint = validateAsrOptions(options);
   const controller = new AbortController();
   const abort = () => controller.abort();

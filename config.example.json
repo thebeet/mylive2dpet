@@ -81,14 +81,15 @@
       "ttsCooldownMs": 600,
       "_comment": "Linux PipeWire/PulseAudio 输出监视源；source 可填具体 .monitor 名称；默认不保存原始音频。",
       "asr": {
-        "provider": "whisper-asr-webservice",
-        "endpoint": "http://127.0.0.1:9000",
+        "provider": "funasr",
+        "endpoint": "ws://127.0.0.1:10096",
         "apiKey": "",
         "language": "zh",
-        "vadFilter": true,
+        "chunkSize": [5, 10, 5],
+        "chunkInterval": 10,
         "proxy": "",
         "timeoutMs": 60000,
-        "_comment": "whisper-asr-webservice 对接 /asr，模型由容器 ASR_MODEL 选择；openai 对接 /audio/transcriptions 并需配置 model。language 留空自动识别。"
+        "_comment": "funasr 使用 WebSocket 2-pass，流式字幕与最终修正分开处理，模型由服务端选择；chunkSize [5,10,5] 对应 600ms 解码窗口，每次发送 60ms PCM。language 为结果标签，不切换模型。仍支持 whisper-asr-webservice 和 openai。"
       }
     },
     {
@@ -115,6 +116,15 @@
       "name": "memory",
       "enabled": true,
       "textService": "ai-conversation.text",
+      "practice": {
+        "enabled": true,
+        "extractEveryNObservations": 3,
+        "flushAfterMs": 120000,
+        "maxTokens": 8192,
+        "maxInject": 3,
+        "staleAfterMs": 604800000,
+        "_comment": "项目当前状态和有来源的经验；累计3条来源或等待2分钟更新；7天未更新的项目提示重新确认。"
+      },
       "shortTerm": {
         "enabled": true,
         "maxTurns": 8,

@@ -1,13 +1,16 @@
 /** Frame PCM16 mono into bounded segments, gated by short-term audio energy. */
 class AudioSegmenter {
-  constructor(options, onSegment) {
+  constructor(options, onSegment, streaming = {}) {
     this.options = options;
     this.onSegment = onSegment;
+    this.streaming = streaming;
     this.frameBytes = Math.round(options.sampleRate * options.frameMs / 1000) * 2;
     this.reset();
   }
 
   reset() {
+    if (this.streamingStarted) this.streaming.onCancel?.();
+    this.streamingStarted = false;
     this.pending = Buffer.alloc(0);
     this.preRoll = [];
     this.frames = [];
@@ -58,6 +61,14 @@ class AudioSegmenter {
       this.quietMs += this.options.frameMs;
     }
 
+    if (!this.streamingStarted && this.speechMs >= this.options.minSpeechMs) {
+      this.streamingStarted = true;
+      this.streaming.onStart?.({ capturedAt: new Date(this.startedAt).toISOString() });
+      this.streaming.onAudio?.(Buffer.concat(this.frames));
+    } else if (this.streamingStarted) {
+      this.streaming.onAudio?.(frame);
+    }
+
     const durationMs = this.frames.length * this.options.frameMs;
     if (this.quietMs >= this.options.silenceMs || durationMs >= this.options.maxSegmentMs) {
       const segment = {
@@ -70,6 +81,7 @@ class AudioSegmenter {
       this.frames = [];
       this.speechMs = 0;
       this.quietMs = 0;
+      this.streamingStarted = false;
       if (enoughSpeech) this.onSegment(segment);
     }
   }

@@ -31,13 +31,19 @@ function getOptions(config = {}) {
   long.maxTokens = integer(long.maxTokens, longTerm.getDefaults().maxTokens);
   long.maxEntries = integer(long.maxEntries, 500);
 
+  const practice = { enabled: false, extractEveryNObservations: 3, flushAfterMs: 120000,
+    maxTokens: 8192, maxInject: 3, staleAfterMs: 604800000, ...plugin?.practice };
+  practice.enabled = practice.enabled === true;
+  for (const [key, fallback] of Object.entries({ extractEveryNObservations: 3, flushAfterMs: 120000,
+    maxTokens: 8192, maxInject: 3, staleAfterMs: 604800000 })) practice[key] = integer(practice[key], fallback);
+
   return {
     enabled: Boolean(plugin && plugin.enabled !== false),
     textService: String(plugin?.textService || "ai-conversation.text"),
     storageService: String(plugin?.storageService || "storage-sqlite.database"),
     shortTerm: short,
     longTerm: long,
-    work,
+    work, practice,
   };
 }
 

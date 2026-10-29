@@ -85,6 +85,50 @@ function addText(parent, tag, className, value) {
   return node;
 }
 
+const projectStatusLabel = { active: "进行中", blocked: "遇到阻塞", completed: "已完成", paused: "暂停", unknown: "待确认" };
+const lessonStatusLabel = { attempted: "尝试过，未验证", verified: "已有验证来源", failed: "失败记录" };
+function renderPractice(practice = { enabled: false, projects: [], lessons: [], sources: [], history: [], pending: 0 }) {
+  const byId = new Map(practice.sources.map(source => [source.id, source]));
+  function showSources(card, entry) {
+    const details = addText(card, "details", "", "");
+    addText(details, "summary", "muted", "查看信息来源");
+    for (const id of entry.sourceIds || []) {
+      const source = byId.get(id);
+      if (!source) continue;
+      addText(details, "div", "muted", `${sourceLabel(source.source)} · ${time(source.capturedAt)}`);
+      addText(details, "div", "text", source.text);
+    }
+  }
+  function body(entry) {
+    return entry.name ? `目标：${entry.goal}\n已完成：${entry.completed.join("；") || "暂无确认记录"}\n未完成／待验证：${entry.pending.join("；") || "暂无记录"}\n阻塞：${entry.blockers.join("；") || "暂无记录"}\n下一步：${entry.nextSteps.join("；") || "待确认"}`
+      : `适用条件：${entry.condition}\n处理方法：${entry.steps.join("；")}\n结果：${entry.outcome}`;
+  }
+  for (const kind of ["projects", "lessons"]) {
+    const items = practice[kind];
+    element(`${kind}-info`).textContent = practice.error || `${practice.enabled ? "已启用" : "自动更新已关闭"} · ${items.length} 条记录 · 待整理 ${practice.pending} 条来源 · 来源与历史重启后保留`;
+    const container = element(kind); container.replaceChildren();
+    if (!items.length) addText(container, "p", "muted", kind === "projects" ? "有明确项目线索后，会记录目标、进展与下一步。" : "有具体处理方法和结果后，会记录可复用经验。");
+    for (const entry of items) {
+      const card = addText(container, "article", "", "");
+      addText(card, "h3", "", `${entry.name || entry.title}${entry.scope ? ` · ${entry.scope}` : ""}`);
+      addText(card, "div", "muted", `${(kind === "projects" ? projectStatusLabel : lessonStatusLabel)[entry.status]} · 最后来源 ${time(entry.observedAt)} · 整理于 ${time(entry.updatedAt)}`);
+      if (kind === "projects" && Date.now() - entry.observedAt > practice.staleAfterMs) addText(card, "p", "muted", "该项目已久未更新，当前进展需要重新确认。");
+      addText(card, "div", "text", body(entry));
+      if (entry.verification) addText(card, "div", "text muted", `验证来源摘录：${entry.verification.quote}`);
+      showSources(card, entry);
+      const history = practice.history.filter(record => record.entryId === entry.id && record.before);
+      if (history.length) {
+        const details = addText(card, "details", "", "");
+        addText(details, "summary", "muted", "查看之前的状态与内容");
+        for (const record of history) {
+          addText(details, "div", "muted", `${time(record.updatedAt)} · 更新前 · ${(kind === "projects" ? projectStatusLabel : lessonStatusLabel)[record.before.status]}`);
+          addText(details, "div", "text", body(record.before));
+        }
+      }
+    }
+  }
+}
+
 function render(snapshot) {
   if (snapshot.viewTab && snapshot.viewTab !== requestedTab) {
     requestedTab = snapshot.viewTab;
@@ -92,6 +136,7 @@ function render(snapshot) {
     if (selected) selectTab(selected);
   }
   element("status").textContent = `${snapshot.enabled ? "记忆已启用" : "记忆已关闭"} · 本次运行 ${snapshot.totalTurns} 轮对话 · ${snapshot.clearing ? "正在清空" : snapshot.maintaining ? "正在整理记忆" : "整理空闲"} · ${time(Date.now())}`;
+  renderPractice(snapshot.practice);
   const { shortTerm, longTerm } = snapshot;
   element("recent-info").textContent = `${shortTerm.enabled ? "参与对话" : "对话注入已关闭"} · 当前 ${shortTerm.turns.length} / ${shortTerm.maxTurns} 轮 · 保留 ${Math.round(shortTerm.ttlMs / 60000)} 分钟`;
   const recent = element("recent");

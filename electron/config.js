@@ -40,15 +40,15 @@ function normalizeConfig(input) {
     if (!object(plugin) || typeof plugin.name !== "string" || !plugin.name.trim()) throw new Error("插件必须有非空名称");
     if (plugins.has(plugin.name)) throw new Error(`插件名称重复: ${plugin.name}`);
     if (plugin.enabled != null && typeof plugin.enabled !== "boolean") throw new Error(`plugins.${plugin.name}.enabled 必须是布尔值`);
-    for (const key of ["ai", "character", "shortTerm", "summary", "longTerm", "work", "changeDetect", "asr"]) dictionary(plugin[key], `plugins.${plugin.name}.${key}`);
-    for (const key of ["shortTerm", "summary", "longTerm", "work", "changeDetect"]) {
+    for (const key of ["ai", "character", "shortTerm", "summary", "longTerm", "work", "practice", "changeDetect", "asr"]) dictionary(plugin[key], `plugins.${plugin.name}.${key}`);
+    for (const key of ["shortTerm", "summary", "longTerm", "work", "practice", "changeDetect"]) {
       if (plugin[key]?.enabled != null && typeof plugin[key].enabled !== "boolean") throw new Error(`plugins.${plugin.name}.${key}.enabled 必须是布尔值`);
     }
     if (plugin.interval_ms != null) number(plugin.interval_ms, 5000, -86400000, 86400000, "plugin.interval_ms");
     if (plugin.observationTtlMs != null) number(plugin.observationTtlMs, 60000, 1000, 86400000, "plugin.observationTtlMs");
     if (plugin.name === "memory") {
       for (const key of Object.keys(plugin)) {
-        if (!["name", "enabled", "textService", "storageService", "shortTerm", "summary", "longTerm", "work"].includes(key) && !key.startsWith("_")) {
+        if (!["name", "enabled", "textService", "storageService", "shortTerm", "summary", "longTerm", "work", "practice"].includes(key) && !key.startsWith("_")) {
           throw new Error(`不支持的记忆配置字段: ${key}，长期记忆参数请放入 longTerm`);
         }
       }

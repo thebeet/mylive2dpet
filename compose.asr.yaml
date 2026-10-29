@@ -1,29 +1,52 @@
-name: mylive2dpet-asr
+name: mylive2dpet-funasr
 
 services:
-  whisper-asr:
-    image: onerahmet/openai-whisper-asr-webservice:latest
-    pull_policy: never
-    container_name: mylive2dpet-whisper-asr
+  funasr:
+    image: registry.cn-hangzhou.aliyuncs.com/funasr_repo/funasr:funasr-runtime-sdk-online-cpu-0.1.13
+    container_name: mylive2dpet-funasr
     restart: unless-stopped
     ports:
-      - "127.0.0.1:9000:9000"
-    environment:
-      ASR_ENGINE: faster_whisper
-      ASR_MODEL: small
-      ASR_DEVICE: cpu
-      ASR_QUANTIZATION: int8
-      HF_ENDPOINT: ${WHISPER_HF_ENDPOINT:-https://hf-mirror.com}
-      HF_HUB_DISABLE_XET: "1"
+      - "127.0.0.1:10096:10095"
+    working_dir: /workspace/FunASR/runtime/websocket/build/bin
+    entrypoint: ["/workspace/FunASR/runtime/websocket/build/bin/funasr-wss-server-2pass"]
+    command:
+      - --download-model-dir
+      - /workspace/models
+      - --model-dir
+      - damo/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-onnx
+      - --online-model-dir
+      - damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online-onnx
+      - --vad-dir
+      - damo/speech_fsmn_vad_zh-cn-16k-common-onnx
+      - --punc-dir
+      - damo/punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727-onnx
+      - --itn-dir
+      - thuduj12/fst_itn_zh
+      - --lm-dir
+      - damo/speech_ngram_lm_zh-cn-ai-wesp-fst
+      - --decoder-thread-num
+      - "4"
+      - --model-thread-num
+      - "1"
+      - --io-thread-num
+      - "2"
+      - --port
+      - "10095"
+      - --certfile
+      - ""
+      - --keyfile
+      - ""
+      - --hotword
+      - ""
     volumes:
-      - whisper-cache:/root/.cache
+      - funasr-models:/workspace/models
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/openapi.json', timeout=3).read()"]
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 10095), timeout=3).close()"]
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 10m
+      start_period: 20m
 
 volumes:
-  whisper-cache:
-    name: mylive2dpet-whisper-cache
+  funasr-models:
+    name: mylive2dpet-funasr-models

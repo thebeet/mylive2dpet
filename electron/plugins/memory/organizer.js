@@ -1,3 +1,4 @@
+const { INSTRUCTIONS, validatePracticePlan } = require("./practicePlanner");
 const { validateProfilePlan } = require("./profileOrganizer");
 
 function validatePlan(plan, entries, profiles) {
@@ -41,9 +42,9 @@ function modelEntry(entry) {
     importance: entry.importance, createdAt: entry.createdAt };
 }
 
-async function organizeWithLlm({ entries, profiles, callChat, signal }) {
+async function organizeWithLlm({ entries, profiles, practice, callChat, signal }) {
   signal?.throwIfAborted();
-  if (!entries.length && !profiles?.length) return validatePlan({ merge: [], archive: [],
+  if (!entries.length && !profiles?.length && !practice) return validatePlan({ merge: [], archive: [],
     ...(profiles !== undefined ? { workProfiles: { merge: [], archive: [] } } : {}) }, entries, profiles);
   const raw = await callChat([
     { role: "system", content:
@@ -67,8 +68,9 @@ async function organizeWithLlm({ entries, profiles, callChat, signal }) {
         "长期事实和画像的ID分别引用，不互相混用。画像只合并同一 entityId、同一 field 下重复或互补的信息；不同 scope 只有明确表示同一项目或活动时才能合并，目标 scope 必须取自来源，不混合全局与项目画像。" +
         "不能凭同名合并人物，不能把他人信息归给用户；保留角色、职责、时间范围和不确定性，冲突没有明确变化依据时分别保留。" +
         "basis=user_answer 的画像不能归档或改写，参与合并时 value 与 scope 必须和用户确认内容完全一致；不要提升观察和猜测的确认程度。" +
-        "仅归档明显重复、无价值或有明确依据已失效的临时画像，不因时间久就归档；画像 value 不超过600字，reason 不超过300字，未引用的画像原样保留。" : "") },
+        "仅归档明显重复、无价值或有明确依据已失效的临时画像，不因时间久就归档；画像 value 不超过600字，reason 不超过300字，未引用的画像原样保留。" : "") + (practice ? "\n同时输出practice字段，按以下规则维护项目状态和经验：\n" + INSTRUCTIONS : "") },
     { role: "user", content: JSON.stringify({ now: new Date().toISOString(), entries: entries.map(modelEntry),
+      ...(practice ? { practice } : {}),
       ...(profiles !== undefined ? { profiles: profiles.map(({ id, entityId, subject, aliases, field, scope, value, basis, confidence, updatedAt }) =>
         ({ id, entityId, subject, aliases, field, scope, value, basis, confidence, updatedAt })) } : {}) }) },
   ], { max_tokens: 16384, temperature: 0.1, timeoutMs: 300000, retryBudgetMs: 605000, maxRetries: 1 });
@@ -78,7 +80,8 @@ async function organizeWithLlm({ entries, profiles, callChat, signal }) {
   let plan;
   try { plan = JSON.parse(fenced ? fenced[1] : text); }
   catch { throw new Error("记忆整理返回无效 JSON，原始记忆已保留"); }
-  return validatePlan(plan, entries, profiles);
+  return { ...validatePlan(plan, entries, profiles),
+    ...(practice ? { practice: validatePracticePlan(plan.practice, practice, practice.sources) } : {}) };
 }
 
 module.exports = { validatePlan, organizeWithLlm };

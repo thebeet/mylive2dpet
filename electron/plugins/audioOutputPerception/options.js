@@ -34,6 +34,10 @@ function getAudioOutputOptions(config = {}) {
       vadFilter: asr.vadFilter !== false,
       proxy: String(asr.proxy || "").trim(),
       timeoutMs: bounded(asr.timeoutMs, 30000, 1000, 120000),
+      chunkSize: Array.isArray(asr.chunkSize) && asr.chunkSize.length === 3 &&
+        asr.chunkSize.every((n, i) => Number.isInteger(n) && n >= (i === 1 ? 1 : 0) && n <= 20)
+        ? [...asr.chunkSize] : [5, 10, 5],
+      chunkInterval: Math.round(bounded(asr.chunkInterval, 10, 1, 20)),
     },
   };
 }

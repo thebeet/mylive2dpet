@@ -9,7 +9,7 @@
     "desktop": "npm run start",
     "build": "vite build",
     "preview": "vite preview",
-    "test:audio": "node --test tests/audioOutput.test.js",
+    "test:audio": "node --test tests/audioOutput.test.js tests/audioLiveWindow.test.js tests/funasr.test.js",
     "test": "node --test tests/*.test.js",
     "rebuild:native": "electron-rebuild -f -w better-sqlite3",
     "postinstall": "npm run rebuild:native",
@@ -28,8 +28,10 @@
   },
   "dependencies": {
     "better-sqlite3": "^11.10.0",
+    "https-proxy-agent": "^7.0.6",
     "pixi-live2d-display": "^0.4.0",
     "pixi.js": "^7.4.2",
+    "ws": "^8.22.0",
     "x11": "^4.3.1"
   },
   "engines": {

@@ -1,7 +1,7 @@
 const status = document.getElementById("status");
 const entries = document.getElementById("entries");
 const labels = { disabled: "语音监听未开启", starting: "正在连接监听设备…",
-  listening: "正在监听 · 转写完成后显示内容", suppressed: "桌宠语音播放期间暂停监听", error: "监听异常" };
+  listening: "正在监听 · 语音内容实时显示", suppressed: "桌宠语音播放期间暂停监听", error: "监听异常" };
 
 const unsubscribe = window.liveAudio.onContent(({ state, entries: transcripts }) => {
   status.dataset.status = state.status;
@@ -17,6 +17,7 @@ const unsubscribe = window.liveAudio.onContent(({ state, entries: transcripts })
     const card = document.createElement("article");
     const time = document.createElement("time");
     time.textContent = new Date(transcript.capturedAt).toLocaleTimeString("zh-CN");
+    if (transcript.final === false) time.textContent += " · 识别中…";
     const text = document.createElement("p");
     text.className = "text";
     text.textContent = transcript.text;

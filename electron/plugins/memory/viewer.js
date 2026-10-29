@@ -35,7 +35,7 @@ function createMemoryViewer(context, { getSnapshot, isAvailable, correctProfile,
 
   function show(tab) {
     if (!isAvailable()) return;
-    const explicitTab = typeof tab === "string" && ["recent", "long", "work", "question-history"].includes(tab);
+    const explicitTab = typeof tab === "string" && ["recent", "long", "projects", "lessons", "work", "question-history"].includes(tab);
     if (explicitTab) viewTab = tab;
     if (win && !win.isDestroyed()) {
       if (win.isMinimized()) win.restore();

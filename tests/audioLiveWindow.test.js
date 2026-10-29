@@ -114,3 +114,20 @@ test("audio menu streams ASR results immediately even when repeated observations
   await plugin.stop();
   assert.equal(h.windows[1].destroyed, true);
 });
+
+test('2-pass interim text updates one subtitle, final correction replaces it, and cancellation removes it', t => {
+  const h = windowServices();
+  const live = createLiveWindow(h.dependencies);
+  t.after(() => live.dispose());
+  live.setEnabled(true);
+  const win = h.windows[0];
+  live.addTranscript({ id: 'utterance', text: '天气', final: false });
+  live.addTranscript({ id: 'utterance', text: '天气好', final: false });
+  assert.equal(win.webContents.messages.at(-1).entries.length, 1);
+  assert.equal(win.webContents.messages.at(-1).entries[0].text, '天气好');
+  live.addTranscript({ id: 'utterance', text: '天气很好。', final: true });
+  assert.deepEqual(win.webContents.messages.at(-1).entries, [{ id: 'utterance', text: '天气很好。', final: true }]);
+  live.addTranscript({ id: 'interrupted', text: '尚未完成', final: false });
+  live.removeTranscript('interrupted');
+  assert.equal(win.webContents.messages.at(-1).entries.length, 1);
+});

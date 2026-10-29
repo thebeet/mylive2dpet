@@ -61,7 +61,17 @@ function createLiveWindow({ windows, screen, ipc, menu, logger }) {
   return {
     setEnabled, isEnabled: () => Boolean(win && !win.isDestroyed()),
     setState(next) { state = { ...next }; update(); },
-    addTranscript(entry) { entries.push({ ...entry }); if (entries.length > 20) entries.shift(); update(); },
+    addTranscript(entry) {
+      const index = entry.id ? entries.findIndex((item) => item.id === entry.id) : -1;
+      if (index >= 0) entries[index] = { ...entry };
+      else entries.push({ ...entry });
+      if (entries.length > 20) entries.shift();
+      update();
+    },
+    removeTranscript(id) {
+      const index = entries.findIndex((entry) => entry.id === id);
+      if (index >= 0) { entries.splice(index, 1); update(); }
+    },
     stop,
     dispose() { if (disposed) return; stop(); disposed = true; unregisterIpc(); },
   };
