@@ -1,11 +1,9 @@
-const path = require("path");
 const EVENTS = require("../../architecture/events");
 const { getOptions } = require("./options");
 const { createShortTermStore } = require("./shortTerm");
-const { updateWithLlm } = require("./updater");
+const { createMaintenanceCoordinator } = require("./maintenanceCoordinator");
 const { createUpdateBuffer } = require("./updateBuffer");
 const longTerm = require("./longTerm");
-const { organizeWithLlm } = require("./organizer");
 const { formatRecentDialogue, buildContextBlocks } = require("./context");
 const { createMemoryViewer } = require("./viewer");
 const { createWorkMemory } = require("./workMemory");
@@ -19,16 +17,6 @@ function createMemoryPlugin(context, dependencies = {}) {
   let durable = dependencies.longTerm || null;
   let totalTurns = 0;
   let extractedThrough = 0;
-  let generation = 0;
-  let active = true;
-  let disposed = false;
-  let requested = false;
-  let task = null;
-  let controller = null;
-  let warnedService = null;
-  let clearing = null;
-  let organizing = null;
-  let organizationController = null;
   let confirmation = null;
   let confirmationController = null;
   const inFlightDecisions = new Set();
@@ -50,20 +38,39 @@ function createMemoryPlugin(context, dependencies = {}) {
     return extractionBuffer;
   }
   const work = createWorkMemory(context, { options, now: dependencies.now || Date.now,
-    isAvailable: () => active && !disposed && !clearing });
+    isAvailable: () => coordinator.isAvailable() });
   const practice = createPracticeMemory(context, { options, now: dependencies.now || Date.now,
-    isAvailable: () => active && !disposed && !clearing });
+    isAvailable: () => coordinator.isAvailable() });
   function getDurable() {
     if (durable) return durable;
     const config = options();
     const storage = context.services.get(config.storageService);
     if (!storage) throw new Error(`memory storage service unavailable: ${config.storageService}`);
     const store = longTerm.createLongTermStore(storage);
-    const projectRoot = context.paths?.projectRoot || path.resolve(__dirname, "../../..");
-    store.importLegacy(path.resolve(projectRoot, config.longTerm.legacyPath), config.longTerm, context.logger);
     durable = store;
     return durable;
   }
+
+  const coordinator = createMaintenanceCoordinator({
+    options, model: context.model, services: context.services, logger: context.logger,
+    stores: { pendingBuffer, getDurable, work, practice },
+    getTotalTurns: () => totalTurns,
+    onUpdated: (through) => { extractedThrough = through; },
+    canClear: () => Boolean(durable || context.services.get(options().storageService)),
+    onInvalidate() {
+      for (const id of inFlightDecisions) ignoredDecisions.add(id);
+      buffer.clear();
+      pendingBuffer().clear();
+      totalTurns = extractedThrough = 0;
+      void context.bus.notify(EVENTS.MEMORY_CLEARED, {});
+    },
+    clearStores,
+    refresh: () => context.menu?.refresh(),
+    notifyUpdated: () => { void context.bus.notify(EVENTS.WORK_MEMORY_UPDATED, {}); },
+  });
+  const scheduleMaintenance = coordinator.request;
+  const clear = coordinator.clear;
+  const state = coordinator.getState;
 
   if (options().enabled && options().longTerm.enabled) {
     try { getDurable(); } catch (error) { context.logger.warn("long-term storage initialization deferred:", error); }
@@ -77,106 +84,16 @@ function createMemoryPlugin(context, dependencies = {}) {
   }
   migratePersonProfiles();
 
-  function valid(snapshot) {
-    return active && !disposed && !clearing && snapshot.generation === generation && options().enabled &&
-      context.services.get(snapshot.options.textService) === snapshot.generate;
-  }
-
-  async function maintainSnapshot() {
-    const config = options();
-    if (!active || disposed || !config.enabled) return;
-    const extractionTurns = config.longTerm.enabled ? pendingBuffer().list() : [];
-    const extract = config.longTerm.enabled && extractionTurns.length >= config.longTerm.extractEveryNTurns;
-    const extractWork = work.due();
-    const extractPractice = practice.due();
-    if (!extract && !extractWork && !extractPractice) return;
-
-    const generate = context.services.get(config.textService);
-    if (typeof generate !== "function") {
-      if (warnedService !== config.textService) {
-        context.logger.warn(`text service unavailable: ${config.textService}; maintenance deferred`);
-        warnedService = config.textService;
-      }
-      return;
-    }
-    warnedService = null;
-    const snapshot = { extractionTurns, through: totalTurns, generation, options: config, generate };
-    const abortController = new AbortController();
-    controller = abortController;
-    const callChat = (messages, settings) => generate(messages, {
-      ...settings, signal: abortController.signal,
-    });
-    try {
-      if (!valid(snapshot)) return;
-      if (extract && options().longTerm.enabled) {
-        try {
-          const store = getDurable(), entries = store.list();
-          const evidence = pendingBuffer().evidence();
-          const plan = await updateWithLlm({ entries, turns: extractionTurns, evidence, callChat,
-            maxTokens: config.longTerm.maxTokens, maxEntries: config.longTerm.maxEntries });
-          if (!valid(snapshot) || !options().longTerm.enabled) return;
-          const apply = () => {
-            const result = store.updateFromDialogue(plan, entries, extractionTurns, evidence, config.longTerm);
-            pendingBuffer().consume(extractionTurns, evidence);
-            return result;
-          };
-          const storage = context.services.get(config.storageService);
-          const result = storage ? storage.transaction(apply) : apply();
-          extractedThrough = snapshot.through;
-          context.logger.info(`long-term updated after ${extractionTurns.length} dialogue(s): updated=${result.updated}, added=${result.added}`);
-        } catch (error) {
-          if (valid(snapshot)) context.logger.warn("long-term update failed:", error);
-        }
-      }
-      if (extractWork && valid(snapshot)) {
-        try {
-          await work.maintain({ callChat, valid: () => valid(snapshot),
-            applyMemory: (memory, evidence) => {
-              if (options().longTerm.enabled) pendingBuffer().stageEvidence(evidence);
-            } });
-        }
-        catch (error) { if (valid(snapshot)) context.logger.warn("work extraction failed:", error); }
-      }
-      if (extractPractice && valid(snapshot)) {
-        try {
-          const result = await practice.maintain({ callChat, valid: () => valid(snapshot) });
-          if (result) context.logger.info(`project/experience updated: updated=${result.updated}, added=${result.added}`);
-        } catch (error) { if (valid(snapshot)) context.logger.warn("project/experience extraction failed:", error); }
-      }
-
-    } finally {
-      if (controller === abortController) controller = null;
-    }
-  }
-
-  function scheduleMaintenance() {
-    if (!active || disposed || clearing) return;
-    requested = true;
-    if (organizing) return;
-    if (task) return;
-    task = Promise.resolve().then(async () => {
-      while (requested && active && !disposed) {
-        requested = false;
-        await maintainSnapshot();
-      }
-    }).catch((error) => {
-      if (active && !disposed) context.logger.warn("maintenance failed:", error);
-    }).finally(() => {
-      task = null;
-      if (requested && active && !disposed) scheduleMaintenance();
-    });
-  }
-
   function recordDecision({ id, sessionId, observations, result, trigger }) {
     inFlightDecisions.delete(id);
-    if (ignoredDecisions.delete(id) || clearing) return;
+    if (ignoredDecisions.delete(id) || !coordinator.isAvailable()) return;
     try { practice.ingestDecision({ id, sessionId, observations, result, trigger }); }
     catch (error) { context.logger.warn("project/experience record failed:", error); }
     try { work.ingestDecision({ id, sessionId, observations, result, trigger }); }
     catch (error) { context.logger.warn("work observation record failed:", error); }
     try {
       const config = options();
-      if (!active || disposed || !config.enabled ||
+      if (!coordinator.isRunning() || !config.enabled ||
           !(config.shortTerm.enabled || config.longTerm.enabled || config.work.enabled)) return;
       const userMessage = observations.filter(({ role }) => role === "user")
         .flatMap(({ content }) => content.filter(({ type }) => type === "text"))
@@ -200,9 +117,9 @@ function createMemoryPlugin(context, dependencies = {}) {
     }
   }
 
-  function provideContext({ observations = [] } = {}) {
+  function provideContext({ observations = [], conversationHistory = false } = {}) {
     const config = options();
-    if (!active || disposed || clearing || !config.enabled) return [];
+    if (!coordinator.isAvailable() || !config.enabled) return [];
     const turnsText = formatRecentDialogue(buffer.list(config.shortTerm));
     let longTermMemory = "";
     if (config.longTerm.enabled) {
@@ -216,10 +133,9 @@ function createMemoryPlugin(context, dependencies = {}) {
         context.logger.warn("retrieval failed:", error);
       }
     }
-    if (totalTurns || config.work.enabled || config.practice.enabled || config.longTerm.enabled && pendingBuffer().list().length) scheduleMaintenance();
     const blocks = buildContextBlocks({
       longTermMemory,
-      recentDialogue: config.shortTerm.enabled ? turnsText : "",
+      recentDialogue: config.shortTerm.enabled && !conversationHistory ? turnsText : "",
     });
     try {
       const query = [...observations.flatMap((o) => o.content.filter((p) => p.type === "text").map((p) => p.text)),
@@ -240,7 +156,6 @@ function createMemoryPlugin(context, dependencies = {}) {
     try { work.ingestObservation(observation); if (options().work.enabled) scheduleMaintenance(); }
     catch (error) { context.logger.warn("work evidence record failed:", error); }
   });
-  let maintenanceTimer = null;
   const unregisterContext = context.decisionContext.register(provideContext);
   const unsubscribeStarted = context.bus.subscribe(EVENTS.DECISION_STARTED, ({ id }) => {
     inFlightDecisions.add(id);
@@ -250,103 +165,29 @@ function createMemoryPlugin(context, dependencies = {}) {
     if (event.stage === "decision" && event.id) { inFlightDecisions.delete(event.id); ignoredDecisions.delete(event.id); }
   }, { allowWhileStopped: true });
 
-  function clear() {
-    if (clearing) return clearing;
-    if (disposed || !active) return Promise.reject(new Error("记忆插件已停止"));
-    if (!durable && !context.services.get(options().storageService)) return Promise.reject(new Error("长期记忆存储不可用，无法清空全部记忆"));
-    generation += 1;
-    requested = false;
-    controller?.abort();
-    organizationController?.abort(new Error("记忆整理已取消"));
-    for (const id of inFlightDecisions) ignoredDecisions.add(id);
-    buffer.clear();
-    pendingBuffer().clear();
-    void context.bus.notify(EVENTS.MEMORY_CLEARED, {});
-    totalTurns = extractedThrough = 0;
-    const maintenance = task;
-    const organization = organizing;
-    clearing = Promise.resolve().then(async () => {
-      if (maintenance) await maintenance;
-      if (organization) await organization.catch(() => {});
-      work.clear();
-      practice.clear();
-      const config = options();
-      const legacyPath = path.resolve(context.paths?.projectRoot || path.resolve(__dirname, "../../.."), config.longTerm.legacyPath);
-      if (durable || context.services.get(config.storageService)) {
-        const store = getDurable();
-        if (typeof store.clear !== "function") throw new Error("记忆存储未提供清空能力");
-        const deleted = store.clear(legacyPath);
-        const storage = context.services.get(config.storageService);
-        if (storage) createUpdateBuffer(storage).clear();
-        context.logger.info(`all memory cleared; long-term removed=${deleted}`);
-        return { deleted };
-      }
-      throw new Error("长期记忆存储不可用，无法清空全部记忆");
-    }).finally(() => { clearing = null; context.menu?.refresh(); });
-    context.menu?.refresh();
-    return clearing;
+  function clearStores() {
+    work.clear();
+    practice.clear();
+    const config = options();
+    const store = getDurable();
+    if (typeof store.clear !== "function") throw new Error("记忆存储未提供清空能力");
+    const deleted = store.clear();
+    const storage = context.services.get(config.storageService);
+    if (storage) createUpdateBuffer(storage).clear();
+    context.logger.info(`all memory cleared; long-term removed=${deleted}`);
+    return { deleted };
   }
 
   function organize() {
-    if (organizing) return organizing;
-    const config = options();
-    if (!active || disposed || !config.enabled) return Promise.reject(new Error("记忆插件已停止"));
-    if (clearing || confirmation) return Promise.reject(new Error("正在清空记忆，请稍后再整理"));
-    if (!config.longTerm.enabled && !config.work.enabled && !config.practice.enabled) return Promise.reject(new Error("长期记忆已关闭，人物画像也未启用"));
-    const snapshotGeneration = generation;
-    const maintenance = task;
-    const abortController = new AbortController();
-    organizationController = abortController;
-    organizing = Promise.resolve().then(async () => {
-      if (maintenance) await maintenance;
-      const current = options();
-      const generate = context.services.get(current.textService);
-      const snapshot = { generation: snapshotGeneration, options: current, generate };
-      const isValid = () => !abortController.signal.aborted && valid(snapshot) &&
-        options().longTerm.enabled === current.longTerm.enabled && options().work.enabled === current.work.enabled &&
-        options().practice.enabled === current.practice.enabled;
-      if (!isValid()) throw new Error("记忆整理已取消");
-      const store = current.longTerm.enabled ? getDurable() : null;
-      if (store && (typeof store.list !== "function" || typeof store.organize !== "function")) throw new Error("记忆存储不支持整理");
-      const entries = store ? store.list() : [];
-      const profiles = current.work.enabled ? work.organizationSnapshot() : undefined;
-      const practiceSnapshot = practice.organizationSnapshot();
-      const empty = { before: 0, after: 0, merged: 0, archived: 0 };
-      if (!entries.length && !profiles?.length && !practiceSnapshot?.projects.length && !practiceSnapshot?.lessons.length && !practiceSnapshot?.sources.length) return { ...empty, ...(profiles ? { work: { ...empty } } : {}) };
-      if (typeof generate !== "function") throw new Error("AI 文本服务不可用，请稍后重试");
-      context.logger.info(`memory organization: ${entries.length} facts, ${profiles?.length || 0} work profiles`);
-      const plan = await organizeWithLlm({ entries, profiles, practice: practiceSnapshot, signal: abortController.signal,
-        callChat: (messages, settings) => generate(messages, {
-          ...settings, signal: abortController.signal,
-        }) });
-      if (!isValid()) throw new Error("记忆整理已取消");
-      let result;
-      if (profiles !== undefined || practiceSnapshot !== undefined) {
-        const storage = context.services.get(current.storageService);
-        if (!storage) throw new Error("人物记忆存储不可用");
-        result = storage.transaction(() => ({ ...(store ? store.organize(plan, entries) : empty),
-          ...(profiles !== undefined ? { work: work.organize(plan.workProfiles, profiles) } : {}),
-          ...(practiceSnapshot !== undefined ? { practice: practice.organize(plan.practice, practiceSnapshot) } : {}) }));
-        void context.bus.notify(EVENTS.WORK_MEMORY_UPDATED, {});
-      } else result = store.organize(plan, entries);
-      context.logger.info(`long-term organized: ${result.before} -> ${result.after}; merged=${result.merged} archived=${result.archived}`);
-      if (result.work) context.logger.info(`work profiles organized: ${result.work.before} -> ${result.work.after}; merged=${result.work.merged} archived=${result.work.archived}`);
-      return result;
-    }).finally(() => {
-      organizing = null;
-      if (organizationController === abortController) organizationController = null;
-      context.menu?.refresh();
-      if (requested && active && !disposed && !clearing) scheduleMaintenance();
-    });
-    context.menu?.refresh();
-    return organizing;
+    if (confirmation) return Promise.reject(new Error("正在清空记忆，请稍后再整理"));
+    return coordinator.organize();
   }
 
   async function organizeFromMenu() {
-    const snapshotGeneration = generation;
+    const snapshotGeneration = state().generation;
     try {
       const result = await organize();
-      if (!active || disposed || clearing || generation !== snapshotGeneration) return;
+      if (!coordinator.isAvailable() || state().generation !== snapshotGeneration) return;
       const hasMemory = result.before || result.work?.before || result.practice;
       const details = [`长期事实：整理前 ${result.before} 条，整理后 ${result.after} 条；合并 ${result.merged} 组，归档 ${result.archived} 条。`];
       if (result.work) details.push(`人物画像：整理前 ${result.work.before} 条，整理后 ${result.work.after} 条；合并 ${result.work.merged} 组，归档 ${result.work.archived} 条。`);
@@ -356,7 +197,7 @@ function createMemoryPlugin(context, dependencies = {}) {
         text: hasMemory ? `记忆整理完成。\n${details.join("\n")}` : "暂无记忆可整理。",
       });
     } catch (error) {
-      if (!active || disposed || clearing || generation !== snapshotGeneration) return;
+      if (!coordinator.isAvailable() || state().generation !== snapshotGeneration) return;
       context.logger.warn("manual memory organization failed:", error);
       await context.bus.notify(EVENTS.BUBBLE_OUTPUT_REQUESTED, {
         type: "error", text: `记忆整理未完成，原始记忆已保留，可以稍后重试。\n${error.message || error}`,
@@ -364,9 +205,10 @@ function createMemoryPlugin(context, dependencies = {}) {
     }
   }
   function confirmClear() {
-    if (confirmation || clearing) return confirmation || clearing;
-    if (!active || disposed) return Promise.reject(new Error("记忆插件已停止"));
-    const currentGeneration = generation;
+    if (confirmation) return confirmation;
+    if (state().clearing) return clear();
+    if (!coordinator.isRunning()) return Promise.reject(new Error("记忆插件已停止"));
+    const currentGeneration = state().generation;
     confirmationController = new AbortController();
     const signal = confirmationController.signal;
     confirmation = Promise.resolve().then(async () => {
@@ -376,7 +218,7 @@ function createMemoryPlugin(context, dependencies = {}) {
         detail: "近期对话、长期记忆、项目状态、经验、人物画像、观察证据和提问记录将被永久清除；保留历史对话。此操作无法撤销。",
         buttons: ["取消", "清空全部记忆"], defaultId: 0, cancelId: 0, noLink: true, signal,
       });
-      if (response === 1 && !signal.aborted && active && !disposed && generation === currentGeneration) {
+      if (response === 1 && !signal.aborted && coordinator.isRunning() && state().generation === currentGeneration) {
         return clear();
       }
     }).finally(() => {
@@ -412,7 +254,7 @@ function createMemoryPlugin(context, dependencies = {}) {
     catch (cause) { practiceSnapshot = { enabled: config.practice.enabled, error: String(cause.message || cause), projects: [], lessons: [], sources: [], history: [], pending: 0 }; }
     return {
       practice: practiceSnapshot,
-      enabled: config.enabled, totalTurns, maintaining: Boolean(task || organizing), organizing: Boolean(organizing), clearing: Boolean(clearing),
+      enabled: config.enabled, totalTurns, maintaining: state().maintaining, organizing: state().organizing, clearing: state().clearing,
       shortTerm: { enabled: config.shortTerm.enabled, maxTurns: config.shortTerm.maxTurns,
         ttlMs: config.shortTerm.ttlMs, turns: buffer.list(config.shortTerm) },
       longTerm: { enabled: config.longTerm.enabled, maxEntries: config.longTerm.maxEntries, updateEveryNTurns: config.longTerm.extractEveryNTurns,
@@ -421,61 +263,46 @@ function createMemoryPlugin(context, dependencies = {}) {
       work: workSnapshot,
     };
   }
-  const viewer = createMemoryViewer(context, { getSnapshot, isAvailable: () => active && !disposed && !clearing,
+  const viewer = createMemoryViewer(context, { getSnapshot, isAvailable: () => coordinator.isAvailable(),
     correctProfile: (id, text) => work.api.correctProfile(id, text),
     deleteQuestion: (id) => work.api.deleteQuestion(id), deleteAnswer: (questionId, answerId) => work.api.deleteAnswer(questionId, answerId) });
   const unregisterClear = context.services.register?.("clear", clear) || (() => {});
   const unregisterWork = context.services.register?.("work", work.api) || (() => {});
   const unregisterOrganize = context.services.register?.("organize", organize) || (() => {});
   const unregisterMenu = context.menu?.register(() => [{ label: "记忆", submenu: [
-    { label: "查看当前记忆…", enabled: active && !disposed, click: viewer.show },
-    { label: "查看提问记录…", enabled: active && !disposed, click: () => viewer.show("question-history") },
-    { label: organizing ? "正在整理记忆…" : "整理",
-      enabled: active && !disposed && !organizing && !clearing && !confirmation && options().enabled && (options().longTerm.enabled || options().work.enabled || options().practice.enabled) &&
+    { label: "查看当前记忆…", enabled: coordinator.isRunning(), click: viewer.show },
+    { label: "查看提问记录…", enabled: coordinator.isRunning(), click: () => viewer.show("question-history") },
+    { label: state().organizing ? "正在整理记忆…" : "整理",
+      enabled: coordinator.isAvailable() && !state().organizing && !confirmation && options().enabled && (options().longTerm.enabled || options().work.enabled || options().practice.enabled) &&
         Boolean(durable || context.services.get(options().storageService)), click: organizeFromMenu },
     { type: "separator" },
     {
-      label: clearing ? "正在清空记忆…" : "清空全部记忆",
-      enabled: active && !clearing && !confirmation && !disposed && Boolean(durable || context.services.get(options().storageService)),
+      label: state().clearing ? "正在清空记忆…" : "清空全部记忆",
+      enabled: coordinator.isAvailable() && !confirmation && Boolean(durable || context.services.get(options().storageService)),
       click: confirmClear,
     },
   ] }]) || (() => {});
 
   function stop() {
-    active = false;
     confirmationController?.abort();
     viewer.close();
-    requested = false;
-    generation += 1;
-    controller?.abort();
-    organizationController?.abort(new Error("记忆整理已取消"));
-    controller = null;
-    if (maintenanceTimer) clearInterval(maintenanceTimer);
-    maintenanceTimer = null;
-    return Promise.allSettled([task, clearing, organizing].filter(Boolean));
+    return coordinator.stop();
   }
 
   return {
     start() {
-      if (disposed) return;
-      active = true;
-      migratePersonProfiles();
-      if ((options().work.enabled || options().practice.enabled) && !maintenanceTimer) {
-        maintenanceTimer = setInterval(() => scheduleMaintenance(), 30000);
-        maintenanceTimer.unref?.();
-      }
-      if (totalTurns || options().work.enabled || options().practice.enabled || options().longTerm.enabled && pendingBuffer().list().length) scheduleMaintenance();
+      coordinator.start();
+      if (coordinator.isRunning()) migratePersonProfiles();
     },
     stop,
     dispose() {
-      const done = stop();
-      disposed = true;
+      confirmationController?.abort();
+      const done = coordinator.dispose();
       unregisterContext();
       unsubscribeStarted();
       unsubscribeDecision();
       unsubscribeFailed();
       unsubscribeObservation();
-      if (maintenanceTimer) clearInterval(maintenanceTimer);
       unregisterClear();
       unregisterWork();
       unregisterOrganize();
@@ -495,7 +322,7 @@ function createMemoryPlugin(context, dependencies = {}) {
     clear,
     organize,
     getSnapshot,
-    async whenIdle() { while (task || clearing || organizing) await Promise.allSettled([task, clearing, organizing].filter(Boolean)); },
+    whenIdle: coordinator.whenIdle,
   };
 }
 

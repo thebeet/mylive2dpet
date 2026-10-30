@@ -1,12 +1,11 @@
-const { getPlugin } = require("../registry");
+const { readPluginOptions } = require("../registry");
 
 function bounded(value, fallback, min, max) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
 }
 
-function getAudioOutputOptions(config = {}) {
-  const plugin = getPlugin(config, "audio-output-perception");
+function normalizeOptions(plugin) {
   const audio = plugin || {};
   const asr = audio.asr || {};
   return {
@@ -42,4 +41,8 @@ function getAudioOutputOptions(config = {}) {
   };
 }
 
-module.exports = { getAudioOutputOptions };
+function getAudioOutputOptions(config = {}) {
+  return readPluginOptions(config, "audio-output-perception", normalizeOptions);
+}
+
+module.exports = { getAudioOutputOptions, normalizeOptions };

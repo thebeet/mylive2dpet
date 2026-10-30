@@ -1,14 +1,46 @@
 {
+  "conversation": {
+    "enabled": true,
+    "history": {
+      "maxTurns": 32,
+      "keepTurns": 4,
+      "maxInputTokens": 50000,
+      "hardInputTokens": 100000,
+      "summaryMaxTokens": 1600,
+      "summaryMaxChars": 6000
+    },
+    "ai": {
+      "endpoint": "https://your-api.example.com/v1",
+      "proxy": "http://127.0.0.1:7890",
+      "model": "gpt-4o",
+      "outputFormat": "auto",
+      "apiKey": "sk-xxx",
+      "max_tokens": 1024,
+      "timeoutMs": 120000,
+      "retryBudgetMs": 360000
+    },
+    "character": {
+      "cardName": "后辈",
+      "name": "Setsuna",
+      "userIdentity": "后辈",
+      "userTerm": "前辈",
+      "description": "你是{{petName}}，用户的{{userIdentity}}。……",
+      "personality": "温柔清楚。……",
+      "scenario": "你的存在提供「陪伴感」和「节奏感」。……",
+      "rules": "【规则——必须严格遵守】\n1. 只回复1-2句话……",
+      "language": "中文"
+    },
+    "_comment": "核心对话：模型设置与角色策略；enabled 控制对话和共享文本生成。"
+  },
   "ui": {
     "windowWidth": 380,
     "windowHeight": 560,
     "alwaysOnTop": true
   },
   "decision": {
-    "provider": "ai-conversation",
     "enabled": true,
     "interval_ms": 10000,
-    "_comment": "选择已注册的决策插件；每次结束后等待 interval_ms，负数关闭自动决策，保留手动触发。"
+    "_comment": "每次决策结束后等待 interval_ms，负数关闭自动决策，保留手动触发。"
   },
   "plugins": [
     {
@@ -25,38 +57,12 @@
     {
       "name": "dialogue-history",
       "enabled": true,
-      "storageService": "storage-sqlite.database",
-      "legacyPath": "logs/dialogue-history.jsonl"
+      "storageService": "storage-sqlite.database"
     },
     {
       "name": "raw-log",
       "enabled": true,
       "_comment": "原始请求日志：按聊天消息查看每次模型请求，包含图片、重试与返回结果，保存到 SQLite；默认启用。"
-    },
-    {
-      "name": "ai-conversation",
-      "enabled": true,
-      "ai": {
-        "endpoint": "https://your-api.example.com/v1",
-        "proxy": "http://127.0.0.1:7890",
-        "model": "gpt-4o",
-        "apiKey": "sk-xxx",
-        "max_tokens": 1024,
-        "timeoutMs": 120000,
-        "retryBudgetMs": 360000
-      },
-      "character": {
-        "cardName": "后辈",
-        "name": "Setsuna",
-        "userIdentity": "后辈",
-        "userTerm": "前辈",
-        "description": "你是{{petName}}，用户的{{userIdentity}}。……",
-        "personality": "温柔清楚。……",
-        "scenario": "你的存在提供「陪伴感」和「节奏感」。……",
-        "rules": "【规则——必须严格遵守】\n1. 只回复1-2句话……",
-        "language": "中文"
-      },
-      "_comment": "AI 对话插件：模型请求、提示词与结果解析。"
     },
     {
       "name": "screen-perception",
@@ -85,7 +91,11 @@
         "endpoint": "ws://127.0.0.1:10096",
         "apiKey": "",
         "language": "zh",
-        "chunkSize": [5, 10, 5],
+        "chunkSize": [
+          5,
+          10,
+          5
+        ],
         "chunkInterval": 10,
         "proxy": "",
         "timeoutMs": 60000,
@@ -115,7 +125,6 @@
     {
       "name": "memory",
       "enabled": true,
-      "textService": "ai-conversation.text",
       "practice": {
         "enabled": true,
         "extractEveryNObservations": 3,
@@ -137,7 +146,6 @@
         "maxTokens": 16384,
         "maxEntries": 500,
         "enabled": true,
-        "legacyPath": "logs/memory.jsonl",
         "_comment": "每20次非静默对话，将完整待处理对话和现有长期记忆一起更新；优先修改已有条目，新增要求高价值且有明确来源"
       },
       "_comment": "统一记忆插件：enabled 控制整个插件；shortTerm/longTerm 可独立关闭。",

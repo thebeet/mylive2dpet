@@ -7,7 +7,7 @@ const { createLongTermStore } = require("../electron/plugins/memory/longTerm");
 const { createWorkStore } = require("../electron/plugins/memory/workStore");
 const { validateProfilePlan } = require("../electron/plugins/memory/profileOrganizer");
 const { createMemoryPlugin } = require("../electron/plugins/memory");
-const { registerExecutionModule } = require("../electron/modules/execution");
+const { createExecutionModule } = require("../electron/modules/execution");
 const { validatePlan, organizeWithLlm } = require("../electron/plugins/memory/organizer");
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 const deferred = () => {
@@ -22,14 +22,16 @@ function harness(t, generate, overrides = {}) {
   const bus = new MessageBus();
   const dialogs = [];
   const bubbles = [], speeches = [];
-  t.after(registerExecutionModule(bus, { sendBubble: (bubble) => bubbles.push(bubble) }));
+  const execution = createExecutionModule(bus, { sendBubble: (bubble) => bubbles.push(bubble) });
+  t.after(() => execution.dispose());
   t.after(bus.subscribe(EVENTS.SPEECH_OUTPUT_REQUESTED, (payload) => speeches.push(payload)));
-  const config = { plugins: [{ name: "memory", enabled: true, textService: "model.text",
+  const config = { plugins: [{ name: "memory", enabled: true,
     shortTerm: { maxTurns: 20 }, longTerm: { enabled: true }, ...overrides }] };
   let menu;
   let model = generate;
   const plugin = createMemoryPlugin({ bus, config: { get: () => config },
-    services: { get: (name) => name === "model.text" ? model : storage },
+    model: { get generateText() { return model; } },
+    services: { get: () => storage },
     logger: { info() {}, warn() {}, error() {} },
     decisionContext: { register: () => () => {} },
     menu: { register: (provide) => { menu = provide; return () => {}; }, refresh() {} },

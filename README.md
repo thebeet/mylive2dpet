@@ -2,7 +2,7 @@
 
 基于 Electron、TypeScript、PixiJS 和 Live2D Cubism 4 的桌宠。桌宠可以结合桌面画面、设备播放的语音和手动输入进行对话，并通过表情、气泡和 TTS 展示回复。
 
-项目采用插件架构：核心负责窗口、消息总线、观察队列、决策调度和插件生命周期；感知、模型请求、语音、记忆及历史对话由插件实现。
+项目采用插件架构：核心负责窗口、消息总线、观察队列、决策调度、对话策略、模型请求和插件生命周期；感知、语音、记忆及历史对话由插件扩展。插件的配置标准化、加载规则和服务依赖集中在各自的 `definition.js`；记忆协调器统一管理后台更新、手动整理和清空，决策流程明确先记录回合再呈现回复。
 
 ## 功能
 
@@ -46,57 +46,95 @@ Live2D Cubism Core 脚本位于 `public/live2dcubismcore.min.js`，由 `index.ht
 npm install
 ```
 
-安装会自动重建 `better-sqlite3` 的 Electron 原生模块。首次配置时，将 [config.example.json](config.example.json) 复制为 `config.json`，修改模型接口和角色设定。配置仅支持当前插件格式，功能参数放在 `plugins` 中，决策调度放在 `decision` 中。
+安装会自动重建 `better-sqlite3` 的 Electron 原生模块。首次配置时，将 [config.example.json](config.example.json) 复制为 `config.json`，修改模型接口和角色设定。模型和角色参数放在根节点 `conversation` 中，决策调度放在 `decision` 中，感知、记忆和输出等扩展参数放在 `plugins` 中。
 
 `config.json` 被 Git 忽略。示例默认关闭 TTS、开启设备语音监听。启用 TTS 时，将 `plugins` 中 `name=tts` 的 `enabled` 设为 `true`，并替换示例中的 GPT-SoVITS 路径。
+
+应用启动后通过 `fs.watch` 监听 `config.json` 的变化，兼容编辑器替换文件的保存方式，连续变化合并后自动校验并加载新配置，控制台会记录更新结果。JSON 格式错误、配置无效或文件暂时被删除时，继续使用上次有效配置；修复后自动恢复。`plugins` 中某个插件的配置变化后，会自动停止、卸载并重新加载该插件，按加载规则处理新增、移除和启停变化；依赖它的必需服务的插件也会按依赖顺序重载，无关插件继续运行。重载会关闭该插件的窗口、取消正在进行的任务，并重置内存中的临时状态。窗口尺寸等主窗口启动时设置仍需重启应用。
 
 下面是一份可作为起点的配置，替换接口地址、模型和 API key 后使用：
 
 ```json
 {
-  "ui": { "windowWidth": 380, "windowHeight": 560 },
+  "conversation": {
+    "enabled": true,
+    "history": {
+      "maxTurns": 32,
+      "keepTurns": 4,
+      "maxInputTokens": 50000,
+      "hardInputTokens": 100000,
+      "summaryMaxTokens": 1600,
+      "summaryMaxChars": 6000
+    },
+    "ai": {
+      "endpoint": "https://your-api.example.com/v1",
+      "apiKey": "your-api-key",
+      "model": "your-model",
+      "outputFormat": "auto",
+      "max_tokens": 1024,
+      "timeoutMs": 120000,
+      "retryBudgetMs": 360000
+    },
+    "character": {
+      "name": "Setsuna",
+      "description": "你是陪伴用户的桌宠。",
+      "personality": "温柔，表达自然简洁。",
+      "rules": "根据用户输入和观察内容回复，通常只说一到两句话。",
+      "language": "中文"
+    }
+  },
+  "ui": {
+    "windowWidth": 380,
+    "windowHeight": 560
+  },
   "decision": {
-    "provider": "ai-conversation",
     "enabled": true,
     "interval_ms": 10000
   },
   "plugins": [
-    { "name": "manual-input", "enabled": true },
-    { "name": "storage-sqlite", "enabled": true },
-    { "name": "dialogue-history", "enabled": true },
     {
-      "name": "ai-conversation",
-      "enabled": true,
-      "ai": {
-        "endpoint": "https://your-api.example.com/v1",
-        "apiKey": "your-api-key",
-        "model": "your-model",
-        "max_tokens": 1024,
-        "timeoutMs": 120000,
-        "retryBudgetMs": 360000
-      },
-      "character": {
-        "name": "Setsuna",
-        "description": "你是陪伴用户的桌宠。",
-        "personality": "温柔，表达自然简洁。",
-        "rules": "根据用户输入和观察内容回复，通常只说一到两句话。",
-        "language": "中文"
-      }
+      "name": "manual-input",
+      "enabled": true
+    },
+    {
+      "name": "storage-sqlite",
+      "enabled": true
+    },
+    {
+      "name": "dialogue-history",
+      "enabled": true
     },
     {
       "name": "screen-perception",
       "enabled": true,
       "interval_ms": 5000,
       "observationTtlMs": 60000,
-      "changeDetect": { "enabled": true, "hashSize": 8, "threshold": 4 }
+      "changeDetect": {
+        "enabled": true,
+        "hashSize": 8,
+        "threshold": 4
+      }
     },
-    { "name": "memory", "enabled": true, "work": { "enabled": true } },
-    { "name": "questions", "enabled": true }
+    {
+      "name": "memory",
+      "enabled": true,
+      "work": {
+        "enabled": true
+      }
+    },
+    {
+      "name": "questions",
+      "enabled": true
+    }
   ]
 }
 ```
 
-AI 插件对接兼容 Chat Completions 的接口。启用视觉感知时，所选模型需要支持图片输入；只使用文字时，可以关闭视觉插件的自动采集。AI 插件的 `ai.proxy` 可配置独立的模型请求代理。
+核心模型客户端对接兼容 Chat Completions 的接口。启用视觉感知时，所选模型需要支持图片输入；只使用文字时，可以关闭视觉插件的自动采集。核心的 `conversation.ai.proxy` 可配置独立的模型请求代理。
+
+主对话 JSON 采用生成约束和本地严格校验。`conversation.ai.outputFormat` 默认 `auto`：优先发送 `response_format=json_schema`（strict），只有接口明确返回不支持该格式的400/422错误时，才依次尝试 `json_object` 和不带 `response_format` 的提示词模式；本次模型会话记住已协商的模式，避免每轮重复探测。可显式设置 `json_schema`、`json_object` 或 `prompt`，显式模式不自动切换。所有模式始终使用相同的严格本地校验，认证错误、非法 schema 等其它错误不会触发格式降级。后台记忆更新和会话汇总保持各自的 JSON 任务约定。
+
+主回复必须是一个完整 JSON 对象，仅含 `shouldSpeak`、`expression`、`response`、`screenSummary`、`audioSummary`、`workSummary` 六个字段；`shouldSpeak` 为布尔值，其余为字符串。缺字段、额外字段、旧字段名、错误类型、大小写不匹配或未知表情、代码块、正文前后附加说明均拒绝，不再接受普通文本或“表情加台词”旧格式。发言时 `response` 不得为空，静默时必须是空字符串；用户直接输入必须发言。没有图片时画面/工作摘要必须为空字符串，没有音频时音频摘要必须为空字符串。格式错误最多重试3次，仍失败则拒绝该批次，不显示回复、不写入对话/记忆，也不进入观察回队的额外重试周期。模型拒绝、内容过滤和输出截断直接失败；截断提示增大 `conversation.ai.max_tokens`。这些检查保证应用只接受符合结构和业务约定的 JSON，不能保证回复内容事实正确。
 
 ### 3. 启动桌宠
 
@@ -199,7 +237,7 @@ docker compose -f compose.asr.yaml ps
 
 原有 Whisper 部署保存在 [compose.whisper.yaml](compose.whisper.yaml)，可运行 `docker compose -f compose.whisper.yaml up -d`，将 `asr.provider` 改回 `whisper-asr-webservice`、`endpoint` 改为 `http://127.0.0.1:9000`。该方式在分段完成后通过 HTTP `/asr` 转写，不提供流式字幕。
 
-也支持兼容 `/audio/transcriptions` 的服务，配置 `provider=openai` 和 `model`，详见 [架构文档](electron/architecture/README.md)。修改配置后重启应用生效。
+也支持兼容 `/audio/transcriptions` 的服务，配置 `provider=openai` 和 `model`，详见 [架构文档](electron/architecture/README.md)。修改配置后自动重载音频插件。
 
 ## TTS
 
@@ -246,9 +284,9 @@ sudo apt install espeak-ng alsa-utils
 
 ## 记忆、历史与数据位置
 
-记忆包括近期对话、长期记忆及人物画像。近期对话保存在进程内；待更新完整对话、长期记忆、人物画像与历史对话由插件写入共享 SQLite。整理通过 AI 文本服务后台执行；格式错误保留待处理内容供后续重试。
+记忆包括近期对话、长期记忆及人物画像。近期对话保存在进程内；待更新完整对话、长期记忆、人物画像与历史对话由插件写入共享 SQLite。整理通过核心模型客户端后台执行；格式错误保留待处理内容供后续重试。
 
-「记忆 → 整理」手动整理已保存的长期事实和当前人物画像，并更新项目状态与经验，合并重复或互补内容，归档明显一次性或明确失效的临时事项。稳定身份、偏好与重要事实保留，矛盾信息没有明确变化依据时分别保留。画像合并限同一对象、同一字段，等价项目范围可以合并，不混合全局与项目画像；用户确认的内容和范围不能改写或归档，猜测不能升级为已观察内容。整理与后台更新／画像提取串行执行；请求失败、格式错误或事实／画像发生变化时都不写入结果，可再次点击重试。完成后分别显示长期事实和画像的整理前后条数、合并组数和归档条数；「查看当前记忆」的长期记忆页和人物画像页可展开整理记录，查看原始内容、原因和时间，来源证据与历史版本保留，记录重启保留，清空全部记忆时一并删除。启用长期记忆、人物画像或项目经验任一类别均可使用该手动入口，需提供 AI 文本服务。
+「记忆 → 整理」手动整理已保存的长期事实和当前人物画像，并更新项目状态与经验，合并重复或互补内容，归档明显一次性或明确失效的临时事项。稳定身份、偏好与重要事实保留，矛盾信息没有明确变化依据时分别保留。画像合并限同一对象、同一字段，等价项目范围可以合并，不混合全局与项目画像；用户确认的内容和范围不能改写或归档，猜测不能升级为已观察内容。整理与后台更新／画像提取串行执行；请求失败、格式错误或事实／画像发生变化时都不写入结果，可再次点击重试。完成后分别显示长期事实和画像的整理前后条数、合并组数和归档条数；「查看当前记忆」的长期记忆页和人物画像页可展开整理记录，查看原始内容、原因和时间，来源证据与历史版本保留，记录重启保留，清空全部记忆时一并删除。启用长期记忆、人物画像或项目经验任一类别均可使用该手动入口，需配置并启用 `conversation.ai` 对应的核心模型。
 
 手动整理一次提交全部已启用的长期事实及当前人物画像，不分批，也不按条数或字符预算拆分。发送事实内容、标签、重要性和时间，以及画像对象、字段、范围、内容、确认依据和时间，来源元数据留在本地。输出预算 `max_tokens=16384`，单次请求超时 5 分钟、含重试总预算 605 秒，最多重试一次；手动整理使用固定预算；自动长期记忆更新的输出预算由 `memory.longTerm.maxTokens` 配置，超时与重试预算相同。事实和画像在同一数据库事务中统一保存，失败保留原始记忆。
 
@@ -258,7 +296,13 @@ sudo apt install espeak-ng alsa-utils
 
 长期记忆自动更新采用较高添加门槛：默认每完成20次非静默对话，将这批完整对话、暂存的原始来源和全部现有长期记忆一起交给模型，优先保留原ID修改、补充对应条目；没有合适旧条目时，只有明确且跨会话仍有价值的信息才新增，新增重要性至少为4。普通聊天、临时进度、画面描述、细碎技术过程、猜测和宠物自己的说法不新增。无需修改时返回 `{"update":[],"add":[]}`，按正常完成处理；自动更新不删除或归档旧记忆。
 
-会话摘要功能已移除，旧 `memory.summary` 配置会被忽略，旧数据库的摘要会在启动迁移时清理。待更新对话与来源独立存入 SQLite，不受近期对话容量、过期时间影响，重启后继续累积。更新及本批队列消费在同一事务中提交，失败保留旧记忆和全部待处理内容；请求期间新到的对话留到下一批。每批成功后重新累积20次对话；失败时，下个对话或恢复时重新评估保留的内容。配置键 `memory.longTerm.extractEveryNTurns` 保留兼容，现在表示更新间隔。查看窗口显示更新间隔、待更新轮数与已有条目的更新时间，更新前内容保存在整理历史中。
+旧记忆插件的 `memory.summary` 配置不再接受，旧数据库摘要仍在启动迁移时清理；新的会话压缩由对话核心的 `conversation.history` 管理，与长期事实更新分开。待更新对话与来源独立存入 SQLite，不受近期对话容量、过期时间影响，重启后继续累积。更新及本批队列消费在同一事务中提交，失败保留旧记忆和全部待处理内容；请求期间新到的对话留到下一批。每批成功后重新累积20次对话；失败时，下个对话或恢复时重新评估保留的内容。`memory.longTerm.extractEveryNTurns` 表示更新间隔。查看窗口显示更新间隔、待更新轮数与已有条目的更新时间，更新前内容保存在整理历史中。
+
+主对话请求按固定系统提示词、当前对话段的记忆快照与此前会话摘要、逐轮追加的 user/assistant 文字历史、本轮输入的顺序发送。固定的观察角色说明、缺失图片/音频处理规则和 JSON 输出要求统一放在系统提示词；本轮消息只携带时间、输入数量及实际观察，不重复这些规则。同一段内不改写已发送的历史文本和时间，记忆只在每段开头检索和注入一次，段内不再检索或追加人物画像、长期事实、项目与经验等背景，汇总切段后再刷新快照。用户在直接对话中的最新明确纠正优先于旧快照；后台记忆变化在下一段进入上下文。核心已有多轮历史时，记忆插件不重复注入近期对话文本。截图采集、队列容量与批量发送保持原有配置，本轮全部选中的图片仍发送，下一轮历史只保留文字和主模型返回的观察摘要，不重传旧图片；图片替换位置之后的缓存需要重新建立，此前稳定的文字前缀仍可复用。实际缓存命中与费用以接口返回的 usage 为准。
+
+`conversation.history` 默认 `maxTurns=32`、`keepTurns=4`、`maxInputTokens=50000`、`hardInputTokens=100000`、`summaryMaxTokens=1600`、`summaryMaxChars=6000`，已有配置未填写时自动使用这些值。每次成功决策（含静默观察）计一轮；下一轮发送前，若已有32轮或输入预算达到软上限，使用一次独立文本请求合并此前摘要与较早对话，保留最近4轮完整文字历史，并刷新新段的记忆快照。摘要保留当前话题、指代、约束、决定和未完成事项；它不承担长期事实提取。输出必须是完整有效 JSON，超长、空正文、截断或失败均保留原历史，下次请求重试。达到硬预算或累计到 `maxTurns` 的两倍仍无法汇总时，不再发送更长的主对话请求，提示重试或清空记忆。
+
+输入预算采用保守的文字字节估算，并在接口提供时参考上一轮实际输入 token 数；不是模型专用 tokenizer，也不能精确预判本轮新增图片的视觉 token。请按所用模型窗口留出视觉输入和输出余量。会话摘要会增加一次模型调用并等待其完成；当前会话快照、摘要和多轮历史保存在进程内，重启、模型/角色配置变化、上下文提供者注册变化或清空记忆时重置，长期记忆与历史对话数据库保留。近期记忆查看窗口仍显示插件自身的近期记录，完整请求结构可在「原始日志」查看。
 
 长期记忆更新默认16384 token（`memory.longTerm.maxTokens`），预算也可能包含模型推理所用的 token。长期更新单次超时5分钟、含重试总预算605秒，最多重试一次。文本接口若返回空正文或 `finish_reason=length`，拒绝保存不完整结果，保留待处理内容；错误日志包含模型、结束原因和 token 使用量。
 
@@ -274,7 +318,7 @@ sudo apt install espeak-ng alsa-utils
 
 人物画像页只展示人物信息、修正入口、可展开的信息来源及整理历史，不再单列最近观察或待提问。信息来源显示对应用户对话、提问回答、手动修正以及画面／音频内容与时间；后台原始线索保留用于提取与追溯。提问记录页同时展示未问过的待提问和已有记录，待提问优先显示，支持统一搜索、状态筛选和删除。
 
-旧画像中的 task、项目／团队对象，以及明确的一次性技术讨论会迁入长期记忆，当前画像中的原记录归档；内容、用户确认依据和来源证据保留。启用人物画像和长期记忆后，启动会执行这项清理，迁移可重复执行。配置键 `memory.work` 和数据库表名保留兼容旧配置与数据。
+旧画像中的 task、项目／团队对象，以及明确的一次性技术讨论会迁入长期记忆，当前画像中的原记录归档；内容、用户确认依据和来源证据保留。启用人物画像和长期记忆后，启动会执行这项清理，迁移可重复执行。人物画像使用 `memory.work` 配置，已有数据库记录继续保留。
 
 提问优先补全用户本人的长期画像，包括职责、团队角色、工作习惯、兴趣与工具偏好、沟通方式。生成问题时优先提供用户画像上下文；待提问队列先选择用户的稳定画像问题，再选择与用户有关的人际关系和同事问题，同类仍按原有优先级排序。仅根据观察线索和未确认的画像缺口提问；已确认的字段不重复询问，没有合适问题时不强行生成。延后、闲置和语音等时机限制继续生效。
 
@@ -288,7 +332,7 @@ sudo apt install espeak-ng alsa-utils
 
 提问记录中的「删除答案」移除单条答案记录，「删除问题及记录」移除整个问题及其展示、回答、跳过和延后记录。删除成功后刷新列表；已确认的人物画像保留，历史删除不会撤销画像。
 
-示例与当前配置已启用工作记忆和提问。参数见 [config.example.json](config.example.json) 的 `memory.work` 和 `questions`。已有配置未设置 `work.enabled=true` 时保持原有记忆行为；修改插件启用状态后重启。
+示例与当前配置已启用工作记忆和提问。参数见 [config.example.json](config.example.json) 的 `memory.work` 和 `questions`。已有配置未设置 `work.enabled=true` 时保持原有记忆行为；修改插件启用状态后自动重载相关插件。
 
 | 数据 | 默认位置 |
 | --- | --- |
@@ -297,11 +341,10 @@ sudo apt install espeak-ng alsa-utils
 | 自动截图 | `userData/cache/screen-perception/`，处理完成或丢弃后清理 |
 | 手动保存截图 | 项目根目录 `logs/screenshots/` |
 | AI 响应日志 | 项目根目录 `logs/openai.jsonl`，5 MiB 轮转，保留 3 个历史文件 |
-| 旧数据导入来源 | `logs/memory.jsonl`、`logs/dialogue-history.jsonl` |
 
 Linux 默认数据库通常位于 `~/.config/mylive2dpet/pet.sqlite3`，实际位置以启动日志中的 `database opened` 为准。数据库文件名可通过存储插件的 `path` 配置。
 
-旧 JSONL 按来源路径一次性导入，之后新记录写入 SQLite。备份数据库时关闭应用，或使用 SQLite 备份机制，以包含 WAL 中的最新记录。
+记忆和历史对话统一写入 SQLite。备份数据库时关闭应用，或使用 SQLite 备份机制，以包含 WAL 中的最新记录。
 
 记忆和历史保存在本地。截图与转写文本会按配置发送给 AI 模型接口；使用本地 FunASR 或 Whisper 只决定语音转写在哪里执行。
 
@@ -313,13 +356,17 @@ flowchart LR
     Audio[设备音频与 ASR] --> Queue
     Manual[手动输入] --> Queue
     Queue --> Scheduler[串行决策调度]
-    Scheduler --> AI[决策插件]
+    Scheduler --> AI[核心对话策略]
     Context[上下文插件] --> AI
-    AI --> Result[决策完成事件]
-    Result --> Bubble[气泡与表情]
-    Result --> TTS[语音插件]
+    AI --> Model[共享模型客户端]
+    Model --> AI
+    AI --> Result[决策完成记录]
     Result --> Memory[记忆插件]
     Result --> History[历史插件]
+    Result --> Present[核心呈现流程]
+    Present --> Bubble[气泡与表情]
+    Present --> TTS[语音插件]
+    Memory --> Model
     Memory --> SQLite[SQLite 存储插件]
     History --> SQLite
 ```
@@ -329,13 +376,12 @@ flowchart LR
 | `manual-input` | 输入窗口、文本验证、消息提交和菜单 |
 | `screen-perception` | 截图周期、变化检测、观察与临时资源 |
 | `audio-output-perception` | 输出音频采集、分段、ASR、去重和菜单 |
-| `ai-conversation` | 模型请求、提示词、图片编码、结果解析及文本服务 |
 | `tts` | 合成、播放、取消和运行期开关 |
 | `memory` | 近期记忆、长期事实、人物画像、证据和清空能力 |
 | `questions` | 选择题队列调度、浮窗与回答回写 |
 | `dialogue-history` | 历史记录、搜索、窗口和菜单 |
 | `raw-log` | 原始模型请求、返回结果、聊天形式查看窗口 |
-| `storage-sqlite` | 数据库连接、事务、迁移和旧文件导入 |
+| `storage-sqlite` | 数据库连接、事务与表结构迁移 |
 
 右键菜单的「原始日志…」可查看每次发送给 OpenAI 兼容聊天接口的完整消息：系统提示词、用户/感知输入、实际发送的图片，以及返回内容或失败原因。请求按应用运行会话分组，包含文本/记忆整理请求和每次重试，窗口每 2 秒更新。每次请求的列表和详情展示接口实际返回的输入、输出、总 token、输入缓存命中及未命中数量；未命中默认由输入总量减缓存命中计算，兼容接口直接上报的命中／未命中字段。接口提供时另显示缓存写入及输出中的推理 token，它们不会额外计入总量。未上报字段显示“未提供”，不估算为0；已有原始响应中的 usage 也可直接展示，无需重新发送请求。记录写入现有 `pet.sqlite3` 的 `ai_requests` 表，重启后保留；不记录请求头或 API key。关闭窗口不会停止记录，设置插件 `raw-log.enabled=false` 可关闭功能。旧响应日志没有原始请求，窗口只显示新增记录。
 
@@ -344,7 +390,9 @@ electron/
 ├── main.js               # Electron 宿主与应用组装
 ├── pluginHost.js         # 插件生命周期与受控扩展接口
 ├── architecture/         # 契约、总线、观察队列、调度和服务注册
-├── modules/              # 决策与输出连接
+├── conversation/         # 核心对话策略、上下文收集与请求生命周期
+├── llm/                  # 共享模型请求、超时、重试与日志
+├── modules/              # 决策记录与呈现编排
 ├── platform/             # 系统适配能力
 └── plugins/              # 各能力的实现和专用窗口资源
 src/                      # Live2D 渲染、交互与气泡
@@ -352,13 +400,14 @@ public/                   # Cubism Core
 assets/                   # 本地模型与声线资源
 ```
 
-插件通过静态 [manifest](electron/plugins/manifest.js) 注册，导出 `activate(context)` 并返回 `start`、`stop`、`dispose`。宿主提供菜单、IPC、窗口、感知入口、决策请求、上下文和通用服务接口；插件声明必需与可选服务，宿主按依赖排序加载。
+插件通过静态 [manifest](electron/plugins/manifest.js) 注册，导出 `activate(context)` 并返回 `start`、`stop`、`dispose`。宿主提供菜单、IPC、窗口、感知入口、决策请求、上下文、核心模型和通用服务接口；插件声明必需与可选服务，宿主按依赖排序加载。
 
 详细契约、配置语义、生命周期和开发接口见 [electron/architecture/README.md](electron/architecture/README.md)。
 
 ## 配置生效与当前边界
 
-- AI 请求参数、观察配额和后续决策间隔在后续读取配置时生效；插件启用、依赖、数据库路径及捕获定时器等更改建议重启应用。
+- 对话配置变化时暂停决策、取消旧模型请求，切换完成后恢复调度；仅修改模型或角色不会重建记忆与历史插件。插件配置变化会重载该插件及其必需依赖消费者，主窗口尺寸在重新创建窗口时生效。
+- 配置只使用当前格式：模型与角色放在 `conversation`；`ai-conversation` 插件、`decision.provider`、`memory.textService`、`memory.summary`、`memory.longTerm.legacyPath` 和历史插件的 `legacyPath` 已移除，使用旧字段会报错。
 - 配置格式错误时保留上次有效配置，终端会报告错误；首次启动仍需要有效配置文件。
 - 设备音频捕获目前只实现 Linux PulseAudio/PipeWire 适配。
 - 待处理观察和失败记录目前保存在内存，尚未实现手动消息的持久化收件箱与启动恢复。

@@ -1,11 +1,9 @@
 const { randomUUID } = require("crypto");
-const fs = require("fs");
-const path = require("path");
 const { validatePlan } = require("./organizer");
 const { validateUpdatePlan } = require("./updater");
 
 function getDefaults() {
-  return { enabled: true, legacyPath: "logs/memory.jsonl", maxInject: 5,
+  return { enabled: true, maxInject: 5,
     extractEveryNTurns: 20, maxTokens: 16384, maxEntries: 500 };
 }
 
@@ -142,21 +140,11 @@ function createLongTermStore(storage) {
       .slice(0, maxInject).map(({ item }) => item);
   }
 
-  function importLegacy(sourcePath, config, logger) {
-    const result = storage.importJsonl("memory", sourcePath, (entry, id) => {
-      const record = normalize(entry, id);
-      return record ? insert.run(record).changes > 0 : false;
-    });
-    if (!result.missing) compact(config);
-    if (!result.missing && !result.alreadyImported) logger.info(`legacy memory imported=${result.imported} skipped=${result.skipped}`);
-    return result;
-  }
-
   function organize(input, snapshot) {
     const plan = validatePlan({ merge: input?.merge, archive: input?.archive }, snapshot);
     return storage.transaction(() => {
       const before = listEntries(storage);
-      // Reject stale snapshots rather than replacing changed or newly imported facts.
+      // Reject stale snapshots rather than replacing changed or newly added facts.
       if (JSON.stringify(before) !== JSON.stringify(snapshot)) throw new Error("长期记忆已变化，请重新整理");
       const byId = new Map(snapshot.map((entry) => [entry.id, entry]));
       const stamp = Date.now();
@@ -244,24 +232,16 @@ function createLongTermStore(storage) {
     });
   }
 
-  function clear(legacyPath) {
-    const source = path.resolve(legacyPath);
-    if (fs.existsSync(source)) fs.truncateSync(source, 0);
+  function clear() {
     return storage.transaction(() => {
       const deleted = storage.prepare("DELETE FROM memory_entries").run().changes;
       storage.exec("DELETE FROM memory_organization_history");
-      // Preserve and add import markers so older files cannot restore cleared facts.
-      storage.prepare(`INSERT INTO legacy_imports
-        (namespace, source_path, imported_at, imported_count, skipped_count)
-        VALUES ('memory', ?, ?, 0, 0) ON CONFLICT(namespace, source_path)
-        DO UPDATE SET imported_at = excluded.imported_at, imported_count = 0, skipped_count = 0`)
-        .run(source, Date.now());
       return deleted;
     });
   }
 
   return { appendBatch, retrieve, list: () => listEntries(storage), organize, history, importProfiles, updateFromDialogue,
-    isDuplicate, formatForPrompt, importLegacy, clear };
+    isDuplicate, formatForPrompt, clear };
 }
 
 module.exports = { getDefaults, tokenize, formatForPrompt, listEntries, createLongTermStore };

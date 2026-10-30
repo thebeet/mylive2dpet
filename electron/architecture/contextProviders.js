@@ -3,6 +3,7 @@ const { createContextBlock } = require("./contracts");
 /** Optional context extensions cannot prevent a decision if one fails. */
 function createContextProviders({ logger = console } = {}) {
   const providers = new Map();
+  let revision = 0;
 
   function register(name, provide) {
     if (typeof name !== "string" || !name || typeof provide !== "function") {
@@ -10,8 +11,9 @@ function createContextProviders({ logger = console } = {}) {
     }
     if (providers.has(name)) throw new Error(`上下文提供者已注册: ${name}`);
     providers.set(name, provide);
+    revision++;
     return () => {
-      if (providers.get(name) === provide) providers.delete(name);
+      if (providers.get(name) === provide) { providers.delete(name); revision++; }
     };
   }
 
@@ -34,7 +36,7 @@ function createContextProviders({ logger = console } = {}) {
     return blocks;
   }
 
-  return { register, collect };
+  return { register, collect, getRevision: () => revision };
 }
 
 module.exports = { createContextProviders };

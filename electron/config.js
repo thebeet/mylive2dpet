@@ -1,83 +1,44 @@
 const fs = require("fs");
 const path = require("path");
-const { getOptions: memoryOptions } = require("./plugins/memory/options");
-const { getOptions: aiOptions } = require("./plugins/aiConversation/options");
-const { getOptions: screenOptions } = require("./plugins/screenPerception/options");
-const { getAudioOutputOptions } = require("./plugins/audioOutputPerception/options");
-const { getTtsOptions, isTtsPluginActive } = require("./plugins/tts/options");
-const { getOptions: questionOptions } = require("./plugins/questions/options");
+const { isDeepStrictEqual } = require("node:util");
+const { getOptions: conversationOptions } = require("./conversation/options");
+const pluginDefinitions = require("./plugins/manifest");
+const { object, dictionary, number, freeze } = require("./architecture/configValidation");
 
 const CONFIG_PATH = path.join(__dirname, "../config.json");
-const object = (value) => value && typeof value === "object" && !Array.isArray(value);
-function dictionary(value, name) {
-  if (value != null && !object(value)) throw new Error(`${name} 必须是对象`);
-}
-function number(value, fallback, min, max, name) {
-  const result = value == null ? fallback : Number(value);
-  if (!Number.isFinite(result) || result < min || result > max) throw new Error(`${name} 超出允许范围`);
-  return Math.floor(result);
-}
-function freeze(value) {
-  if (value && typeof value === "object" && !Object.isFrozen(value)) {
-    Object.values(value).forEach(freeze);
-    Object.freeze(value);
-  }
-  return value;
-}
-
 /** Validate current configuration and fill plugin defaults. */
 function normalizeConfig(input) {
   if (!object(input)) throw new Error("配置根节点必须是对象");
   for (const key of Object.keys(input)) {
-    if (!["ui", "decision", "observations", "plugins"].includes(key) && !key.startsWith("_")) {
+    if (!["ui", "conversation", "decision", "observations", "plugins"].includes(key) && !key.startsWith("_")) {
       throw new Error(`不支持的配置根字段: ${key}，功能配置请放入 plugins`);
     }
   }
-  for (const key of ["ui", "decision", "observations"]) dictionary(input[key], key);
+  for (const key of ["ui", "conversation", "decision", "observations"]) dictionary(input[key], key);
   if (input.plugins != null && !Array.isArray(input.plugins)) throw new Error("plugins 必须是数组");
   const plugins = new Map();
+  const pluginNames = new Set(pluginDefinitions.map(({ name }) => name));
   for (const plugin of input.plugins || []) {
     if (!object(plugin) || typeof plugin.name !== "string" || !plugin.name.trim()) throw new Error("插件必须有非空名称");
+    if (!pluginNames.has(plugin.name)) throw new Error(`不支持的插件: ${plugin.name}`);
     if (plugins.has(plugin.name)) throw new Error(`插件名称重复: ${plugin.name}`);
     if (plugin.enabled != null && typeof plugin.enabled !== "boolean") throw new Error(`plugins.${plugin.name}.enabled 必须是布尔值`);
-    for (const key of ["ai", "character", "shortTerm", "summary", "longTerm", "work", "practice", "changeDetect", "asr"]) dictionary(plugin[key], `plugins.${plugin.name}.${key}`);
-    for (const key of ["shortTerm", "summary", "longTerm", "work", "practice", "changeDetect"]) {
-      if (plugin[key]?.enabled != null && typeof plugin[key].enabled !== "boolean") throw new Error(`plugins.${plugin.name}.${key}.enabled 必须是布尔值`);
-    }
-    if (plugin.interval_ms != null) number(plugin.interval_ms, 5000, -86400000, 86400000, "plugin.interval_ms");
-    if (plugin.observationTtlMs != null) number(plugin.observationTtlMs, 60000, 1000, 86400000, "plugin.observationTtlMs");
-    if (plugin.name === "memory") {
-      for (const key of Object.keys(plugin)) {
-        if (!["name", "enabled", "textService", "storageService", "shortTerm", "summary", "longTerm", "work", "practice"].includes(key) && !key.startsWith("_")) {
-          throw new Error(`不支持的记忆配置字段: ${key}，长期记忆参数请放入 longTerm`);
-        }
-      }
-      if (plugin.longTerm?.path != null) throw new Error("memory.longTerm 请使用 legacyPath 指定 JSONL 导入来源");
-    }
-    const current = { ...plugin };
-    if (plugin.name === "memory") delete current.summary; // Accept and discard obsolete configuration.
-    plugins.set(plugin.name, current);
+    plugins.set(plugin.name, { ...plugin });
   }
+  const conversation = conversationOptions(input);
   if (input.decision?.enabled != null && typeof input.decision.enabled !== "boolean") throw new Error("decision.enabled 必须是布尔值");
-  function put(name, options) { plugins.set(name, { ...plugins.get(name), ...options, name }); }
-  if (plugins.has("ai-conversation")) {
-    const options = aiOptions(input);
-    for (const key of ["endpoint", "apiKey", "model", "proxy"]) {
-      if (options.ai[key] != null && typeof options.ai[key] !== "string") throw new Error(`ai.${key} 必须是字符串`);
-    }
-    options.ai.timeoutMs = number(options.ai.timeoutMs, 120000, 1000, 600000, "ai.timeoutMs");
-    options.ai.retryBudgetMs = number(options.ai.retryBudgetMs, 360000, 1000, 1200000, "ai.retryBudgetMs");
-    put("ai-conversation", { enabled: plugins.get("ai-conversation")?.enabled !== false, ...options });
+  for (const definition of pluginDefinitions) {
+    const plugin = plugins.get(definition.name);
+    if (!plugin && !definition.defaultConfig) continue;
+    const normalized = definition.normalizeOptions?.(plugin) || plugin;
+    plugins.set(definition.name, { ...plugin, ...normalized, name: definition.name });
   }
-  const { intervalMs, ...screen } = screenOptions(input);
-  put("screen-perception", { ...screen, interval_ms: intervalMs });
-  if (plugins.has("audio-output-perception")) put("audio-output-perception", getAudioOutputOptions(input));
-  if (plugins.has("tts")) put("tts", { ...getTtsOptions(input), enabled: isTtsPluginActive(input) });
-  if (plugins.has("memory")) put("memory", memoryOptions(input));
-  if (plugins.has("questions")) put("questions", questionOptions(input));
   const decision = { ...input.decision };
-  if (decision.provider != null && (typeof decision.provider !== "string" || !decision.provider.trim())) throw new Error("decision.provider 必须是非空字符串");
-  decision.provider ||= "ai-conversation";
+  for (const key of Object.keys(decision)) {
+    if (!["enabled", "interval_ms"].includes(key) && !key.startsWith("_")) {
+      throw new Error(`不支持的决策配置字段: ${key}`);
+    }
+  }
   decision.enabled = decision.enabled !== false;
   decision.interval_ms = number(decision.interval_ms, 10000, -86400000, 86400000, "decision.interval_ms");
   const rawQueue = input.observations || {};
@@ -92,37 +53,85 @@ function normalizeConfig(input) {
   for (const [source, limit] of Object.entries(rawQueue.perSource || {})) {
     observations.perSource[source] = number(limit, 32, 1, 1024, "observations.perSource");
   }
-  return freeze({ ...input, plugins: [...plugins.values()], decision, observations });
+  return freeze({ ...input, plugins: [...plugins.values()], conversation, decision, observations });
 }
 
-function createConfigStore(filePath, { logger = console, checkIntervalMs = 1000 } = {}) {
+function createConfigStore(filePath, { logger = console, checkIntervalMs = 1000, changeDebounceMs = 100 } = {}) {
   let cached = null;
   let stamp = null;
   let checkedAt = 0;
   let lastError = null;
+  let watcher = null;
+  let reloadTimer = null;
+  const listeners = new Set();
   function load({ force = false } = {}) {
     const now = Date.now();
-    if (cached && !force && now - checkedAt < checkIntervalMs) return cached;
+    if (cached && !force && (watcher || now - checkedAt < checkIntervalMs)) return cached;
     checkedAt = now;
+    const previous = cached;
     try {
       const stat = fs.statSync(filePath);
       const nextStamp = `${stat.ino}:${stat.mtimeMs}:${stat.size}`;
       if (cached && !force && nextStamp === stamp) return cached;
-      stamp = nextStamp;
       let parsed;
       try { parsed = JSON.parse(fs.readFileSync(filePath, "utf8")); }
       catch { throw new Error("配置文件无法读取或 JSON 格式无效"); }
-      cached = normalizeConfig(parsed);
+      const next = normalizeConfig(parsed);
+      const changed = cached && !isDeepStrictEqual(cached, next);
+      if (!cached || changed) cached = next;
+      stamp = nextStamp;
       lastError = null;
+      if (watcher && changed) logger.info?.("[config] config.json 已更新，已加载新配置");
     } catch (error) {
       const message = error.code ? "配置文件无法读取" : error.message;
       if (!cached) throw new Error(message);
       if (lastError !== message) logger.warn(`[config] ${message}，继续使用上次有效配置`);
       lastError = message;
     }
+    if (previous && cached !== previous) {
+      for (const listener of listeners) {
+        try {
+          Promise.resolve(listener(cached, previous)).catch((error) =>
+            logger.error?.("[config] 配置更新处理失败:", error));
+        } catch (error) { logger.error?.("[config] 配置更新处理失败:", error); }
+      }
+    }
     return cached;
   }
-  return { load, getStatus: () => ({ loaded: Boolean(cached), error: lastError }) };
+  function onFileChange(_event, filename) {
+    if (filename != null && String(filename) !== path.basename(filePath)) return;
+    if (reloadTimer) clearTimeout(reloadTimer);
+    reloadTimer = setTimeout(() => {
+      reloadTimer = null;
+      load({ force: true });
+    }, changeDebounceMs);
+    reloadTimer.unref();
+  }
+  function stopWatching() {
+    if (reloadTimer) clearTimeout(reloadTimer);
+    reloadTimer = null;
+    watcher?.close();
+    watcher = null;
+  }
+  function startWatching() {
+    if (watcher) return stopWatching;
+    load({ force: true });
+    // Watch the directory so an editor's atomic rename does not detach the watcher.
+    watcher = fs.watch(path.dirname(filePath), { persistent: false }, onFileChange);
+    watcher.on("error", (error) => {
+      stopWatching();
+      logger.warn(`[config] 配置监听失败: ${error.message}`);
+    });
+    return stopWatching;
+  }
+  function subscribe(listener) {
+    if (typeof listener !== "function") throw new TypeError("config listener must be a function");
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  }
+  return { load, startWatching, stopWatching, subscribe,
+    getStatus: () => ({ loaded: Boolean(cached), error: lastError }) };
 }
 const store = createConfigStore(CONFIG_PATH);
-module.exports = { CONFIG_PATH, loadConfig: store.load, normalizeConfig, createConfigStore };
+module.exports = { CONFIG_PATH, loadConfig: store.load, startConfigWatcher: store.startWatching,
+  stopConfigWatcher: store.stopWatching, subscribeConfig: store.subscribe, normalizeConfig, createConfigStore };

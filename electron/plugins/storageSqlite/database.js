@@ -1,6 +1,5 @@
 const fs = require("fs");
 const path = require("path");
-const { createHash } = require("crypto");
 
 /** A shared synchronous connection; business schemas belong to consuming plugins. */
 function createDatabase(filePath, { Database = require("better-sqlite3"), busyTimeoutMs = 5000 } = {}) {
@@ -13,11 +12,6 @@ function createDatabase(filePath, { Database = require("better-sqlite3"), busyTi
     db.exec(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         namespace TEXT PRIMARY KEY, version INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS legacy_imports (
-        namespace TEXT NOT NULL, source_path TEXT NOT NULL,
-        imported_at INTEGER NOT NULL, imported_count INTEGER NOT NULL,
-        skipped_count INTEGER NOT NULL, PRIMARY KEY (namespace, source_path)
       );
     `);
   } catch (error) {
@@ -54,36 +48,7 @@ function createDatabase(filePath, { Database = require("better-sqlite3"), busyTi
           .run(namespace, migrations.length);
       });
     },
-    importJsonl(namespace, sourcePath, insert) {
-      assertOpen();
-      const source = path.resolve(sourcePath);
-      const previous = db.prepare("SELECT imported_count AS imported, skipped_count AS skipped FROM legacy_imports WHERE namespace = ? AND source_path = ?")
-        .get(namespace, source);
-      if (previous) return { ...previous, alreadyImported: true };
-      if (!fs.existsSync(source)) return { imported: 0, skipped: 0, missing: true };
-      const lines = fs.readFileSync(source, "utf8").split(/\r?\n/);
-      return transaction(() => {
-        const concurrent = db.prepare("SELECT imported_count AS imported, skipped_count AS skipped FROM legacy_imports WHERE namespace = ? AND source_path = ?")
-          .get(namespace, source);
-        if (concurrent) return { ...concurrent, alreadyImported: true };
-        let imported = 0;
-        let skipped = 0;
-        lines.forEach((line, index) => {
-          if (!line.trim()) return;
-          let entry;
-          try { entry = JSON.parse(line); }
-          catch { skipped += 1; return; }
-          const digest = createHash("sha256").update(`${index}\0${line}`).digest("hex");
-          const id = `${namespace}:legacy:${digest}`;
-          // Invalid entries return false; storage errors abort the entire import.
-          if (insert(entry, id)) imported += 1;
-          else skipped += 1;
-        });
-        db.prepare("INSERT INTO legacy_imports(namespace, source_path, imported_at, imported_count, skipped_count) VALUES (?, ?, ?, ?, ?)")
-          .run(namespace, source, Date.now(), imported, skipped);
-        return { imported, skipped, alreadyImported: false };
-      });
-    },
+
   };
 
   return {

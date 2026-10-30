@@ -10,20 +10,21 @@ const {
   powerMonitor,
 } = require("electron");
 const path = require("path");
-const { loadConfig } = require("./config");
+const { loadConfig, startConfigWatcher, stopConfigWatcher, subscribeConfig } = require("./config");
 const { getMenuContributions, setMenuRefreshHandler } = require("./menuHooks");
 const { loadExpressionNames, loadMotionGroups } = require("./live2dCatalog");
 const { MessageBus } = require("./architecture/messageBus");
 const EVENTS = require("./architecture/events");
 const { createPluginHost } = require("./pluginHost");
 const { createPerceptionService } = require("./architecture/perceptionService");
-const { createDecisionProviders } = require("./architecture/decisionProviders");
+const { createConversation } = require("./conversation");
+const { isDeepStrictEqual } = require("node:util");
 const { createDecisionScheduler } = require("./architecture/decisionScheduler");
 const { createServiceRegistry } = require("./architecture/serviceRegistry");
 const { createContextProviders } = require("./architecture/contextProviders");
 const { captureFullscreenToJpg } = require("./platform/screenCapture");
 const { registerDecisionModule } = require("./modules/decision");
-const { registerExecutionModule } = require("./modules/execution");
+const { createExecutionModule } = require("./modules/execution");
 const {
   startX11Cursor,
   getPhysicalCursorPoint,
@@ -43,6 +44,8 @@ let pointerTrackingTimer = null;
 let shuttingDown = false;
 let shutdownComplete = false;
 let shutdownTask = null;
+let unsubscribeConfig = null;
+let runtimeUpdates = Promise.resolve();
 
 function readWindowSize() {
   try {
@@ -136,14 +139,20 @@ function sendBubble(payload) {
 }
 
 const messageBus = new MessageBus();
+const execution = createExecutionModule(messageBus, { sendBubble });
 const perception = createPerceptionService(messageBus, { getPolicy: () => loadConfig().observations || {} });
 const services = createServiceRegistry();
 const contextProviders = createContextProviders();
-const decisions = createDecisionProviders(() =>
-  loadConfig().decision?.provider || "ai-conversation", { contextProviders });
+const conversation = createConversation({
+  getConfig: loadConfig, contextProviders, bus: messageBus,
+  getExpressions: () => loadExpressionNames({ includeInternal: false }),
+  onRequest: (entry) => messageBus.notify(EVENTS.AI_REQUEST_STARTED, entry),
+  onResult: (entry) => messageBus.notify(EVENTS.AI_REQUEST_FINISHED, entry),
+});
 registerDecisionModule(messageBus, {
   perception,
-  decide: (observations, request) => decisions.decide({ observations, trigger: request.trigger, signal: request.signal }),
+  presentDecision: execution.presentDecision,
+  decide: (observations, request) => conversation.decideFromObservations(observations, request),
 });
 const scheduler = createDecisionScheduler({
   execute: (request) => messageBus.publish(EVENTS.DECISION_REQUESTED, request),
@@ -154,7 +163,7 @@ const pluginHost = createPluginHost({
   bus: messageBus,
   getConfig: loadConfig,
   perception,
-  decisions,
+  model: conversation.model,
   requestDecision: (request) => scheduler.request(request),
   services,
   contextProviders,
@@ -399,9 +408,23 @@ app.whenReady().then(async () => {
     // ignore
   }
 
+  unsubscribeConfig = subscribeConfig((config, previous) => {
+    const update = runtimeUpdates.then(async () => {
+      if (shuttingDown) return;
+      const changed = !isDeepStrictEqual(config.conversation, previous.conversation);
+      const resume = scheduler.getState().running;
+      if (changed) await scheduler.stop();
+      if (shuttingDown) return;
+      await conversation.reconfigure(config);
+      await pluginHost.reload(config);
+      if (changed && resume && !shuttingDown) scheduler.start();
+    });
+    runtimeUpdates = update.catch(() => {});
+    return update;
+  });
+  startConfigWatcher();
   await pluginHost.activate();
   if (shuttingDown) return;
-  registerExecutionModule(messageBus, { sendBubble });
   startX11Cursor();
   createWindow();
   setMenuRefreshHandler(refreshTrayMenu);
@@ -414,6 +437,7 @@ app.whenReady().then(async () => {
     if (shuttingDown) return;
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
+      conversation.start();
       void pluginHost.start();
       scheduler.start();
     }
@@ -425,17 +449,21 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   if (shutdownTask) return;
   shuttingDown = true;
+  stopConfigWatcher();
+  unsubscribeConfig?.();
+  unsubscribeConfig = null;
   void scheduler.stop();
   if (pointerTrackingTimer) clearInterval(pointerTrackingTimer);
   pointerTrackingTimer = null;
   if (trayRefreshTimer) clearTimeout(trayRefreshTimer);
   trayRefreshTimer = null;
   setMenuRefreshHandler(null);
-  shutdownTask = Promise.all([scheduler.dispose(), pluginHost.dispose()]).then(() =>
+  shutdownTask = Promise.all([scheduler.dispose(), conversation.dispose(), pluginHost.dispose(), runtimeUpdates]).then(() =>
     perception.discard(() => true, "shutdown")
   ).catch((error) => {
     console.error("[plugins] shutdown failed:", error);
   }).finally(() => {
+    execution.dispose();
     shutdownComplete = true;
     app.quit();
   });
@@ -497,8 +525,9 @@ ipcMain.on("pet:live2d-ready", (event) => {
 
 app.on("window-all-closed", () => {
   if (shuttingDown) return;
-  void pluginHost.stop();
   void scheduler.stop();
+  void conversation.stop();
+  void pluginHost.stop();
   if (process.platform !== "darwin") {
     app.quit();
   }

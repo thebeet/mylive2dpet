@@ -1,4 +1,4 @@
-const { getPlugin } = require("../registry");
+const { readPluginOptions } = require("../registry");
 const shortTerm = require("./shortTerm");
 const longTerm = require("./longTerm");
 
@@ -7,8 +7,7 @@ const integer = (value, fallback, minimum = 1) => {
   return Number.isFinite(number) ? Math.max(minimum, Math.floor(number)) : fallback;
 };
 
-function getOptions(config = {}) {
-  const plugin = getPlugin(config, "memory");
+function normalizeOptions(plugin) {
   const short = { ...shortTerm.getDefaults(), ...plugin?.shortTerm };
   const long = { ...longTerm.getDefaults(), ...plugin?.longTerm };
   const work = { enabled: false, extractEveryNObservations: 3, flushAfterMs: 120000,
@@ -25,7 +24,6 @@ function getOptions(config = {}) {
   short.maxTurns = integer(short.maxTurns, 8);
   short.ttlMs = integer(short.ttlMs, 1_800_000);
   long.enabled = long.enabled !== false;
-  long.legacyPath = String(long.legacyPath).trim() || longTerm.getDefaults().legacyPath;
   long.maxInject = integer(long.maxInject, 5);
   long.extractEveryNTurns = integer(long.extractEveryNTurns, longTerm.getDefaults().extractEveryNTurns);
   long.maxTokens = integer(long.maxTokens, longTerm.getDefaults().maxTokens);
@@ -39,7 +37,6 @@ function getOptions(config = {}) {
 
   return {
     enabled: Boolean(plugin && plugin.enabled !== false),
-    textService: String(plugin?.textService || "ai-conversation.text"),
     storageService: String(plugin?.storageService || "storage-sqlite.database"),
     shortTerm: short,
     longTerm: long,
@@ -47,4 +44,8 @@ function getOptions(config = {}) {
   };
 }
 
-module.exports = { getOptions };
+function getOptions(config = {}) {
+  return readPluginOptions(config, "memory", normalizeOptions);
+}
+
+module.exports = { getOptions, normalizeOptions };

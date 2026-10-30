@@ -6,9 +6,9 @@ const { parseWorkJson, extractWork } = require("../electron/plugins/memory/workE
 const { parseFactsJson } = require("../electron/plugins/memory/extractor");
 const { createLongTermStore } = require("../electron/plugins/memory/longTerm");
 const { createMemoryPlugin } = require("../electron/plugins/memory");
-const { createChatService } = require("../electron/plugins/aiConversation/chat");
+const { createConversation } = require("../electron/conversation");
 const { createDecisionResult } = require("../electron/architecture/contracts");
-const { registerExecutionModule } = require("../electron/modules/execution");
+const { createExecutionModule } = require("../electron/modules/execution");
 const { MessageBus } = require("../electron/architecture/messageBus");
 const EVENTS = require("../electron/architecture/events");
 const quiet = { info() {}, warn() {}, error() {} };
@@ -255,10 +255,11 @@ test("question history preserves every display and response across reopening and
 function memoryHarness(storage, generate, clock = Date.now) {
   const bus = new MessageBus({ logger: quiet });
   const services = new Map([["storage-sqlite.database", storage], ["model.text", generate]]);
-  const config = { plugins: [{ name: "memory", enabled: true, textService: "model.text",
+  const config = { plugins: [{ name: "memory", enabled: true,
     longTerm: { enabled: false }, work: { enabled: true, extractEveryNObservations: 1 } }] };
   let provide;
   const plugin = createMemoryPlugin({ bus, logger: quiet, config: { get: () => config },
+    model: { get generateText() { return services.get("model.text"); } },
     services: { get: (name) => services.get(name), register: (name, service) => { services.set(`memory.${name}`, service); return () => services.delete(`memory.${name}`); } },
     decisionContext: { register: (fn) => { provide = fn; return () => {}; } },
   }, { now: clock });
@@ -280,6 +281,9 @@ test("raw meeting speech is remembered without any pet reply and failed extracti
   await h.plugin.whenIdle();
   assert.equal(h.plugin.getSnapshot().work.pending, 1);
   h.context({ observations: [observation] });
+  await h.plugin.whenIdle();
+  assert.equal(calls, 1, "reading context does not retry background extraction");
+  h.plugin.start();
   await h.plugin.whenIdle();
   const snapshot = h.plugin.getSnapshot();
   assert.equal(snapshot.totalTurns, 0);
@@ -328,13 +332,14 @@ test("work observations survive disposal while legacy session summaries are remo
 test("passive decisions can remain silent while preserving screenshot work evidence", async (t) => {
   const { storage } = storeHarness(t);
   const bus = new MessageBus({ logger: quiet }), bubbles = [], speeches = [];
-  const release = registerExecutionModule(bus, { sendBubble: (bubble) => bubbles.push(bubble) }); t.after(release);
+  const execution = createExecutionModule(bus, { sendBubble: (bubble) => bubbles.push(bubble) });
+  t.after(() => execution.dispose());
   bus.subscribe(EVENTS.SPEECH_OUTPUT_REQUESTED, (input) => speeches.push(input));
   const h = memoryHarness(storage, async (messages) => JSON.stringify(extraction(JSON.parse(messages[1].content).evidence)));
   t.after(() => h.plugin.dispose());
-  let output = { shouldSpeak: false, response: "", screenSummary: "飞书聊天", workSummary: "张琳在支付群里明确说负责接口联调" };
-  const chat = createChatService({ getConfig: () => ({ plugins: [{ name: "ai-conversation", ai: {
-    endpoint: "https://example.invalid", apiKey: "test", model: "test" } }] }), getExpressions: () => ["neutral"],
+  let output = { shouldSpeak: false, expression: "neutral", response: "", audioSummary: "", screenSummary: "飞书聊天", workSummary: "张琳在支付群里明确说负责接口联调" };
+  const chat = createConversation({ getConfig: () => ({ conversation: { ai: {
+    endpoint: "https://example.invalid", apiKey: "test", model: "test" } } }), getExpressions: () => ["neutral"],
     configureProxy: async () => {}, encodeImage: () => "image", writeLog() {}, logger: quiet,
     fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: JSON.stringify(output) } }] }) }),
   });
@@ -344,6 +349,7 @@ test("passive decisions can remain silent while preserving screenshot work evide
   assert.equal(result.reply, "");
   const event = { id: "decision", observations, result };
   await bus.notify(EVENTS.DECISION_COMPLETED, event);
+  await execution.presentDecision(event);
   await h.bus.notify(EVENTS.DECISION_COMPLETED, event);
   await h.plugin.whenIdle();
   assert.equal(speeches.length, 0);
@@ -353,7 +359,7 @@ test("passive decisions can remain silent while preserving screenshot work evide
   const evidence = h.plugin.getSnapshot().work.recentEvidence[0];
   assert.equal(evidence.source, "screen");
   assert.deepEqual(evidence.metadata.observationIds, ["shot"]);
-  output = { shouldSpeak: false, response: "明白，张琳在对接接口" };
+  output = { shouldSpeak: true, expression: "neutral", response: "明白，张琳在对接接口", screenSummary: "", audioSummary: "", workSummary: "" };
   const direct = await chat.decideFromObservations([{ source: "manual-input", role: "user", content: [{ type: "text", text: "张琳负责什么？" }] }]);
   assert.equal(direct.speak, undefined);
   assert.equal(direct.reply, "明白，张琳在对接接口");

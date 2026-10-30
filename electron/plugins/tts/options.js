@@ -1,7 +1,7 @@
-const { getPlugin, isPluginEnabled } = require("../registry");
+const { readPluginOptions, isPluginEnabled } = require("../registry");
 
-function getTtsOptions(config = {}) {
-  const plugin = getPlugin(config, "tts") || {};
+function normalizeOptions(plugin = {}) {
+  plugin ||= {};
   return {
     provider: plugin.provider || "system",
     rate: plugin.rate ?? 0,
@@ -26,4 +26,8 @@ function getTtsOptions(config = {}) {
   };
 }
 
-module.exports = { isTtsPluginActive: (config = {}) => isPluginEnabled(config, "tts"), getTtsOptions };
+function getTtsOptions(config = {}) {
+  return readPluginOptions(config, "tts", normalizeOptions);
+}
+
+module.exports = { normalizeOptions, isTtsPluginActive: (config = {}) => isPluginEnabled(config, "tts"), getTtsOptions };

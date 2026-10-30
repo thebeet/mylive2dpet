@@ -4,8 +4,6 @@ const { EventEmitter } = require("node:events");
 function workStorage() {
   const db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys = ON; CREATE TABLE test_migrations(namespace TEXT PRIMARY KEY, version INTEGER NOT NULL)");
-  db.exec(`CREATE TABLE legacy_imports(namespace TEXT, source_path TEXT, imported_at INTEGER,
-    imported_count INTEGER, skipped_count INTEGER, PRIMARY KEY(namespace, source_path))`);
   let next = 0;
   const storage = {
     prepare: (sql) => db.prepare(sql), exec: (sql) => db.exec(sql),
@@ -23,7 +21,6 @@ function workStorage() {
           .run(namespace, migrations.length);
       });
     },
-    importJsonl: () => ({ missing: true }),
   };
   return { db, storage };
 }

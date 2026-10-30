@@ -1,6 +1,6 @@
 # 主进程与插件消息流
 
-核心提供插件生命周期、消息总线、观察队列和决策调度。具体感知来源和模型请求由插件实现；Electron 窗口、托盘、受控 IPC、Live2D 以及底层屏幕捕获是宿主能力。
+核心提供插件生命周期、消息总线、观察队列、决策调度、对话策略与共享模型客户端。具体感知来源、记忆维护和输出扩展由插件实现；Electron 窗口、托盘、受控 IPC、Live2D 以及底层屏幕捕获是宿主能力。
 
 ```text
 视觉插件：定时截图 → 变化检测 ─┐
@@ -9,10 +9,9 @@
   → 通用观察队列
   → 定时 / 点击 / 手动消息触发 decision.requested
   → 核心过滤过期观察并按时间排序
-  → 收集插件提供的通用上下文块
-  → 调用 decision.provider 选定的决策插件
-  → decision.completed
-  → 执行模块展示气泡并发布 execution.speech.requested
+  → 调用核心 conversation 收集上下文并生成决策
+  → 等待 decision.completed 的记忆、历史及其它观察者完成记录
+  → 显式调用 execution.presentDecision，展示气泡并发布 execution.speech.requested
   → TTS 插件合成和播放
 ```
 
@@ -26,6 +25,10 @@
 
 `decisionScheduler.js` 独立管理串行请求、间隔计时和等待者取消，不使用轮询。忙碌期间相同 trigger 的等待请求合并为下一轮；即使关闭自动决策，批次剩余的用户消息仍会触发后续决策。自动感知的剩余观察遵循配置间隔。停止时取消等待者和在途决策，应用等待调度器与插件完成清理后退出。
 
+`conversation/history.js` 由对话核心拥有，每个模型会话维护进程内的记忆快照、会话摘要和 user/assistant 文字历史。核心串行处理主决策，文本提取请求可独立进行。请求布局为固定 system、快照/摘要背景、历史消息、当前观察；动态时间位于本轮输入，记忆仅在段首检索一次，段内不追加检索背景，成功汇总后再刷新快照。已提交的历史文本不重写，图片仅用于当前批次，历史保存主模型的观察摘要。`conversationHistory=true` 告知上下文提供者已有核心历史，记忆插件据此跳过重复的近期对话注入；其它调用者仍可获得原有近期上下文。
+
+`conversation.history` 控制压缩：默认已有32轮或预计输入50000 token 时汇总较早回合，保留最近4轮；摘要请求输出上限1600 token、正文上限6000字符，成功验证后才消费旧历史。输入估算使用文字 UTF-8 字节数和上一轮接口 usage，不能精确预判新图片成本；硬预算默认100000，连续失败最多积累64轮。硬上限阻止继续发送更长主请求，原内容仍保留供重试。摘要和长期记忆维护使用各自的任务提示词与必要数据。`memory.cleared` 同步清除核心历史并取消在途决策/汇总；上下文提供者注册代次变化在下一轮重置会话，模型配置变化建立新会话，停止/恢复保留本次进程状态。未将会话摘要写入旧的记忆摘要数据库字段。
+
 ## 消息发布与错误处理
 
 总线提供两种发布方式，订阅者都按注册顺序执行，并等待每个订阅者返回的 Promise：
@@ -35,11 +38,11 @@
 
 插件通过 `context.bus` 使用发布与订阅接口，不直接访问总线队列。插件发布 `decision.requested` 时也经过调度器，推荐使用 `context.decisions.request()`。宿主自动给插件订阅附加插件名。核心订阅也可通过 `bus.subscribe(type, handler, { owner: "模块名" })` 标明归属。通知错误直接写日志，不再发布错误事件，日志记录失败也不会中断通知。
 
-观察已入队后，入队通知的订阅者失败不会让提交报错；决策完成通知的订阅者失败不会让成功的观察重新入队。执行模块等待语音请求并捕获其错误，通过 `pipeline.failed` 通知报告执行失败。TTS 播放开始与结束状态仍按顺序通知，某个订阅者报错不会阻止音频感知更新播放状态。
+观察已入队后，入队通知的订阅者失败不会让提交报错；决策完成通知的订阅者失败不会让成功的观察重新入队。决策流程在完成记录后显式调用执行模块，并等待语音请求；呈现失败通过 `pipeline.failed` 报告，仍释放已完成观察，不重放成功回合。TTS 播放开始与结束状态仍按顺序通知，某个订阅者报错不会阻止音频感知更新播放状态。
 
 ## 通用观察与决策契约
 
-`electron/architecture/contracts.js` 定义观察和决策结果，`perceptionService.js` 提供统一观察入口与来源注册，`decisionProviders.js` 注册和选择决策实现。核心决策模块依赖注入的函数，不导入模型实现。
+`electron/architecture/contracts.js` 定义观察和决策结果，`perceptionService.js` 提供统一观察入口与来源注册。决策模块通过注入的 `conversation.decideFromObservations` 调用核心对话，验证结果、完成记录，再呈现回复；模型请求封装在共享客户端中。
 
 ```js
 // 所有感知插件通过同一入口入队。
@@ -56,21 +59,17 @@ await context.perception.submit({
   metadata: { label: "来源说明" },
 });
 
-// 宿主生成 observation.id。额外内容类型由感知与决策插件协商。
-// 决策实现按插件名注册；每次只调用配置中选定的实现。
-const unregister = context.decisions.register(async ({ observations, trigger, context }) => ({
-  reply: "要显示的台词",
-  expression: "neutral",
-  summaries: { mySource: "供后续回合使用的摘要" },
-  metadata: {},
-}));
+// 宿主生成 observation.id。来源扩展通过通用上下文补充对话。
+context.decisionContext.register(async () => [
+  { id: "background", title: "背景信息", text: "供本轮对话参考的内容" },
+]);
 ```
 
-核心验证通用字段，不根据截图路径或音频类型决定流程。决策插件自己适配支持的内容类型；当前 AI 对话插件支持文本、本地图片、图片 URL 和图片 data URI，遇到其它类型会明确报错。`summaries` 可按来源扩展，当前对话插件使用 `screen` 和 `audio`。
+核心验证通用字段，不根据截图路径或音频类型决定流程。核心对话策略适配支持的内容类型；当前实现支持文本、本地图片、图片 URL 和图片 data URI，遇到其它类型会明确报错。`summaries` 可按来源扩展，当前核心对话使用 `screen` 和 `audio`。
 
 ## 插件宿主与扩展接口
 
-`electron/pluginHost.js` 按静态 manifest 加载插件，注入配置读取、日志、总线、菜单、感知入口、决策注册、上下文注册、通用服务、路径、窗口创建、受控 IPC、屏幕捕获及表情列表。插件通过 `activate(context)` 注册能力，并返回包含 `start`、`stop`、`dispose` 的生命周期对象。方法可以返回 Promise；不再使用单独的清理函数作为插件句柄。
+`electron/plugins/manifest.js` 只汇总各插件的 `definition.js`；每个定义集中声明 `normalizeOptions`、加载规则及服务依赖。`electron/pluginHost.js` 使用同一清单加载插件，注入配置读取、日志、总线、菜单、感知入口、决策请求、上下文注册、核心模型、通用服务、路径、窗口创建、受控 IPC、屏幕捕获及表情列表。插件通过 `activate(context)` 注册能力，并返回包含 `start`、`stop`、`dispose` 的生命周期对象。方法可以返回 Promise；不再使用单独的清理函数作为插件句柄。
 
 宿主串行处理激活、启动、停止和卸载请求，重复启动不会再次启动已运行的插件。停止时按加载的逆序向所有插件发出取消请求，再等待全部停止完成；卸载先停止所有插件，再按逆序等待各插件清理注册和资源。单个插件清理失败会记录日志，其余插件继续清理。重复卸载返回同一 Promise，卸载后的宿主不再启动或激活插件。应用在 `before-quit` 中等待卸载完成后退出。
 
@@ -80,18 +79,17 @@ manifest 使用 `provides`、`requires`、`optional` 声明服务，字段可以
 
 菜单通过 `context.menu.register()` 挂载，通过 `context.menu.refresh()` 请求刷新。来源插件通过 `context.perception.registerSource(name, capture)` 注册可主动调用的来源，宿主通过 `perception.capture(name, request)` 调用。底层 Electron 截图适配器 `electron/platform/screenCapture.js` 通过 `context.screen.captureFullscreen()` 提供给视觉插件。
 
-插件通过 `context.decisions.request({ trigger, signal, waitTimeoutMs })` 请求核心调度决策。默认等待上限为 120 秒。`signal` 可取消尚未开始的请求，已开始的模型任务由决策插件管理，调度器停止时统一取消在途请求。插件负责捕获返回 Promise 的错误。窗口定位可以读取 `context.pet.getBounds()`（桌宠未显示时为 `null`），以及 `context.screen.getPrimaryDisplay()`、`getDisplayNearestPoint(point)` 提供的显示器工作区。
+插件通过 `context.decisions.request({ trigger, signal, waitTimeoutMs })` 请求核心调度决策。默认等待上限为 120 秒。`signal` 可取消尚未开始的请求，已开始的模型任务由核心对话管理，调度器停止时统一取消在途请求。插件负责捕获返回 Promise 的错误。窗口定位可以读取 `context.pet.getBounds()`（桌宠未显示时为 `null`），以及 `context.screen.getPrimaryDisplay()`、`getDisplayNearestPoint(point)` 提供的显示器工作区。
 
 - `manual-input`：输入窗口、preload、文本验证、用户观察提交、即时决策请求与「手动对话…」菜单。IPC 使用 `manual-input:submit` 和 `manual-input:close`，仅接受自身窗口发送的请求。停止时关闭窗口并取消等待中的决策请求；卸载时清理菜单与 IPC。
-- `ai-conversation`：模型请求、图片编码、提示词、回复解析与重试。接收通用上下文块；历史由独立插件记录；注册 `ai-conversation.text` 文本生成服务，供其它插件调用。停止时取消决策与文本请求及重试等待，拦截迟到结果，并等待请求结束。`decision.provider` 默认为 `ai-conversation`，可以指定其它已注册决策插件。
 - `screen-perception`：截图周期、变化检测状态和图片观察生成。停止时清理定时器，丢弃并清理尚未完成的旧周期截图。手动保存截图不入队。
 - `audio-output-perception`：音频采集、分段、转写、去重与观察有效期。转写使用 `content: [{ type: "text", text }]`，音频详情保存在 `metadata`。
 - `tts`：独立订阅通用语音请求并发布播放状态。实例管理运行开关、任务队列、取消信号、合成器和播放器；停止或卸载时取消全部任务并等待清理完成。
-- `storage-sqlite`：共享数据库连接、事务、迁移和旧文件导入；最先加载、最后卸载。
+- `storage-sqlite`：共享数据库连接、事务与表结构迁移；最先加载、最后卸载。
 - `dialogue-history`：独立记录决策完成事件，管理历史表、分页与搜索、历史窗口、IPC 和菜单。
-- `memory`：统一管理近期对话、人物画像和长期 SQLite 存储。注册上下文提供者，订阅决策完成事件独立记录回合，通过通用文本服务每20轮对话更新长期记忆。
+- `memory`：统一管理近期对话、人物画像和长期 SQLite 存储。注册上下文提供者，订阅决策完成事件独立记录回合，通过宿主注入的核心模型接口每20轮对话更新长期记忆。
 
-手动对话插件默认加载，配置 `manual-input.enabled=false` 时不加载。视觉插件随宿主加载，`enabled` 控制自动采集；`enabled=false` 或 `interval_ms<=0` 时仍可通过截图服务手动采集。音频插件配置存在时加载，`enabled` 控制启动时是否采集，以支持本次运行的菜单开关。AI、TTS 和记忆插件按各自的启用配置加载，记忆插件的整体开关与 shortTerm/longTerm 子项开关独立。
+手动对话插件默认加载，配置 `manual-input.enabled=false` 时不加载。视觉插件随宿主加载，`enabled` 控制自动采集；`enabled=false` 或 `interval_ms<=0` 时仍可通过截图服务手动采集。音频插件配置存在时加载，`enabled` 控制启动时是否采集，以支持本次运行的菜单开关。TTS 和记忆插件按各自的启用配置加载；对话核心由应用创建，其 `enabled` 控制对话和文本生成，记忆插件的整体开关与 shortTerm/longTerm 子项开关独立。
 
 ## 文件归属
 
@@ -100,6 +98,8 @@ manifest 使用 `provides`、`requires`、`optional` 声明服务，字段可以
 ```text
 electron/
 ├── architecture/                  # 通用观察、决策、队列与总线
+├── conversation/                  # 对话策略、提示词、解析与模型生命周期
+├── llm/                           # 共享模型传输、超时、重试与日志
 ├── platform/
 │   └── screenCapture.js           # 全屏截图，共享宿主能力
 └── plugins/
@@ -111,16 +111,17 @@ electron/
     │   ├── transcribe.js          # HTTP ASR 请求与返回处理
     │   ├── funasr.js              # WebSocket 2-pass 音频与结果处理
     │   └── capture/linux.js       # 输出监视源选择与 parec 采集
-    ├── storageSqlite/             # 连接、事务、通用迁移与导入
+    ├── storageSqlite/             # 连接、事务与表结构迁移
     ├── dialogueHistory/           # 对话仓库、窗口、preload、菜单与事件记录
-    ├── aiConversation/            # 模型请求、提示词、回复解析
     ├── screenPerception/          # 视觉观察生成、采集周期与变化检测
     └── memory/
-        ├── index.js               # 生命周期、回合记录和串行维护
+        ├── index.js               # 回合记录、上下文、菜单与窗口
+        ├── maintenanceCoordinator.js # 维护、整理、清空屏障与任务生命周期
+        ├── definition.js          # 配置、加载规则与服务依赖
         ├── options.js             # 插件配置默认值与校验
         ├── shortTerm.js           # 实例缓冲与快照压缩
         ├── context.js             # 近期对话格式化和记忆上下文块
-        ├── longTerm.js            # SQLite 存储、导入和检索
+        ├── longTerm.js            # SQLite 存储与检索
         └── extractor.js           # 长期事实提取
 ```
 
@@ -128,17 +129,23 @@ electron/
 
 ## 上下文与通用服务
 
-插件用 `context.decisionContext.register(provide)` 注册上下文提供者，返回 `{ id, title, text }[]`。核心在每次决策前收集内容块，将其作为 `context` 传给选定的决策实现，块 ID 自动加上插件命名空间。上下文扩展失败时只记录日志，其它扩展和决策继续执行。核心不解释记忆类别、摘要策略或存储格式。
+插件用 `context.decisionContext.register(provide)` 注册上下文提供者，返回 `{ id, title, text }[]`。核心对话在每次决策前收集内容块，将其作为 `context` 传给对话策略，块 ID 自动加上插件命名空间。上下文扩展失败时只记录日志，其它扩展和决策继续执行。核心不解释记忆类别、摘要策略或存储格式。
 
-AI 对话请求的 `system` 仅包含角色设定、固定行为/记忆使用规则及输出格式，角色配置和可用表情列表不变时，各轮内容相同。长期记忆、近期对话及其它动态上下文统一放在 `user.content` 的「补充上下文」中，随后是「本次输入」的观察与图片；当前时间也在用户消息中。固定规则说明历史上下文属于背景数据，不作为当前用户指令。记忆整理的文本服务仍使用各自的固定整理提示词，待整理内容放在用户消息中。
+AI 对话请求的 `system` 仅包含角色设定、固定行为/记忆使用规则及输出格式，角色配置和可用表情列表不变时，各轮内容相同。长期记忆、近期对话及其它动态上下文统一放在 `user.content` 的「补充上下文」中，随后是「本次输入」的观察与图片；当前时间也在用户消息中。观察 role 的含义、缺失图片/音频的处理和 JSON 输出要求统一由系统提示词说明，本轮用户消息开头仅标记时间和输入数量。固定规则说明历史上下文属于背景数据，不作为当前用户指令。记忆整理的文本服务仍使用各自的固定整理提示词，待整理内容放在用户消息中。
 
-插件用 `context.services.register("text", generate)` 注册服务，完整服务名为 `<插件名>.text`，其它插件用 `context.services.get(name)` 查找。AI 对话插件提供的文本函数接受 `(messages, { max_tokens, temperature, signal })`，记忆插件默认使用 `ai-conversation.text`，可通过自己的 `textService` 选用其它插件服务。
+`conversation/output.js` 集中定义主对话的六字段 JSON Schema、可用表情枚举和本地业务校验；系统提示词与请求 schema 使用相同表情列表。`ai.outputFormat=auto` 默认优先 strict json_schema，仅对明确“不支持 response_format/json_schema”等400/422错误协商到 json_object/prompt，协商结果保存在模型会话的策略实例中；显式模式不降级。主决策每次拿到完整响应后，先拒绝 refusal、content_filter 和 length，再严格解析整个 JSON 正文，验证字段完整性、类型、额外字段、表情名、发言状态及输入与摘要的一致性。普通文本、代码块、旧字段映射与类型强转兼容均移除。`AI_INVALID_OUTPUT` 最多重试3次，耗尽后标记不可回队重试；`AI_REFUSAL` 和 `AI_OUTPUT_TRUNCATED` 直接失败。校验通过后才提交核心历史并返回通用决策，失败不发布 `decision.completed`、不写入记忆或呈现回复，原始日志仍保存每次原响应供排查。
 
-宿主统一追踪总线订阅、菜单、来源、决策、上下文和服务的注册清理函数。激活失败会回滚已注册能力，卸载时也会清理残留注册项。
+宿主注入 `context.model.generateText(messages, { max_tokens, temperature, signal, timeoutMs, retryBudgetMs })`，供记忆维护等扩展使用共享模型客户端。它与核心对话使用同一份 `conversation.ai` 设置，不依赖插件服务注册。`isAvailable()` 查询可用性，`getRevision()` 标识模型配置代次，`subscribe(listener)` 监听可用性与代次变化。宿主将插件停止信号合并到请求中，停止后禁止新请求，卸载时清理监听。
+
+`conversation/index.js` 管理配置快照、在途请求及取消。对话配置变化时拒绝新请求、取消并等待旧请求，切换客户端与对话策略后通知扩展恢复；迟到结果不能成为新回合或记忆更新。停止取消所有请求，恢复使用当前配置；卸载后不能恢复。`conversation/decision.js` 负责提示词、图片和输出策略，`llm/client.js` 负责传输、代理、超时、重试与日志。
+
+插件可以用 `context.services.subscribe(({ name, service }) => ...)` 监听服务注册与移除，返回清理函数；停止时暂停投递，卸载时解除监听。记忆协调器监听存储恢复和核心模型变化，取消旧代次任务，保留待处理队列，新模型可用后重试维护。
+
+宿主统一追踪总线订阅、菜单、来源、上下文、服务、模型及服务变化监听的注册清理函数。激活失败会回滚已注册能力，卸载时也会清理残留注册项。
 
 ## SQLite 存储与历史插件
 
-`storage-sqlite` 默认启用，使用 `better-sqlite3`；`path` 默认为 Electron `userData` 目录下的 `pet.sqlite3`，相对路径以 `userData` 为基准，绝对路径直接使用。数据库路径和服务选择在激活时确定，修改后重启应用。启用外键、WAL 和锁等待超时，数据库连接保持到依赖插件全部卸载后再执行检查点并关闭。
+`storage-sqlite` 默认启用，使用 `better-sqlite3`；`path` 默认为 Electron `userData` 目录下的 `pet.sqlite3`，相对路径以 `userData` 为基准，绝对路径直接使用。数据库路径和服务选择在激活时确定，配置变化后自动重载存储及其必需依赖消费者。启用外键、WAL 和锁等待超时，数据库连接保持到依赖插件全部卸载后再执行检查点并关闭。
 
 ```json
 {
@@ -146,40 +153,40 @@ AI 对话请求的 `system` 仅包含角色设定、固定行为/记忆使用规
     { "name": "manual-input", "enabled": true },
     { "name": "storage-sqlite", "enabled": true, "path": "pet.sqlite3", "busyTimeoutMs": 5000 },
     { "name": "dialogue-history", "enabled": true,
-      "storageService": "storage-sqlite.database", "legacyPath": "logs/dialogue-history.jsonl" }
+      "storageService": "storage-sqlite.database" }
   ]
 }
 ```
 
 核心提供 `context.paths`、`context.windows.create(options)` 和自动清理的 `context.ipc.handle(channel, handler)`。IPC 通道自动加上插件命名空间。历史窗口只通过自己的 preload 调用 `dialogue-history:list`，插件验证发送窗口身份；主进程不包含历史窗口、菜单或读取路由，宿主不再提供 `context.history`。
 
-存储插件注册 `storage-sqlite.database`，提供同步的 `prepare`、`exec`、`transaction`、`migrate` 和 `importJsonl`。事务回调必须同步。历史与记忆各自维护表结构和迁移版本：`sessions` 保存应用会话时间，`dialogue_turns` 保存用户文本、回复、表情、通用摘要、来源和决策 ID，`memory_entries` 保存事实、标签、重要性及提取批次的来源决策/会话 ID。来源 ID 表示提取时覆盖的回合集合，不代表模型已精确定位每条事实的出处；记忆插件可以独立于历史插件运行。
+存储插件注册 `storage-sqlite.database`，提供同步的 `prepare`、`exec`、`transaction`和 `migrate`。事务回调必须同步。历史与记忆各自维护表结构和迁移版本：`sessions` 保存应用会话时间，`dialogue_turns` 保存用户文本、回复、表情、通用摘要、来源和决策 ID，`memory_entries` 保存事实、标签、重要性及提取批次的来源决策/会话 ID。来源 ID 表示提取时覆盖的回合集合，不代表模型已精确定位每条事实的出处；记忆插件可以独立于历史插件运行。
 
-历史记录来自核心验证后的 `decision.completed`，与决策实现无关。事件携带统一的 `id`、`sessionId`、`sessionStartedAt` 和 `completedAt`。历史按时间和序号倒序分页，默认每页 100 条，窗口支持搜索用户输入和回复；搜索使用文字包含匹配。旧 `screenSummary/audioSummary` 导入通用 `summaries`，其它来源摘要也可以显示。
+历史记录来自核心验证后的 `decision.completed`，与决策实现无关。事件携带统一的 `id`、`sessionId`、`sessionStartedAt` 和 `completedAt`。历史按时间和序号倒序分页，默认每页 100 条，窗口支持搜索用户输入和回复；搜索使用文字包含匹配。来源摘要保存在通用 `summaries` 中。
 
 长期记忆使用标准化文本唯一索引去重，保留旧的相似文本检查及中文分词/评分规则；SQLite 不执行语义检索。每批提取结果的插入和超限清理在同一事务中完成。`memory.longTerm.maxEntries` 继续控制容量，`maxInject` 控制注入数量。历史插件和启用长期记忆的插件声明存储为必需依赖；缺少存储时被标记为不可用。仅使用近期记忆与摘要时可以关闭 `longTerm.enabled`，它们仍能运行；清空全部记忆需要可用的存储服务。
 
-首次激活历史插件和长期记忆时，分别导入 `legacyPath` 指定的旧 JSONL，相对路径以项目根目录为基准。导入来源仅通过 `longTerm.legacyPath` 配置。导入在事务内完成，坏行跳过并记录数量，SQL 或文件错误不会标记导入成功；`legacy_imports` 记录已完成的来源路径，记录使用稳定标识防止重复导入。不存在的源文件不标记成功，后续启动仍可导入；原文件保持不变，导入后新的记录只写 SQLite。长期记忆导入后继续遵守配置的容量限制。
+记忆和历史对话统一使用共享 SQLite，不再自动导入旧 JSONL。SQLite 表结构版本由各插件的 `migrate` 管理，已有数据库记录继续保留。
 
 安装依赖时 `postinstall` 会执行 `npm run rebuild:native`，按已安装的 Electron 版本重建 `better-sqlite3`。`npm start` 前也会检查并重建原生模块。构建工具要求 Node.js >=22.12，pnpm 的原生构建许可位于 `pnpm-workspace.yaml`。仓库当前没有 Electron 分发打包流程；后续打包需要为目标平台/架构重建模块，并在使用 ASAR 时解包原生 `.node` 文件。
 
-备份数据库应在关闭应用后进行，或使用 SQLite 备份机制；运行期间仅复制主数据库可能遗漏 WAL 中的记录。旧 JSONL 只覆盖迁移前的数据。
+备份数据库应在关闭应用后进行，或使用 SQLite 备份机制；运行期间仅复制主数据库可能遗漏 WAL 中的记录。
 
 ## AI 超时与日志
 
-AI 插件的 `ai.timeoutMs` 默认 120000，覆盖单次网络请求与响应正文读取；`ai.retryBudgetMs` 默认 360000，覆盖整轮请求和重试等待。外部取消与超时都向网络操作传递 AbortSignal，并终止等待。瞬时状态码 408、429、5xx 与网络故障可以重试；配置错误和不支持的观察类型不反复重试。
+共享模型客户端的 `conversation.ai.timeoutMs` 默认 120000，覆盖单次网络请求与响应正文读取；`conversation.ai.retryBudgetMs` 默认 360000，覆盖整轮请求和重试等待。外部取消与超时都向网络操作传递 AbortSignal，并终止等待。瞬时状态码 408、429、5xx 与网络故障可以重试；配置错误和不支持的观察类型不反复重试。
 
 `logs/openai.jsonl` 达到 5 MiB 时轮转，最多保留 3 个历史文件。不会把请求头或 API key 写入日志。
 
-`ai-conversation` 在每次网络发送前通知 `ai.request.started`，在返回、失败或取消时通知 `ai.request.finished`，每次重试拥有独立请求 ID。`raw-log` 插件依赖 `storage-sqlite.database`，维护 `ai_requests` 表，保存实际序列化的请求正文（包括所有 messages 和图片）、返回内容、时间及 HTTP 状态。日志观察者的失败不会阻断模型请求；停止期间仍接收完成通知，防止丢失取消结果。上次进程遗留的未完成记录在激活时标记为结果未记录。
+共享模型客户端在每次网络发送前通过应用注入的回调通知 `ai.request.started`，在返回、失败或取消时通知 `ai.request.finished`，每次重试拥有独立请求 ID。`raw-log` 插件依赖 `storage-sqlite.database`，维护 `ai_requests` 表，保存实际序列化的请求正文（包括所有 messages 和图片）、返回内容、时间及 HTTP 状态。日志观察者的失败不会阻断模型请求；停止期间仍接收完成通知，防止丢失取消结果。上次进程遗留的未完成记录在激活时标记为结果未记录。
 
 「原始日志…」窗口按运行会话分组并倒序分页，每页 50 次请求；列表只读取元数据及从 response_json 提取的小型 usage 对象，选中时才读取完整正文，按消息原始顺序展示角色、文本、图片和模型返回。窗口每 2 秒刷新列表，关闭后停止轮询。`rawLog/usage.js` 统一 Chat Completions 与 Responses 用量字段，展示输入、输出、总量、缓存命中、未命中、可选缓存写入和推理 token；未命中优先使用接口显式字段，否则用已知输入减已知命中计算。缺失和异常字段保持未知，缓存写入与推理不重复计入总量。列表与详情均读取已保存响应，不更改原始数据、不新增数据库列，兼容历史记录与字符串形式的失败响应。使用隔离的 sandbox preload 和自身发送者校验，只允许 `raw-log:list/get` IPC；文本通过 textContent 展示，图片仅加载内联 data URL，远程图片显示原始 URL。功能默认启用，可通过插件 `raw-log.enabled=false` 关闭；记录持久保存，不复用历史响应 JSONL，也不记录请求头或 API key。
 
 ## 配置管理
 
-`config.js` 缓存不可变的有效配置，每秒最多检查一次文件变更，并统一验证关键字段、补充插件默认值。配置写入中或格式错误时保留上次有效配置，只记录错误位置与类型，不打印配置内容。初次加载无有效配置时明确报错。只接受 `ui`、`decision`、`observations` 和 `plugins` 根字段（以及下划线开头的注释）；根节点功能配置和记忆插件平铺参数会明确报错。
+`config.js` 缓存不可变的有效配置，验证根字段、插件名称、重复项和公共启用开关，将对话参数委托给 `conversation/options.js`，将插件参数委托给各插件的 `definition.js`。默认值由插件的 `options.js` 定义，配置读取与运行时使用同一套标准化规则；不可变配置的运行时选项视图按实例缓存，原始可变配置仍可独立读取。配置写入中或格式错误时保留上次有效配置，只记录错误位置与类型，不打印配置内容。初次加载无有效配置时明确报错。只接受 `ui`、`conversation`、`decision`、`observations` 和 `plugins` 根字段（以及下划线开头的注释）；根节点功能配置和记忆插件平铺参数会明确报错。
 
-AI 请求参数、观察配额、决策 provider 和下一次调度间隔在后续读取时生效。插件启用与依赖、数据库路径、捕获定时器和窗口尺寸在加载或创建时确定，需要重启应用才能完整应用更改。现有 `config.json` 无需改写，新字段示例见 `config.example.json`。
+应用监听配置文件所在目录，合并连续保存事件；有效更新交给宿主串行重载变化的插件及其必需依赖消费者，旧实例使用原配置完成清理。对话配置变化时先暂停并等待调度器，取消旧模型请求，再切换对话核心；插件只因自身配置或必需依赖变化而重载。仅切换模型和角色不会重建记忆与历史。观察配额和调度间隔在后续读取时生效，主窗口尺寸在创建时生效。视觉插件始终加载，开关控制自动截图；音频插件配置存在时加载，开关控制采集；其它插件保留原有加载规则。当前配置格式见 `config.example.json`。
 
 ## TTS 任务与取消
 
@@ -197,7 +204,7 @@ AI 请求参数、观察配额、决策 provider 和下一次调度间隔在后�
 
 `memory.work.enabled=true` 启用工作记忆，并声明 SQLite 为必需依赖。`workStore.js` 维护 `work_evidence`、`work_entities`、`work_claims`、`work_questions`、`work_question_answers` 与 `work_memory_state`，迁移命名空间为 `work-memory`。证据保存原始文字或截图工作摘要、来源、采集时间与元数据；图片文件仍按现有观察释放策略清理。被画像引用的证据不参加普通容量清理。
 
-`workMemory.js` 订阅观察入队及决策完成：文字观察直接保存，不依赖宠物发言；截图优先使用独立 `workSummary`，旧提供者退回 `screenSummary`。整理读取来源证据与旧画像，不把宠物台词当作事实。`workExtractor.js` 返回实体、画像关系和问题候选；忽略旧提供者返回的 summary 字段，兼容旧提供者返回的 facts，但不直接把它们写入长期记忆。画像主要记录用户的身份、稳定职责、习惯、偏好、沟通方式与人际关系；具体工作、任务、项目和技术细节按原始来源通过 `updateBuffer.stageEvidence` 暂存，到20轮对话门槛后统一评估是否更新长期记忆。启动时将已有画像中不属于人物信息的记录迁入长期记忆，保留来源、证据和用户确认依据，并在画像整理历史中归档原记录。更新在事务中完成，证据 ID 必须属于本批；无效 JSON、无效字段或伪造证据会保留整批待处理状态。维护沿用记忆插件的串行快照、取消与代次检查，不能在清空后重建旧画像。
+`workMemory.js` 订阅观察入队及决策完成：文字观察直接保存，不依赖宠物发言；截图优先使用独立 `workSummary`，旧提供者退回 `screenSummary`。整理读取来源证据与旧画像，不把宠物台词当作事实。`workExtractor.js` 返回实体、画像关系和问题候选；忽略旧提供者返回的 summary 字段，兼容旧提供者返回的 facts，但不直接把它们写入长期记忆。画像主要记录用户的身份、稳定职责、习惯、偏好、沟通方式与人际关系；具体工作、任务、项目和技术细节按原始来源通过 `updateBuffer.stageEvidence` 暂存，到20轮对话门槛后统一评估是否更新长期记忆。启动时将已有画像中不属于人物信息的记录迁入长期记忆，保留来源、证据和用户确认依据，并在画像整理历史中归档原记录。更新在事务中完成，证据 ID 必须属于本批；无效 JSON、无效字段或伪造证据会保留整批待处理状态。维护由记忆协调器统一执行串行快照、取消与代次检查，不能在清空后重建旧画像。
 
 关系按实体、字段、范围保存当前版本和被替代版本。`user_answer` 高于自动观察及猜测；用户可以在「人物画像」页修正已有关系，写入新的明确证据并关闭同一字段的待提问。名字和实体类型形成稳定键，别名保留为检索线索，不仅凭名字自动合并不同实体。检索使用当前转写、用户输入和最近工作摘要，用户画像作为核心背景保留，其他人物需要文字相关性命中。
 
@@ -215,29 +222,37 @@ AI 输出新增 `workSummary` 与 `shouldSpeak`。纯观察可返回 `shouldSpea
 
 ## 记忆插件
 
-插件挂载「记忆 → 清空全部记忆」，菜单操作先显示确认弹窗，默认选择取消；确认后才清空。重复点击共享同一弹窗，插件停止时取消确认，迟到的确认结果不会清空恢复后的记忆。另注册 `memory.clear` 服务供程序调用。清空会增加任务代次、取消后台维护、清除近期对话与待更新缓冲及长期事实，截断当前旧记忆 JSONL，并保留导入标记。清空前已开始的决策完成后不再写入记忆；清空期间的维护结果不会重新落库。操作不删除历史对话。重复清空共享同一个 Promise；存储不可用时菜单禁用，调用服务会明确报错。
+插件挂载「记忆 → 清空全部记忆」，菜单操作先显示确认弹窗，默认选择取消；确认后才清空。重复点击共享同一弹窗，插件停止时取消确认，迟到的确认结果不会清空恢复后的记忆。另注册 `memory.clear` 服务供程序调用。清空会增加任务代次、取消后台维护、清除近期对话与待更新缓冲及长期事实。清空前已开始的决策完成后不再写入记忆；清空期间的维护结果不会重新落库。操作不删除历史对话。重复清空共享同一个 Promise；存储不可用时菜单禁用，调用服务会明确报错。
 
-记忆插件通过 `decision.completed` 记录经过验证的成功回合，保存用户文本、回复、表情和通用来源摘要。回合记录同步完成，后台维护不阻塞回复；AI 对话插件不调用记忆记录或维护方法。宿主在插件激活后注册回复呈现模块，使回合记录先于输出处理。
+记忆插件通过 `decision.completed` 记录经过验证的成功回合，保存用户文本、回复、表情和通用来源摘要。回合记录同步完成，后台维护不阻塞回复；对话核心不调用记忆记录或维护方法。决策流程明确先等待 `decision.completed` 的记录通知，再调用 `execution.presentDecision`，最后释放观察资源；呈现模块不订阅决策完成事件，顺序不依赖插件激活或重载时的注册位置。
 
-维护任务按回合快照串行执行。近期对话受 `shortTerm.maxTurns` 和 `shortTerm.ttlMs` 限制；长期记忆更新使用独立的持久队列 `memory_update_turns` 和 `memory_update_sources`（迁移命名空间 `memory-updates`，版本1），不受近期容量或时限影响。只有非静默成功对话推进20轮门槛，观察来源本身不增加轮数。`updater.js` 一次发送全部现有长期记忆、本批完整对话及暂存来源，返回 update/add 计划；更新保持原ID，新增重要性至少4，每项必须引用本批真实来源。`longTerm.updateFromDialogue` 检查快照、重复记录与容量，保留原确认依据、来源和更新时间，旧内容写入整理历史；更新和队列消费在同一外层事务内提交，不通过容量清理淘汰已有记忆。长期更新成功仅消费请求快照中的内容，新到回合保留。更新失败时原始内容保留，下个回合、恢复或上下文请求会再尝试。服务不可用时，近期记忆和已有长期记忆检索仍可用。没有存储时先保存在进程内，服务恢复后迁入 SQLite。
+`maintenanceCoordinator.js` 统一管理维护任务、手动整理和清空屏障，以及运行状态、取消信号、任务代次和停止等待；插件入口负责来源与回合记录、上下文查询、菜单及查看窗口。维护任务按回合快照串行执行。近期对话受 `shortTerm.maxTurns` 和 `shortTerm.ttlMs` 限制；长期记忆更新使用独立的持久队列 `memory_update_turns` 和 `memory_update_sources`（迁移命名空间 `memory-updates`，版本1），不受近期容量或时限影响。只有非静默成功对话推进20轮门槛，观察来源本身不增加轮数。`updater.js` 一次发送全部现有长期记忆、本批完整对话及暂存来源，返回 update/add 计划；更新保持原ID，新增重要性至少4，每项必须引用本批真实来源。`longTerm.updateFromDialogue` 检查快照、重复记录与容量，保留原确认依据、来源和更新时间，旧内容写入整理历史；更新和队列消费在同一外层事务内提交，不通过容量清理淘汰已有记忆。长期更新成功仅消费请求快照中的内容，新到回合保留。更新失败时原始内容保留，新观察、新回合、服务恢复、启动或每30秒的维护检查会再尝试；上下文读取不触发模型请求。核心模型不可用时，近期记忆和已有长期记忆检索仍可用。没有存储时先保存在进程内，服务恢复后迁入 SQLite。
 
-短期记忆属于插件实例的进程内状态；待更新完整对话与观察来源保存到共享 SQLite，重启后继续累积。长期记忆保存到共享 SQLite 数据库。停止会取消后台请求并暂停记录/上下文注入，恢复后继续使用本次进程的会话状态。卸载会解除注册并清空实例会话状态，忽略迟到的模型结果，数据库和旧 JSONL 备份保留。
+短期记忆属于插件实例的进程内状态；待更新完整对话与观察来源保存到共享 SQLite，重启后继续累积。长期记忆保存到共享 SQLite 数据库。停止会取消后台请求并暂停记录/上下文注入，恢复后继续使用本次进程的会话状态。卸载会解除注册并清空实例会话状态，忽略迟到的模型结果，数据库保留。
 
-「记忆 → 查看当前记忆…」打开插件自己的查看窗口，展示近期对话、全部长期事实与启用/整理状态，点击刷新重新读取。长期记忆查看不受检索注入数量限制，也不会触发导入、模型请求或删除记录；子项关闭时仍可查看已保留内容。窗口通过 `memory:snapshot` IPC 读取快照，只接受自身窗口请求，停止时关闭，卸载时清理 IPC。
+「记忆 → 查看当前记忆…」打开插件自己的查看窗口，展示近期对话、全部长期事实与启用/整理状态，点击刷新重新读取。长期记忆查看不受检索注入数量限制，也不会触发模型请求或删除记录；子项关闭时仍可查看已保留内容。窗口通过 `memory:snapshot` IPC 读取快照，只接受自身窗口请求，停止时关闭，卸载时清理 IPC。
 
 ```json
 {
   "name": "memory",
   "enabled": true,
-  "textService": "ai-conversation.text",
-  "shortTerm": { "enabled": true, "maxTurns": 8, "ttlMs": 1800000 },
+  "shortTerm": {
+    "enabled": true,
+    "maxTurns": 8,
+    "ttlMs": 1800000
+  },
   "storageService": "storage-sqlite.database",
-  "longTerm": { "enabled": true, "legacyPath": "logs/memory.jsonl", "maxInject": 5,
-    "extractEveryNTurns": 20, "maxTokens": 16384, "maxEntries": 500 }
+  "longTerm": {
+    "enabled": true,
+    "maxInject": 5,
+    "extractEveryNTurns": 20,
+    "maxTokens": 16384,
+    "maxEntries": 500
+  }
 }
 ```
 
-统一插件配置的 `enabled=false` 关闭所有记忆。各子项可以独立关闭；关闭近期对话注入时，长期记忆更新仍使用独立的完整回合队列。近期和长期记忆参数分别放在插件的 `shortTerm`、`longTerm` 中，未配置 memory 插件时不启用记忆。会话摘要功能已移除，旧 summary 配置在标准化时丢弃，`work-memory` 版本3迁移清理 `work_memory_state.sessionSummary`。
+统一插件配置的 `enabled=false` 关闭插件提供的记忆。各子项可以独立关闭；关闭近期对话注入时，长期记忆更新仍使用独立的完整回合队列。近期和长期记忆参数分别放在插件的 `shortTerm`、`longTerm` 中，未配置 memory 插件时不启用插件记忆；核心的多轮对话与会话压缩由 `conversation.history` 独立管理。旧的 `memory.summary` 配置仍不接受，`work-memory` 版本3迁移清理 `work_memory_state.sessionSummary`，新会话摘要只保存在核心进程内。
 
 ## 配置格式
 
@@ -245,20 +260,39 @@ AI 输出新增 `workSummary` 与 `shouldSpeak`。纯观察可返回 `shouldSpea
 
 ```json
 {
-  "decision": { "provider": "ai-conversation", "enabled": true, "interval_ms": 10000 },
+  "conversation": {
+    "enabled": true,
+    "ai": {
+      "endpoint": "https://api.example/v1",
+      "apiKey": "...",
+      "model": "..."
+    },
+    "character": {
+      "name": "Setsuna"
+    }
+  },
+  "decision": {
+    "enabled": true,
+    "interval_ms": 10000
+  },
   "plugins": [
-    { "name": "ai-conversation", "enabled": true,
-      "ai": { "endpoint": "https://api.example/v1", "apiKey": "...", "model": "..." },
-      "character": { "name": "Setsuna" } },
-    { "name": "screen-perception", "enabled": true, "interval_ms": 5000,
-      "changeDetect": { "enabled": true, "hashSize": 8, "threshold": 4 } }
+    {
+      "name": "screen-perception",
+      "enabled": true,
+      "interval_ms": 5000,
+      "changeDetect": {
+        "enabled": true,
+        "hashSize": 8,
+        "threshold": 4
+      }
+    }
   ]
 }
 ```
 
 `decision.interval_ms` 控制每次决策结束后等待多久；0 时至少等待 1 秒，负数或 `decision.enabled=false` 时关闭自动决策，仍可手动触发。视觉采集周期独立配置，设备音频也独立采集。
 
-功能配置仅从对应的 `plugins` 项读取；AI 与角色设定放在 AI 插件的 `ai`、`character` 中，视觉采集与变化检测放在视觉插件中。程序不再读取旧根节点功能配置，也不再将旧记忆平铺字段映射到长期记忆。旧 JSONL 数据仍可通过 `legacyPath` 导入。
+模型与角色配置从根节点 `conversation.ai`、`conversation.character` 读取；感知、记忆和输出配置从对应 `plugins` 项读取。配置只接受当前格式，不转换旧插件或旧字段。`ai-conversation` 不在插件清单中，`decision.provider`、`memory.textService`、`memory.summary`、`memory.longTerm.legacyPath` 和历史插件的 `legacyPath` 以及其它旧根节点功能配置和记忆平铺字段会明确报错；未注册的插件也会报错。记忆和历史仅使用 SQLite，不提供旧 JSONL 导入入口。
 
 手动对话插件在桌宠右键菜单挂载「手动对话…」，打开桌宠附近的输入窗口，Ctrl+Enter 发送，Esc 关闭，单条最多 4000 字。内容以 `role=user` 的文本观察入队，提交成功即关闭窗口，后台请求决策；当前决策忙碌时等待下一轮。记忆与历史插件独立记录决策完成事件，手动对话插件不直接调用它们。窗口、preload 和提交逻辑均位于 `electron/plugins/manualInput/`，主进程只提供通用宿主接口与调度。
 
@@ -266,7 +300,7 @@ AI 输出新增 `workSummary` 与 `shouldSpeak`。纯观察可返回 `shouldSpea
 
 首版支持 Linux 上的 PulseAudio 或提供 PulseAudio 兼容服务的 PipeWire，依赖 `pactl` 和 `parec`（通常包含在 `pulseaudio-utils` 包中）。Windows/macOS 的采集适配器尚未实现，菜单中会显示暂不支持。
 
-在 `config.json` 的 `plugins` 数组中配置 `name=audio-output-perception`（字段示例见 `config.example.json`）。旧版 `perception.audioOutput` 暂时仍可读取；新配置使用插件项。`asr.provider` 支持 `funasr`、`whisper-asr-webservice` 和 `openai`（省略时沿用 `openai`，示例配置显式选用 `funasr`）。HTTP ASR 使用独立 Electron session；FunASR 使用独立 WebSocket 与可选 HTTP(S) 代理 URL，不改变聊天的代理。
+在 `config.json` 的 `plugins` 数组中配置 `name=audio-output-perception`（字段示例见 `config.example.json`）。音频配置使用插件项，旧根节点 `perception.audioOutput` 不再支持。`asr.provider` 支持 `funasr`、`whisper-asr-webservice` 和 `openai`（省略时沿用 `openai`，示例配置显式选用 `funasr`）。HTTP ASR 使用独立 Electron session；FunASR 使用独立 WebSocket 与可选 HTTP(S) 代理 URL，不改变聊天的代理。
 
 ### 本地 FunASR 2-pass
 
@@ -326,7 +360,7 @@ TTS 插件发布带播放 ID 的通用 `execution.speech.state`。桌宠语音�
 
 运行 `npm run test:audio` 检查分段、转写请求、TTS 抑制、停止与重启、队列边界和混合决策行为。
 
-运行 `npm test` 检查全部音频与插件链路测试，包括通用观察、单一决策实现选择、失败重入队、纯文字/混合输入、视觉定时器与停止清理、当前配置校验和菜单卸载，以及记忆实例隔离、回合快照、维护串行化、模型服务缺失/恢复、请求取消和已有持久记忆可用性。测试使用模拟设备与模型服务，不调用真实模型或打开桌面窗口。
+运行 `npm test` 检查全部音频与插件链路测试，包括通用观察、核心对话与模型生命周期、配置切换、失败重入队、纯文字/混合输入、视觉定时器与停止清理、当前配置校验和菜单卸载，以及记忆实例隔离、回合快照、维护串行化、模型服务缺失/恢复、请求取消和已有持久记忆可用性。测试使用模拟设备与模型服务，不调用真实模型或打开桌面窗口。
 
 ### 项目状态与经验记忆
 

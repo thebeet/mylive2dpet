@@ -9,8 +9,8 @@ const { transcribeAudio, transcriptionEndpoint, validateAsrOptions } = require("
 const { registerAudioOutputPerceptionPlugin } = require("../electron/plugins/audioOutputPerception");
 const { registerDecisionModule } = require("../electron/modules/decision");
 const { createPerceptionService } = require("../electron/architecture/perceptionService");
-const { buildRequestBody } = require("../electron/plugins/aiConversation/request");
-const { extractChatPayload } = require("../electron/plugins/aiConversation/parseChatText");
+const { buildRequestBody } = require("../electron/conversation/request");
+const { extractChatPayload } = require("../electron/conversation/parseChatText");
 const { createShortTermStore } = require("../electron/plugins/memory/shortTerm");
 const { formatRecentDialogue } = require("../electron/plugins/memory/context");
 
@@ -355,9 +355,9 @@ test("request content supports both audio-only and mixed observations; audio sum
   assert.ok(audioBody.messages[1].content.some((part) => /a video narrator/.test(part.text)));
   const mixed = buildRequestBody({ model: "vision" }, "system", [audio, { source: "screen", role: "context", content: [{ type: "image", uri: "data:image/jpeg;base64,abc" }] }]);
   assert.equal(mixed.messages[1].content.filter((part) => part.type === "image_url").length, 1);
-  const parsed = extractChatPayload('{"response":"heard","audioSummary":"外部视频在讲解代码"}');
+  const parsed = extractChatPayload('{"shouldSpeak":true,"expression":"neutral","response":"heard","screenSummary":"","audioSummary":"外部视频在讲解代码","workSummary":""}');
   assert.equal(parsed.audioSummary, "外部视频在讲解代码");
-  assert.equal(extractChatPayload('{"response":"old format"}').audioSummary, null);
+  assert.throws(() => extractChatPayload('{"response":"old format"}'), /缺少字段/);
   const shortTerm = createShortTermStore();
   shortTerm.append({ reply: parsed.response, summaries: { audio: parsed.audioSummary } });
   assert.match(formatRecentDialogue(shortTerm.list()), /设备音频：外部视频/);

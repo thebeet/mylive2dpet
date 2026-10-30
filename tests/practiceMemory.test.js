@@ -27,12 +27,13 @@ function seed(repo, id = 'source', extras = {}) {
 function app(t, generate, overrides = {}) {
   const h = database(t);
   const bus = new MessageBus({ logger: quiet });
-  const config = { plugins: [{ name: 'memory', enabled: true, textService: 'model.text',
+  const config = { plugins: [{ name: 'memory', enabled: true,
     longTerm: { enabled: false }, work: { enabled: false },
     practice: { enabled: true, extractEveryNObservations: 3, flushAfterMs: 120000 }, ...overrides }] };
   let clock = 1000, model = generate, provide;
   const plugin = createMemoryPlugin({ bus, config: { get: () => config }, logger: quiet,
-    services: { get: name => name === 'model.text' ? model : name === 'storage-sqlite.database' ? h.storage : undefined },
+    model: { get generateText() { return model; } },
+    services: { get: name => name === 'storage-sqlite.database' ? h.storage : undefined },
     decisionContext: { register: fn => { provide = fn; return () => {}; } },
   }, { now: () => clock });
   t.after(() => plugin.dispose());

@@ -1,7 +1,7 @@
 const EVENTS = require("../architecture/events");
 
 /** Connect decisions to the pet's visible and spoken output. */
-function registerExecutionModule(bus, { sendBubble }) {
+function createExecutionModule(bus, { sendBubble }) {
   const unsubscribeBubble = bus.subscribe(EVENTS.BUBBLE_OUTPUT_REQUESTED, ({ text, type = "say" }) => {
     if (typeof text !== "string" || !text.trim() || !["say", "error"].includes(type)) return;
     sendBubble({ type, text });
@@ -18,28 +18,19 @@ function registerExecutionModule(bus, { sendBubble }) {
     { owner: "core:execution" },
   );
 
-  const unsubscribeDecision = bus.subscribe(
-    EVENTS.DECISION_COMPLETED,
-    async ({ result, trigger, observations }) => {
-      try {
-        if (result.speak === false) { sendBubble({ type: "hide" }); return; }
-        sendBubble({
-          type: "say",
-          text: result.reply,
-          expression: result.expression || "neutral",
-        });
-        await bus.publish(EVENTS.SPEECH_OUTPUT_REQUESTED, {
-          text: result.reply,
-          expression: result.expression || "neutral",
-        });
-      } catch (error) {
-        await bus.notify(EVENTS.PIPELINE_FAILED, {
-          stage: "execution", trigger, observationCount: observations?.length || 0, error,
-        });
-      }
-    },
-    { owner: "core:execution" },
-  );
+  // Called by the decision workflow after all completion observers have recorded the turn.
+  async function presentDecision({ result }) {
+    if (result.speak === false) { sendBubble({ type: "hide" }); return; }
+    sendBubble({
+      type: "say",
+      text: result.reply,
+      expression: result.expression || "neutral",
+    });
+    await bus.publish(EVENTS.SPEECH_OUTPUT_REQUESTED, {
+      text: result.reply,
+      expression: result.expression || "neutral",
+    });
+  }
 
   const unsubscribeFailure = bus.subscribe(EVENTS.PIPELINE_FAILED, (event) => {
     if (event.cancelled) return;
@@ -58,12 +49,11 @@ function registerExecutionModule(bus, { sendBubble }) {
     }
   }, { owner: "core:execution" });
 
-  return () => {
+  return { presentDecision, dispose() {
     unsubscribeBubble();
     unsubscribeDecisionStarted();
-    unsubscribeDecision();
     unsubscribeFailure();
-  };
+  } };
 }
 
-module.exports = { registerExecutionModule };
+module.exports = { createExecutionModule };

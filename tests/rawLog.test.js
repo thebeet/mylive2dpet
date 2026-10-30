@@ -2,12 +2,14 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { DatabaseSync } = require("node:sqlite");
 const { EventEmitter } = require("node:events");
-const { createChatService } = require("../electron/plugins/aiConversation/chat");
+const { createModelClient } = require("../electron/llm/client");
+const { createConversation } = require("../electron/conversation");
 const { createRawLogRepository } = require("../electron/plugins/rawLog/repository");
 const { normalizeUsage } = require("../electron/plugins/rawLog/usage");
 const { activate } = require("../electron/plugins/rawLog");
 const { MessageBus } = require("../electron/architecture/messageBus");
 const EVENTS = require("../electron/architecture/events");
+const { petPayload } = require("./helpers/petPayload");
 
 const quiet = { info() {}, warn() {}, error() {} };
 function storageFor(db) {
@@ -15,10 +17,10 @@ function storageFor(db) {
     migrate: (_name, migrations) => migrations.forEach((migration) => migration({ exec: (sql) => db.exec(sql) })) };
 }
 function chat(options = {}) {
-  return createChatService({
-    getConfig: () => ({ plugins: [{ name: "ai-conversation", ai: {
+  return createConversation({
+    getConfig: () => ({ conversation: { ai: {
       endpoint: "https://example.invalid/v1", apiKey: "secret-api-key", model: "test-model",
-    } }] }), getExpressions: () => ["neutral"], encodeImage: () => "actual-image",
+    } } }), getExpressions: () => ["neutral"], encodeImage: () => "actual-image",
     configureProxy: async () => {}, writeLog() {}, logger: quiet, ...options,
   });
 }
@@ -30,13 +32,13 @@ test("raw log captures exact wire messages and images before sending, including 
       assert.deepEqual(starts.at(-1).request, JSON.parse(init.body));
       assert.equal(ends.length, starts.length - 1);
       return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: {
-        role: "assistant", content: '{"response":"hello","expression":"neutral"}',
+        role: "assistant", content: JSON.stringify(petPayload({ response: "hello" })),
       } }] }) };
     } });
   await service.decideFromObservations([{ id: "input", source: "screen", role: "context",
     content: [{ type: "text", text: "屏幕观察" }, { type: "image", path: "/image.png" }] }]);
   const messages = [{ role: "system", content: "总结记忆" }, { role: "user", content: "原文\n第二行" }];
-  await service.callChatCompletions(messages);
+  await service.generateText(messages);
   assert.equal(starts.length, 2);
   assert.equal(starts[0].request.messages[1].content.at(-1).image_url.url, "data:image/jpeg;base64,actual-image");
   assert.deepEqual(starts[1].request.messages, messages);
@@ -57,7 +59,7 @@ test("each retry is recorded separately and cancellation completes a pending req
       controller.abort(new Error("cancelled by user"));
       init.signal.throwIfAborted();
     } });
-  await assert.rejects(service.callChatCompletions([{ role: "user", content: "hello" }], { signal: controller.signal }), /cancelled/);
+  await assert.rejects(service.generateText([{ role: "user", content: "hello" }], { signal: controller.signal }), /cancelled/);
   assert.equal(starts.length, 2);
   assert.equal(ends.length, 2);
   assert.notEqual(starts[0].id, starts[1].id);
@@ -69,7 +71,7 @@ test("each retry is recorded separately and cancellation completes a pending req
 test("failing log observers cannot prevent a successful model call", async () => {
   const service = chat({ onRequest() { throw new Error("disk full"); }, onResult() { throw new Error("disk full"); },
     fetchImpl: async () => ({ ok: true, status: 200, text: async () => '{"choices":[{"message":{"content":"ok"}}]}' }) });
-  assert.equal(await service.callChatCompletions([{ role: "user", content: "hello" }]), "ok");
+  assert.equal(await service.generateText([{ role: "user", content: "hello" }]), "ok");
 });
 
 test("text calls reject exhausted reasoning budgets and partial output without treating them as empty facts", async () => {
@@ -78,7 +80,7 @@ test("text calls reject exhausted reasoning budgets and partial output without t
       model: "reasoning-model", choices: [{ finish_reason: "length", message: { content } }],
       usage: { completion_tokens: 256, completion_tokens_details: { reasoning_tokens: 256 } },
     }) }) });
-    await assert.rejects(service.callChatCompletions([{ role: "user", content: "提取事实" }], { max_tokens: 256 }),
+    await assert.rejects(service.generateText([{ role: "user", content: "提取事实" }], { max_tokens: 256 }),
       /token 上限.*model=reasoning-model.*finish_reason=length.*max_tokens=256.*reasoning_tokens=256/);
   }
 });
@@ -89,18 +91,19 @@ test("text calls distinguish successful empty fact arrays from missing response 
     choices: [{ finish_reason: "stop", message: { content } }],
   }) }) });
   const messages = [{ role: "user", content: "提取事实" }];
-  assert.equal(await service.callChatCompletions(messages), "[]");
+  assert.equal(await service.generateText(messages), "[]");
   content = " ";
-  await assert.rejects(service.callChatCompletions(messages), /返回空正文.*finish_reason=stop/);
+  await assert.rejects(service.generateText(messages), /返回空正文.*finish_reason=stop/);
 });
 
 test("text timeout overrides cover network and total budgets without changing ordinary calls or wire fields", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let signal;
-  const service = chat({
-    getConfig: () => ({ plugins: [{ name: "ai-conversation", ai: {
+  const service = createModelClient({
+    configureProxy: async () => {}, writeLog() {}, logger: quiet,
+    getOptions: () => ({
       endpoint: "https://example.invalid/v1", apiKey: "test", model: "test", timeoutMs: 10, retryBudgetMs: 20,
-    } }] }),
+    }),
     fetchImpl: async (_url, init) => {
       signal = init.signal;
       const body = JSON.parse(init.body);
@@ -110,7 +113,7 @@ test("text timeout overrides cover network and total budgets without changing or
       return { ok: true, status: 200, text: async () => '{"choices":[{"message":{"content":"ok"}}]}' };
     },
   });
-  const pending = service.callChatCompletions([{ role: "user", content: "整理记忆" }], {
+  const pending = service.generateText([{ role: "user", content: "整理记忆" }], {
     timeoutMs: 50, retryBudgetMs: 100, maxRetries: 0,
   });
   await new Promise((resolve) => setImmediate(resolve));
@@ -119,7 +122,7 @@ test("text timeout overrides cover network and total budgets without changing or
   assert.equal(signal.aborted, false);
   t.mock.timers.tick(10);
   assert.equal(await pending, "ok");
-  const ordinary = assert.rejects(service.callChatCompletions([{ role: "user", content: "普通摘要" }], { maxRetries: 0 }), /超时（10ms）/);
+  const ordinary = assert.rejects(service.generateText([{ role: "user", content: "普通摘要" }], { maxRetries: 0 }), /超时（10ms）/);
   await new Promise((resolve) => setImmediate(resolve));
   t.mock.timers.tick(11);
   await ordinary;

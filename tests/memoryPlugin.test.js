@@ -8,11 +8,10 @@ const EVENTS = require("../electron/architecture/events");
 const { createServiceRegistry } = require("../electron/architecture/serviceRegistry");
 const { createContextProviders } = require("../electron/architecture/contextProviders");
 const { createPluginHost } = require("../electron/pluginHost");
-const { createDecisionProviders } = require("../electron/architecture/decisionProviders");
 const { registerDecisionModule } = require("../electron/modules/decision");
 const { createMemoryPlugin, getOptions } = require("../electron/plugins/memory");
 const { createShortTermStore } = require("../electron/plugins/memory/shortTerm");
-const { createChatService } = require("../electron/plugins/aiConversation/chat");
+const { createConversation } = require("../electron/conversation");
 const longTerm = require("../electron/plugins/memory/longTerm");
 const quiet = { info() {}, warn() {}, error() {} };
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -27,11 +26,14 @@ function harness(overrides = {}, dependencies = {}) {
   const services = createServiceRegistry();
   const contexts = createContextProviders({ logger: quiet });
   const config = { plugins: [{ name: "memory", enabled: true,
-    textService: "model.text", shortTerm: { maxTurns: 20 },
+    shortTerm: { maxTurns: 20 },
     longTerm: { enabled: false }, ...overrides,
   }] };
   const plugin = createMemoryPlugin({
-    bus, services, logger: quiet, config: { get: () => config },
+    bus, services, model: {
+      get generateText() { return services.get("model.text"); },
+      subscribe: (listener) => services.subscribe(({ name }) => { if (name === "model.text") listener(); }),
+    }, logger: quiet, config: { get: () => config },
     decisionContext: { register: (provide) => contexts.register("memory", provide) },
   }, dependencies);
   async function record(reply, { userMessage = "", summaries = {} } = {}) {
@@ -56,8 +58,8 @@ const addition = (messages, facts) => JSON.stringify({ update: [], add: facts.ma
 
 test("memory uses nested plugin options and the whole-plugin switch", () => {
   const config = { plugins: [{ name: "memory", enabled: true,
-    shortTerm: { maxTurns: 12 }, summary: { enabled: false },
-    longTerm: { enabled: false, legacyPath: "existing.jsonl", maxInject: 7 },
+    shortTerm: { maxTurns: 12 },
+    longTerm: { enabled: false, maxInject: 7 },
   }] };
   const options = getOptions(config);
   assert.equal(options.enabled, true);
@@ -65,7 +67,6 @@ test("memory uses nested plugin options and the whole-plugin switch", () => {
   assert.equal(options.shortTerm.maxTurns, 12);
   assert.equal(Object.hasOwn(options, "summary"), false);
   assert.equal(options.longTerm.enabled, false);
-  assert.equal(options.longTerm.legacyPath, "existing.jsonl");
   assert.equal(options.longTerm.maxInject, 7);
   config.plugins[0].enabled = false;
   assert.equal(getOptions(config).enabled, false);
@@ -93,13 +94,13 @@ test("recording is independent of the decision provider and optional context fai
   t.after(() => h.plugin.dispose());
   h.contexts.register("broken", () => { throw new Error("optional extension failure"); });
   h.contexts.register("invalid", () => [{ text: "missing id" }]);
-  const providers = createDecisionProviders(() => "custom", { contextProviders: h.contexts });
   const inputs = [];
-  providers.register("custom", async (input) => {
+  const decide = async (observations) => {
+    const input = { observations, context: await h.contexts.collect({ observations }) };
     inputs.push(input);
     return { reply: "custom reply", summaries: { custom: "sensor context" } };
-  });
-  t.after(registerDecisionModule(h.bus, { decide: (observations) => providers.decide({ observations }) }));
+  };
+  t.after(registerDecisionModule(h.bus, { decide }));
   const input = { source: "new-source", role: "user", content: [{ type: "text", text: "hello" }] };
   h.bus.enqueue(EVENTS.PERCEPTION_OBSERVATION, input);
   await h.bus.publish(EVENTS.DECISION_REQUESTED);
@@ -144,14 +145,9 @@ test("extraction preserves arrivals after its snapshot and processes each later 
   assert.doesNotMatch(requests[1][1].content, /\] one/);
 });
 
-test("missing text services retain recent context and durable memory without changing the legacy backup", async (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pet-memory-"));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const storePath = path.join(directory, "existing.jsonl");
+test("missing core model retains recent context and durable memory", async (t) => {
   const fact = { text: "用户喜欢喝咖啡", tags: ["咖啡"] };
-  fs.writeFileSync(storePath, JSON.stringify(fact) + "\n");
-  const original = fs.readFileSync(storePath, "utf8");
-  const h = harness({ longTerm: { enabled: true, legacyPath: storePath, extractEveryNTurns: 1 } }, {
+  const h = harness({ longTerm: { enabled: true, extractEveryNTurns: 1 } }, {
     longTerm: { ...fakeDurable([]), retrieve: () => [fact], formatForPrompt: longTerm.formatForPrompt },
   });
   t.after(() => h.plugin.dispose());
@@ -162,7 +158,6 @@ test("missing text services retain recent context and durable memory without cha
   assert.match(blocks.find(({ id }) => id === "memory:recent-dialogue").text, /still responding/);
   assert.equal(h.plugin.getState().extractedThrough, 0);
   h.plugin.dispose();
-  assert.equal(fs.readFileSync(storePath, "utf8"), original);
   assert.deepEqual(await h.contexts.collect({}), []);
 });
 
@@ -172,7 +167,7 @@ test("long-term updates recover when their service becomes available without los
   await h.record("one"); await h.record("two"); await h.plugin.whenIdle();
   assert.equal(h.plugin.getState().pendingFacts.length, 2);
   h.services.register("model.text", async () => '{"update":[],"add":[]}');
-  await h.contexts.collect({}); await h.plugin.whenIdle();
+  await h.plugin.whenIdle();
   assert.equal(h.plugin.getState().pendingFacts.length, 0);
   assert.equal(h.plugin.getState().extractedThrough, 2);
 });
@@ -235,10 +230,10 @@ test("text model service forwards cancellation and aborts retry backoff", async 
   let calls = 0;
   let requestSignal;
   const controller = new AbortController();
-  const chat = createChatService({
-    getConfig: () => ({ plugins: [{ name: "ai-conversation", ai: {
+  const chat = createConversation({
+    getConfig: () => ({ conversation: { ai: {
       endpoint: "https://model.example/v1", apiKey: "test-key", model: "test-model",
-    } }] }),
+    } } }),
     getExpressions: () => [], configureProxy: async () => {}, writeLog: () => {},
     logger: { ...quiet, warn: () => queueMicrotask(() => controller.abort()) },
     fetchImpl: async (_url, init) => {
@@ -249,10 +244,90 @@ test("text model service forwards cancellation and aborts retry backoff", async 
       return { ok: false, status: 503, text: async () => '{"error":{"message":"busy"}}' };
     },
   });
-  await assert.rejects(chat.callChatCompletions([{ role: "user", content: "summarize" }], {
+  await assert.rejects(chat.generateText([{ role: "user", content: "summarize" }], {
     signal: controller.signal,
   }), (error) => error === controller.signal.reason);
   assert.equal(requestSignal.aborted, true);
   assert.equal(requestSignal.reason, controller.signal.reason);
   assert.equal(calls, 1);
+});
+
+
+test("restoring a text service while stopped defers maintenance until restart, then disposal removes the observer", async (t) => {
+  const h = harness({ longTerm: { enabled: true, extractEveryNTurns: 2 } }, { longTerm: fakeDurable([]) });
+  t.after(() => h.plugin.dispose());
+  await h.record("one"); await h.record("two"); await h.plugin.whenIdle();
+  await h.plugin.stop();
+  let calls = 0;
+  const remove = h.services.register("model.text", async () => {
+    calls++;
+    return '{"update":[],"add":[]}';
+  });
+  await h.contexts.collect({}); await h.plugin.whenIdle();
+  assert.equal(calls, 0);
+  assert.equal(h.plugin.getState().pendingFacts.length, 2);
+  h.plugin.start();
+  await h.plugin.whenIdle();
+  assert.equal(calls, 1);
+  assert.equal(h.plugin.getState().pendingFacts.length, 0);
+  await h.plugin.dispose();
+  remove();
+  h.services.register("model.text", async () => { calls++; return "invalid"; });
+  await settle();
+  assert.equal(calls, 1);
+});
+
+test("reading context does not retry failed maintenance or consume pending dialogue", async (t) => {
+  const h = harness({ longTerm: { enabled: true, extractEveryNTurns: 1 } }, { longTerm: fakeDurable([]) });
+  t.after(() => h.plugin.dispose());
+  let calls = 0;
+  h.services.register("model.text", async () => { calls++; throw new Error("temporary failure"); });
+  await h.record("one"); await h.plugin.whenIdle();
+  assert.equal(calls, 1);
+  await h.contexts.collect({});
+  await h.contexts.collect({});
+  await h.plugin.whenIdle();
+  assert.equal(calls, 1);
+  assert.equal(h.plugin.getState().pendingFacts.length, 1);
+});
+
+test("memory and history use SQLite and leave old JSONL files untouched on startup and clear", async (t) => {
+  const { workStorage } = require("./helpers/workStorage");
+  const { createHistoryRepository } = require("../electron/plugins/dialogueHistory/repository");
+  const { createHistoryPlugin } = require("../electron/plugins/dialogueHistory");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pet-sqlite-only-"));
+  const logs = path.join(directory, "logs");
+  fs.mkdirSync(logs);
+  const files = [
+    ["memory.jsonl", JSON.stringify({ text: "旧文件里的记忆" }) + "\n"],
+    ["dialogue-history.jsonl", JSON.stringify({ petSaid: "旧文件里的回复" }) + "\n"],
+  ];
+  for (const [name, content] of files) fs.writeFileSync(path.join(logs, name), content);
+  const { db, storage } = workStorage();
+  const durable = longTerm.createLongTermStore(storage);
+  durable.appendBatch([{ text: "数据库中的记忆" }]);
+  const history = createHistoryRepository(storage);
+  history.append({ petSaid: "数据库中的回复", userSaid: "hello", summaries: {} });
+  const bus = new MessageBus({ logger: quiet });
+  const context = { bus, logger: quiet, paths: { projectRoot: directory },
+    config: { get: () => ({ plugins: [{ name: "memory", enabled: true, longTerm: { enabled: true } }] }) },
+    services: { get: () => storage },
+    decisionContext: { register: () => () => {} },
+    menu: { register: () => () => {}, refresh() {} }, ipc: { handle: () => () => {} },
+  };
+  const memoryPlugin = createMemoryPlugin(context);
+  const historyPlugin = createHistoryPlugin(context);
+  t.after(async () => {
+    await memoryPlugin.dispose();
+    historyPlugin.dispose();
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  assert.deepEqual(durable.list().map(({ text }) => text), ["数据库中的记忆"]);
+  assert.deepEqual(history.list().entries.map(({ petSaid }) => petSaid), ["数据库中的回复"]);
+  await memoryPlugin.clear();
+  assert.equal(durable.list().length, 0);
+  assert.equal(history.list().entries.length, 1);
+  for (const [name, content] of files) assert.equal(fs.readFileSync(path.join(logs, name), "utf8"), content);
+  assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name = 'legacy_imports'").get(), undefined);
 });

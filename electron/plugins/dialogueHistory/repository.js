@@ -73,20 +73,6 @@ function createHistoryRepository(storage) {
     return { entries, nextCursor: hasMore ? { t: last.t, sequence: last.sequence } : null };
   }
 
-  function importLegacy(sourcePath, logger) {
-    const imported = storage.importJsonl("dialogue-history", sourcePath, (entry, id) => {
-      if (!entry || typeof entry !== "object") return false;
-      return append({ ...entry, id, sessionId: "legacy-jsonl", metadata: { legacyImport: true } });
-    });
-    // Imported sessions represent past data, not the running application session.
-    if (!imported.missing) {
-      storage.prepare("UPDATE sessions SET ended_at = (SELECT MAX(created_at) FROM dialogue_turns WHERE session_id = sessions.id) WHERE id = 'legacy-jsonl'").run();
-      sessionIds.delete("legacy-jsonl");
-    }
-    if (!imported.missing && !imported.alreadyImported) logger.info(`legacy history imported=${imported.imported} skipped=${imported.skipped}`);
-    return imported;
-  }
-
   function endSessions() {
     storage.transaction(() => {
       const finish = storage.prepare("UPDATE sessions SET ended_at = ? WHERE id = ?");
@@ -94,7 +80,7 @@ function createHistoryRepository(storage) {
     });
   }
 
-  return { append, list, importLegacy, endSessions };
+  return { append, list, endSessions };
 }
 
 module.exports = { createHistoryRepository };

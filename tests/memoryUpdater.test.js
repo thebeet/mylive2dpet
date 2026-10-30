@@ -18,11 +18,12 @@ function database(t) {
 }
 function app(t, storage, repo, generate, options = {}) {
   const bus = new MessageBus({ logger: quiet });
-  const config = { plugins: [{ name: "memory", enabled: true, textService: "model.text",
+  const config = { plugins: [{ name: "memory", enabled: true,
     shortTerm: { maxTurns: 8, ttlMs: 5 }, longTerm: { enabled: true }, ...options }] };
   let clock = 1000;
   const plugin = createMemoryPlugin({ bus, config: { get: () => config }, logger: quiet,
-    services: { get: (name) => name === "model.text" ? generate : name === "storage-sqlite.database" ? storage : undefined },
+    model: { generateText: generate },
+    services: { get: (name) => name === "storage-sqlite.database" ? storage : undefined },
     decisionContext: { register: () => () => {} },
   }, { longTerm: repo, now: () => clock });
   t.after(() => plugin.dispose());
@@ -36,7 +37,7 @@ function app(t, storage, repo, generate, options = {}) {
   return { plugin, record, config };
 }
 
-test("20 dialogues reconcile all originals with existing facts despite recent expiry and obsolete summary settings", async (t) => {
+test("20 dialogues reconcile all originals with existing facts despite recent expiry", async (t) => {
   const { storage, repo } = database(t);
   repo.appendBatch([{ id: "coffee", text: "用户喜欢美式咖啡", type: "preference", importance: 5, createdAt: 50,
     metadata: { sourceEvidenceIds: ["original"], sourceProfileIds: ["portrait"] } }]);
@@ -51,7 +52,7 @@ test("20 dialogues reconcile all originals with existing facts despite recent ex
     const sourceTurnIds = [input.turns.at(-1).id];
     return JSON.stringify({ update: [{ id: "coffee", type: "preference", text: "用户喜欢咖啡，目前更偏爱拿铁", tags: ["咖啡"], importance: 4, sourceTurnIds }],
       add: [{ type: "preference", text: "用户偏好先看结论和操作步骤", tags: ["沟通"], importance: 4, sourceTurnIds }] });
-  }, { summary: { enabled: true, everyNTurns: 2, keepTurnsAfterSummary: 0 } });
+  });
   for (let i = 1; i < 20; i++) { await h.record(i); await h.plugin.whenIdle(); }
   assert.equal(calls, 0);
   assert.equal(repo.list().length, 1);

@@ -4,9 +4,13 @@ const { createDecisionResult } = require("../architecture/contracts");
 const { createPerceptionService } = require("../architecture/perceptionService");
 
 /** Drain queued observations as a batch when a decision is requested. */
-function registerDecisionModule(bus, { decide, perception = createPerceptionService(bus) } = {}) {
+function registerDecisionModule(bus, { decide, perception = createPerceptionService(bus),
+  presentDecision = async () => {} } = {}) {
   if (typeof decide !== "function") {
     throw new TypeError("decision module requires an injected decision provider");
+  }
+  if (typeof presentDecision !== "function") {
+    throw new TypeError("decision module requires a presentation function");
   }
   const sessionId = randomUUID();
   const sessionStartedAt = Date.now();
@@ -44,13 +48,26 @@ function registerDecisionModule(bus, { decide, perception = createPerceptionServ
       return;
     }
 
-    await bus.notify(EVENTS.DECISION_COMPLETED, {
+    const completed = {
       id, sessionId, sessionStartedAt, completedAt: Date.now(),
       trigger: request.trigger,
       observations,
       result,
-    });
-    await perception.release(observations, "completed");
+    };
+    // Recording is awaited explicitly before output, independent of registration order.
+    // A presentation failure cannot replay an already completed decision.
+    try {
+      await bus.notify(EVENTS.DECISION_COMPLETED, completed);
+      await presentDecision(completed);
+    } catch (error) {
+      await bus.notify(EVENTS.PIPELINE_FAILED, {
+        id, stage: "execution", trigger: request.trigger,
+        observationCount: observations.length, error,
+      });
+    } finally {
+      await perception.release(observations, "completed");
+    }
+
   }, { owner: "core:decision" });
 }
 

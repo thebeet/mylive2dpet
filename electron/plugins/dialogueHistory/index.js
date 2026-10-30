@@ -8,8 +8,6 @@ function createHistoryPlugin(context, dependencies = {}) {
   const storage = context.services.get(options.storageService || "storage-sqlite.database");
   if (!storage && !dependencies.repository) throw new Error("历史对话需要 SQLite 存储服务");
   const repository = dependencies.repository || createHistoryRepository(storage);
-  const legacyPath = path.resolve(context.paths?.projectRoot || path.resolve(__dirname, "../../.."), options.legacyPath || "logs/dialogue-history.jsonl");
-  repository.importLegacy?.(legacyPath, context.logger);
   let win = null;
   let running = true;
   let disposed = false;

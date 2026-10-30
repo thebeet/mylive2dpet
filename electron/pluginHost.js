@@ -5,12 +5,13 @@ const { createServiceRegistry } = require("./architecture/serviceRegistry");
 const { createContextProviders } = require("./architecture/contextProviders");
 const { planPlugins } = require("./architecture/pluginDependencies");
 const EVENTS = require("./architecture/events");
+const { isDeepStrictEqual } = require("node:util");
 
 /** Loads built-in plugins and supplies only the host capabilities they need. */
-function createPluginHost({ bus, getConfig, perception, decisions, requestDecision, screen, pet,
+function createPluginHost({ bus, getConfig, perception, model, requestDecision, screen, pet,
   paths = {}, windows = {}, dialogs = {}, ipc = {}, attention = {},
   services = createServiceRegistry(),
-  contextProviders = decisions?.contextProviders || createContextProviders(),
+  contextProviders = createContextProviders(),
   platform = process.platform, logger = console, definitions = pluginDefinitions }) {
   const active = new Map();
   const registrations = new Map();
@@ -22,6 +23,9 @@ function createPluginHost({ bus, getConfig, perception, decisions, requestDecisi
   let lifecycle = Promise.resolve();
   let disposal = null;
   let dependencyPlan = null;
+  let hostConfig = null;
+  let running = false;
+  const readConfig = () => hostConfig || getConfig();
 
   function serialize(operation) {
     const task = lifecycle.then(operation);
@@ -128,15 +132,24 @@ function createPluginHost({ bus, getConfig, perception, decisions, requestDecisi
         },
       },
       decisions: {
-        register: (decide) => {
-          assertAvailable();
-          return track(decisions.register(name, (...args) => { assertAvailable(); return decide(...args); }));
-        },
         request: (options = {}) => {
           assertAvailable();
           if (typeof requestDecision !== "function") throw new Error("decision scheduling unavailable");
           return requestDecision({ ...options, signal: options.signal
             ? AbortSignal.any([options.signal, scope.controller.signal]) : scope.controller.signal });
+        },
+      },
+      model: model && {
+        generateText: (messages, options = {}) => {
+          assertAvailable();
+          return model.generateText(messages, { ...options, signal: options.signal
+            ? AbortSignal.any([options.signal, scope.controller.signal]) : scope.controller.signal });
+        },
+        isAvailable: () => available() && model.isAvailable(),
+        getRevision: model.getRevision,
+        subscribe: (handler) => {
+          assertAvailable();
+          return track(model.subscribe(() => { if (available()) handler(); }));
         },
       },
       decisionContext: {
@@ -158,12 +171,18 @@ function createPluginHost({ bus, getConfig, perception, decisions, requestDecisi
           return track(services.register(`${name}.${serviceName}`, guarded));
         },
         get: (serviceName) => { assertNotDisposed(); return services.get(serviceName); },
+        subscribe: (handler) => {
+          assertAvailable();
+          return track(services.subscribe((event) => {
+            if (available()) handler(event);
+          }));
+        },
       },
       config: {
-        get: () => { assertNotDisposed(); return getConfig(); },
-        getPluginOptions: (pluginName, config = getConfig()) =>
+        get: () => { assertNotDisposed(); return readConfig(); },
+        getPluginOptions: (pluginName, config = readConfig()) =>
           getPlugin(config, pluginName) || {},
-        isPluginEnabled: (pluginName, config = getConfig()) =>
+        isPluginEnabled: (pluginName, config = readConfig()) =>
           isPluginEnabled(config, pluginName),
       },
       menu: {
@@ -197,102 +216,141 @@ function createPluginHost({ bus, getConfig, perception, decisions, requestDecisi
     };
   }
 
+  const dependencyValues = (definition, key, config) => typeof definition[key] === "function"
+    ? definition[key](config) : definition[key] || [];
+
+  function createPlan(config) {
+    const enabled = [];
+    const unavailable = new Map();
+    const ownedServices = new Set();
+    for (const definition of definitions) {
+      for (const snapshot of [hostConfig, config].filter(Boolean)) {
+        for (const service of dependencyValues(definition, "provides", snapshot)) ownedServices.add(service);
+      }
+      try {
+        if (definition.shouldLoad(config)) enabled.push(definition);
+        else unavailable.set(definition.name, { status: "disabled" });
+      } catch (error) {
+        unavailable.set(definition.name, { status: "failed", reason: error.message });
+        logFor(definition.name, "error", error);
+      }
+    }
+    // Existing plugin services must not hide missing providers or dependency order.
+    const plan = planPlugins(enabled, config, {
+      get: (service) => ownedServices.has(service) ? undefined : services.get(service),
+    });
+    for (const [name, reason] of plan.blocked) unavailable.set(name, { status: "blocked", reason });
+    return { ...plan, unavailable };
+  }
+
+  async function activatePlugins(plan) {
+    dependencyPlan = plan;
+    for (const [name, state] of plan.unavailable) {
+      states.set(name, state);
+      if (state.reason) logFor(name, "error", state.reason);
+    }
+    for (const definition of plan.ordered) {
+      if (disposing) break;
+      if (active.has(definition.name)) continue;
+      let handle;
+      try {
+        const missing = plan.required(definition).filter((service) => !services.get(service));
+        if (missing.length) {
+          const reason = `必需服务未加载: ${missing.join(", ")}`;
+          states.set(definition.name, { status: "blocked", reason }); logFor(definition.name, "error", reason); continue;
+        }
+        const plugin = definition.load();
+        if (typeof plugin.activate !== "function") {
+          throw new TypeError("plugin must export activate(context)");
+        }
+        handle = await plugin.activate(createContext(definition.name));
+        if (!handle || typeof handle !== "object") {
+          throw new TypeError("activate must return a lifecycle object");
+        }
+        for (const method of ["start", "stop", "dispose"]) {
+          if (handle[method] != null && typeof handle[method] !== "function") {
+            throw new TypeError(`plugin ${method} must be a function`);
+          }
+        }
+        active.set(definition.name, { handle, started: false, requires: plan.required(definition) });
+        scopes.get(definition.name).status = "active";
+        states.set(definition.name, { status: "active" });
+        logFor(definition.name, "info", "activated");
+      } catch (error) {
+        const scope = scopes.get(definition.name);
+        if (scope) { scope.status = "disposing"; scope.controller.abort(); }
+        try { if (typeof handle?.dispose === "function") await handle.dispose(); }
+        catch (rollbackError) { logFor(definition.name, "error", "activation rollback failed:", rollbackError); }
+        if (scope) scope.status = "disposed";
+        await cleanRegistrations(definition.name);
+        states.set(definition.name, { status: "failed", reason: error.message });
+        logFor(definition.name, "error", "activation failed:", error);
+      }
+    }
+  }
+
   function activate() {
     return serialize(async () => {
       if (activated || disposing || disposed) return;
       const config = getConfig();
+      const plan = createPlan(config);
+      hostConfig = config;
       activated = true;
-      const enabled = [];
-      for (const definition of definitions) {
-        try {
-          if (definition.shouldLoad(config)) enabled.push(definition);
-          else states.set(definition.name, { status: "disabled" });
-        } catch (error) { states.set(definition.name, { status: "failed", reason: error.message }); logFor(definition.name, "error", error); }
-      }
-      const plan = planPlugins(enabled, config, services);
-      dependencyPlan = plan;
-      for (const [name, reason] of plan.blocked) {
-        states.set(name, { status: "blocked", reason }); logFor(name, "error", reason);
-      }
-      for (const definition of plan.ordered) {
-        if (disposing) break;
-        let handle;
-        try {
-          const missing = plan.required(definition).filter((service) => !services.get(service));
-          if (missing.length) {
-            const reason = `必需服务未加载: ${missing.join(", ")}`;
-            states.set(definition.name, { status: "blocked", reason }); logFor(definition.name, "error", reason); continue;
-          }
-          const plugin = definition.load();
-          if (typeof plugin.activate !== "function") {
-            throw new TypeError("plugin must export activate(context)");
-          }
-          handle = await plugin.activate(createContext(definition.name));
-          if (!handle || typeof handle !== "object") {
-            throw new TypeError("activate must return a lifecycle object");
-          }
-          for (const method of ["start", "stop", "dispose"]) {
-            if (handle[method] != null && typeof handle[method] !== "function") {
-              throw new TypeError(`plugin ${method} must be a function`);
-            }
-          }
-          active.set(definition.name, { handle, started: false, requires: plan.required(definition) });
-          scopes.get(definition.name).status = "active";
-          states.set(definition.name, { status: "active" });
-          logFor(definition.name, "info", "activated");
-        } catch (error) {
-          const scope = scopes.get(definition.name);
-          if (scope) { scope.status = "disposing"; scope.controller.abort(); }
-          try { if (typeof handle?.dispose === "function") await handle.dispose(); }
-          catch (rollbackError) { logFor(definition.name, "error", "activation rollback failed:", rollbackError); }
-          if (scope) scope.status = "disposed";
-          await cleanRegistrations(definition.name);
-          states.set(definition.name, { status: "failed", reason: error.message });
-          logFor(definition.name, "error", "activation failed:", error);
-        }
-      }
+      await activatePlugins(plan);
     });
+  }
+
+  async function startPlugins() {
+    for (const { name } of dependencyPlan?.ordered || []) {
+      const record = active.get(name);
+      if (!record) continue;
+      if (disposing) break;
+      if (record.started) continue;
+      const missing = record.requires.filter((service) => {
+        const owner = dependencyPlan.owner(service);
+        return !services.get(service) || (owner && !active.get(owner)?.started);
+      });
+      if (missing.length) {
+        states.set(name, { status: "blocked", reason: `必需服务未启动: ${missing.join(", ")}` });
+        logFor(name, "error", "required services not running:", missing.join(", "));
+        continue;
+      }
+      try {
+        const scope = scopes.get(name);
+        if (scope.controller.signal.aborted) scope.controller = new AbortController();
+        scope.status = "starting";
+        await record.handle.start?.();
+        record.started = true;
+        scope.status = "running";
+        states.set(name, { status: "running" });
+      } catch (error) {
+        logFor(name, "error", "start failed:", error);
+        try { await record.handle.stop?.(); }
+        catch (stopError) { logFor(name, "error", "start rollback failed:", stopError); }
+        scopes.get(name).status = "stopped";
+        scopes.get(name).controller.abort();
+        states.set(name, { status: "failed", reason: error.message });
+      }
+    }
+    menuHooks.requestMenuRefresh();
   }
 
   function start() {
     return serialize(async () => {
       if (disposing || disposed) return;
-      for (const [name, record] of active) {
-        if (disposing) break;
-        if (record.started) continue;
-        const missing = record.requires.filter((service) => {
-          const owner = dependencyPlan.owner(service);
-          return !services.get(service) || (owner && !active.get(owner)?.started);
-        });
-        if (missing.length) {
-          states.set(name, { status: "blocked", reason: `必需服务未启动: ${missing.join(", ")}` });
-          logFor(name, "error", "required services not running:", missing.join(", "));
-          continue;
-        }
-        try {
-          const scope = scopes.get(name);
-          if (scope.controller.signal.aborted) scope.controller = new AbortController();
-          scope.status = "starting";
-          await record.handle.start?.();
-          record.started = true;
-          scope.status = "running";
-          states.set(name, { status: "running" });
-        } catch (error) {
-          logFor(name, "error", "start failed:", error);
-          try { await record.handle.stop?.(); }
-          catch (stopError) { logFor(name, "error", "start rollback failed:", stopError); }
-          scopes.get(name).status = "stopped";
-          scopes.get(name).controller.abort();
-          states.set(name, { status: "failed", reason: error.message });
-        }
-      }
-      menuHooks.requestMenuRefresh();
+      running = true;
+      await startPlugins();
     });
   }
 
-  async function stopAll() {
+  function reverseActiveOrder() {
+    return (dependencyPlan?.ordered || []).map(({ name }) => name).filter((name) => active.has(name)).reverse();
+  }
+
+  async function stopPlugins(names) {
     // Cancel every plugin before waiting; dependencies must not delay cancellation.
-    const tasks = [...active].reverse().map(async ([name, record]) => {
+    const tasks = names.map(async (name) => {
+      const record = active.get(name);
       record.started = false;
       const scope = scopes.get(name);
       scope.status = "stopping";
@@ -306,7 +364,64 @@ function createPluginHost({ bus, getConfig, perception, decisions, requestDecisi
   }
 
   function stop() {
-    return serialize(async () => { if (!disposed) await stopAll(); });
+    return serialize(async () => {
+      running = false;
+      if (!disposed) await stopPlugins(reverseActiveOrder());
+    });
+  }
+
+  async function disposePlugins(names) {
+    await stopPlugins(names);
+    for (const name of names) {
+      const { handle } = active.get(name);
+      const scope = scopes.get(name);
+      scope.status = "disposing";
+      try { await handle.dispose?.(); }
+      catch (error) { logFor(name, "error", "dispose failed:", error); }
+      finally {
+        scope.status = "disposed";
+        await cleanRegistrations(name);
+        active.delete(name);
+        scopes.delete(name);
+        states.set(name, { status: "disposed" });
+      }
+    }
+  }
+
+  function reload(config = getConfig()) {
+    return serialize(async () => {
+      if (!activated || disposing || disposed) return;
+      const plan = createPlan(config);
+      const affected = new Set();
+      for (const definition of definitions) {
+        const name = definition.name;
+        const wasAvailable = !dependencyPlan.unavailable.has(name);
+        const isAvailable = !plan.unavailable.has(name);
+        if (!isDeepStrictEqual(getPlugin(hostConfig, name), getPlugin(config, name)) ||
+            wasAvailable !== isAvailable) affected.add(name);
+      }
+      // Include transitive consumers of old and new required service providers.
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const definition of definitions) {
+          if (affected.has(definition.name)) continue;
+          const dependsOnAffected = [hostConfig, config].some((snapshot) =>
+            dependencyValues(definition, "requires", snapshot).some((service) =>
+              affected.has(dependencyPlan.owner(service)) || affected.has(plan.owner(service))));
+          if (dependsOnAffected) { affected.add(definition.name); changed = true; }
+        }
+      }
+      const names = reverseActiveOrder().filter((name) => affected.has(name));
+      for (const name of names) logFor(name, "info", "reloading after configuration change");
+      await disposePlugins(names);
+      if (disposing || disposed) return;
+      // Old instances finish cleanup against the configuration they were using.
+      hostConfig = config;
+      await activatePlugins(plan);
+      if (running) await startPlugins();
+      menuHooks.requestMenuRefresh();
+    });
   }
 
   function dispose() {
@@ -314,17 +429,8 @@ function createPluginHost({ bus, getConfig, perception, decisions, requestDecisi
     disposing = true;
     disposal = serialize(async () => {
       try {
-        await stopAll();
-        for (const [name, { handle }] of [...active].reverse()) {
-          scopes.get(name).status = "disposing";
-          try { await handle.dispose?.(); }
-          catch (error) { logFor(name, "error", "dispose failed:", error); }
-          finally {
-            scopes.get(name).status = "disposed";
-            await cleanRegistrations(name);
-            states.set(name, { status: "disposed" });
-          }
-        }
+        running = false;
+        await disposePlugins(reverseActiveOrder());
       } finally {
         active.clear();
         activated = false;
@@ -334,7 +440,7 @@ function createPluginHost({ bus, getConfig, perception, decisions, requestDecisi
     return disposal;
   }
 
-  return { activate, start, stop, dispose,
+  return { activate, start, stop, dispose, reload,
     getState: () => Object.fromEntries([...states].map(([name, state]) => [name, { ...state }])) };
 }
 

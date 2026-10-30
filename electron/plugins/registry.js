@@ -5,6 +5,7 @@
  * Note: these are Electron main-process plugins (Node fs/net/child_process).
  * They are NOT renderer modules under src/ — the Vite app only handles Live2D UI.
  */
+const { freeze } = require("../architecture/configValidation");
 
 /**
  * @param {object} [config]
@@ -26,4 +27,18 @@ function isPluginEnabled(config, name) {
   return !!(plugin && plugin.enabled !== false);
 }
 
-module.exports = { getPlugin, isPluginEnabled };
+// Validated snapshots are immutable. Normalize their runtime view once per plugin;
+// mutable raw configurations remain supported by standalone modules and tests.
+const optionViews = new WeakMap();
+function readPluginOptions(config, name, normalize) {
+  const plugin = getPlugin(config, name);
+  if (!plugin || !Object.isFrozen(plugin)) return normalize(plugin);
+  let views = optionViews.get(plugin);
+  if (!views) { views = new Map(); optionViews.set(plugin, views); }
+  if (!views.has(normalize)) {
+    views.set(normalize, freeze(normalize(plugin)));
+  }
+  return views.get(normalize);
+}
+
+module.exports = { getPlugin, isPluginEnabled, readPluginOptions };

@@ -1,6 +1,5 @@
-const { getPlugin } = require("../registry");
-function getOptions(config = {}) {
-  const plugin = getPlugin(config, "questions");
+const { readPluginOptions } = require("../registry");
+function normalizeOptions(plugin) {
   const defaults = { auto: true, dailyLimit: 0, cooldownMs: 0, deferMs: 1800000,
     minIdleSeconds: 8, maxIdleSeconds: 300, maxSkips: 3, pollMs: 15000, timeoutMs: 90000 };
   const result = { ...defaults, ...plugin, enabled: Boolean(plugin && plugin.enabled !== false) };
@@ -14,4 +13,8 @@ function getOptions(config = {}) {
   result.maxIdleSeconds = Math.max(result.minIdleSeconds, result.maxIdleSeconds);
   return result;
 }
-module.exports = { getOptions };
+function getOptions(config = {}) {
+  return readPluginOptions(config, "questions", normalizeOptions);
+}
+
+module.exports = { getOptions, normalizeOptions };
