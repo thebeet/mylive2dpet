@@ -49,7 +49,7 @@ function createPracticeMemory(context, { options, now = Date.now, isAvailable })
     context: query => available() ? repository().context(query, options().practice) : [],
     snapshot() {
       const storage = context.services.get(options().storageService);
-      if (!options().practice.enabled && (typeof storage?.prepare !== "function" || !storage.prepare("SELECT 1 FROM sqlite_master WHERE name='memory_practice_entries'").get())) {
+      if (!options().practice.enabled && !storage?.hasRepository("memory-practice")) {
         return { enabled: false, projects: [], lessons: [], sources: [], history: [], pending: 0 };
       }
       const repo = repository();
@@ -58,7 +58,7 @@ function createPracticeMemory(context, { options, now = Date.now, isAvailable })
     },
     clear() {
       const storage = context.services.get(options().storageService);
-      if (typeof storage?.prepare === "function" && storage.prepare("SELECT 1 FROM sqlite_master WHERE name='memory_practice_entries'").get()) repository().clear();
+      if (storage?.hasRepository("memory-practice")) repository().clear();
     },
   };
 }

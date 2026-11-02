@@ -23,7 +23,7 @@ function app(t, storage, repo, generate, options = {}) {
   let clock = 1000;
   const plugin = createMemoryPlugin({ bus, config: { get: () => config }, logger: quiet,
     model: { generateText: generate },
-    services: { get: (name) => name === "storage-sqlite.database" ? storage : undefined },
+    services: { get: (name) => name === "storage" ? storage : undefined },
     decisionContext: { register: () => () => {} },
   }, { longTerm: repo, now: () => clock });
   t.after(() => plugin.dispose());

@@ -1,6 +1,7 @@
 module.exports = Object.freeze({
   AI_REQUEST_STARTED: "ai.request.started",
   AI_REQUEST_FINISHED: "ai.request.finished",
+  RAW_LOG_CLEARED: "raw-log.cleared",
   PERCEPTION_OBSERVATION: "perception.observation",
   PERCEPTION_OBSERVATION_QUEUED: "perception.observation.queued",
   PERCEPTION_OBSERVATION_RELEASED: "perception.observation.released",

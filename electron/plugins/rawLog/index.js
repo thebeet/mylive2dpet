@@ -1,9 +1,12 @@
 const path = require("path");
 const EVENTS = require("../../architecture/events");
 const { createRawLogRepository } = require("./repository");
+const { createScreenshotReader } = require("./screenshots");
+const { clearRawLog } = require("./clear");
 
 function activate(context) {
-  const repository = createRawLogRepository(context.services.get("storage-sqlite.database"));
+  const storage = context.services.get("storage");
+  const repository = { ...createRawLogRepository(storage), ...createScreenshotReader(storage) };
   let win = null;
   let running = true;
   let disposed = false;
@@ -40,11 +43,11 @@ function activate(context) {
     context.bus.subscribe(EVENTS.AI_REQUEST_STARTED, (entry) => repository.append(entry), { allowWhileStopped: true }),
     context.bus.subscribe(EVENTS.AI_REQUEST_FINISHED, (entry) => repository.finish(entry), { allowWhileStopped: true }),
     context.menu.register(() => [{ label: "原始日志…", enabled: running && !disposed, click: show }]),
-    ...["list", "get"].map((method) => context.ipc.handle(method, (event, request) => {
+    ...["list", "get", "listGroups", "getGroup", "listScreenshots", "getScreenshot", "clear"].map((method) => context.ipc.handle(method, (event, request) => {
       if (!running || disposed || !win || win.isDestroyed() || event.sender !== win.webContents) {
         throw new Error("日志窗口已关闭或请求来源无效");
       }
-      return repository[method](request);
+      return method === "clear" ? clearRawLog(context, repository, storage) : repository[method](request);
     })),
   ];
   return {

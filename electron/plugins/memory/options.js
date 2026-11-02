@@ -1,4 +1,5 @@
 const { readPluginOptions } = require("../registry");
+const { storageService } = require("../../storage");
 const shortTerm = require("./shortTerm");
 const longTerm = require("./longTerm");
 
@@ -37,7 +38,7 @@ function normalizeOptions(plugin) {
 
   return {
     enabled: Boolean(plugin && plugin.enabled !== false),
-    storageService: String(plugin?.storageService || "storage-sqlite.database"),
+    storageService: storageService(plugin?.storageService),
     shortTerm: short,
     longTerm: long,
     work, practice,

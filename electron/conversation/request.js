@@ -8,7 +8,7 @@ function formatNowStamp(date = new Date()) {
 }
 
 /** Convert generic observations into this provider's supported text/image inputs. */
-function prepareObservations(observations, encodeImage) {
+function prepareObservations(observations, encodeImage, storage) {
   return observations.map((observation) => ({
     ...observation,
     content: observation.content.map((part) => {
@@ -17,6 +17,17 @@ function prepareObservations(observations, encodeImage) {
         throw observationError(`AI 对话插件不支持内容类型: ${part.type}`, observation.id);
       }
       if (part.uri && /^(https?:|data:image\/)/i.test(part.uri)) return part;
+      if (part.uri?.startsWith("storage://")) {
+        try {
+          const match = /^storage:\/\/([^/]+)\/([^/?#]+)$/.exec(part.uri);
+          if (!match) throw new Error("无效的 Storage 图片 URI");
+          const blob = storage?.blobs(decodeURIComponent(match[1])).get(decodeURIComponent(match[2]));
+          if (!blob) throw new Error("Storage 图片不存在或存储不可用");
+          return { ...part, storageUri: part.uri, uri: `data:image/jpeg;base64,${encodeImage(blob.data)}` };
+        } catch (error) {
+          throw observationError(`无法读取 Storage 图片观察: ${part.uri}`, observation.id, error);
+        }
+      }
       if (!part.path) throw observationError("图片观察缺少本地路径或图片 URL", observation.id);
       try {
         return { ...part, uri: `data:image/jpeg;base64,${encodeImage(part.path)}` };
@@ -72,5 +83,17 @@ function buildRequestBody(ai, systemPrompt, observations, context = [], history 
   };
 }
 
-module.exports = { buildRequestBody, prepareObservations, formatContext };
+/** Out-of-band log references; these fields must never enter the provider request. */
+function imageReferences(body, observations) {
+  const images = observations.flatMap(({ content }) => content.filter(part => part.type === "image"));
+  const messageIndex = body.messages.length - 1;
+  let imageIndex = 0;
+  return body.messages[messageIndex].content.flatMap((part, contentIndex) => {
+    if (part.type !== "image_url") return [];
+    const uri = images[imageIndex++]?.storageUri;
+    return uri ? [{ messageIndex, contentIndex, uri }] : [];
+  });
+}
+
+module.exports = { buildRequestBody, prepareObservations, formatContext, imageReferences };
 

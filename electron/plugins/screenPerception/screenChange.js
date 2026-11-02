@@ -54,10 +54,11 @@ function hammingDistance(a, b) {
   return d;
 }
 
-function hashFromPath(filePath, hashSize) {
-  const image = require("electron").nativeImage.createFromPath(filePath);
+function hashFromImage(input, hashSize) {
+  const { nativeImage } = require("electron");
+  const image = input instanceof Uint8Array ? nativeImage.createFromBuffer(Buffer.from(input)) : nativeImage.createFromPath(input);
   if (image.isEmpty()) {
-    throw new Error(`无法读取截图做哈希: ${filePath}`);
+    throw new Error("无法读取截图做哈希");
   }
   return computeDHash(image, hashSize);
 }
@@ -66,13 +67,13 @@ function createScreenChangeDetector() {
   let lastHash = null;
   /**
    * 与上一帧对比。首帧或 force 时视为有变化。
-   * @param {string} filePath
+   * @param {string|Uint8Array} input JPEG bytes or a legacy file path.
    * @param {{ force?: boolean, options?: object }} [opts]
    * @returns {{ changed: boolean, distance: number, threshold: number, hash: number[] }}
    */
-  function compareWithPrevious(filePath, opts = {}) {
+  function compareWithPrevious(input, opts = {}) {
     const { enabled, hashSize, threshold } = resolveOptions(opts.options);
-    const hash = hashFromPath(filePath, hashSize);
+    const hash = hashFromImage(input, hashSize);
 
     if (!enabled || opts.force || !lastHash) {
       const distance = lastHash ? hammingDistance(lastHash, hash) : -1;

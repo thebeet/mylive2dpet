@@ -180,7 +180,7 @@ test("memory keeps queued dialogues and existing facts through model disable and
     config: { get: () => ({ plugins: [{ name: "memory", enabled: true,
       work: { enabled: false }, practice: { enabled: false }, longTerm: { enabled: true },
     }] }) },
-    services: { get: (name) => name === "storage-sqlite.database" ? storage : undefined },
+    services: { get: (name) => name === "storage" ? storage : undefined },
     decisionContext: { register: () => () => {} },
   }, { longTerm: repo });
   t.after(async () => { await plugin.dispose(); db.close(); });

@@ -38,6 +38,18 @@ function createDatabase(filePath, { Database = require("better-sqlite3"), busyTi
     prepare(sql) { assertOpen(); return db.prepare(sql); },
     exec(sql) { assertOpen(); return db.exec(sql); },
     transaction,
+    compact() {
+      assertOpen();
+      if (db.inTransaction) throw new Error("SQLite compaction must run outside a transaction");
+      const checkpoint = () => {
+        const result = db.pragma("wal_checkpoint(TRUNCATE)");
+        if (result?.[0]?.busy) throw new Error("数据库正被其他连接使用，未能完成 WAL 合并，请稍后重新清理");
+      };
+      checkpoint();
+      db.exec("VACUUM");
+      checkpoint();
+      return { supported: true };
+    },
     migrate(namespace, migrations) {
       return transaction(() => {
         const version = db.prepare("SELECT version FROM schema_migrations WHERE namespace = ?")

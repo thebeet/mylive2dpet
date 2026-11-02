@@ -6,7 +6,7 @@
       "keepTurns": 4,
       "maxInputTokens": 50000,
       "hardInputTokens": 100000,
-      "summaryMaxTokens": 1600,
+      "summaryMaxTokens": 4096,
       "summaryMaxChars": 6000
     },
     "ai": {
@@ -57,7 +57,7 @@
     {
       "name": "dialogue-history",
       "enabled": true,
-      "storageService": "storage-sqlite.database"
+      "storageService": "storage"
     },
     {
       "name": "raw-log",
@@ -149,7 +149,7 @@
         "_comment": "每20次非静默对话，将完整待处理对话和现有长期记忆一起更新；优先修改已有条目，新增要求高价值且有明确来源"
       },
       "_comment": "统一记忆插件：enabled 控制整个插件；shortTerm/longTerm 可独立关闭。",
-      "storageService": "storage-sqlite.database",
+      "storageService": "storage",
       "work": {
         "enabled": true,
         "extractEveryNObservations": 3,

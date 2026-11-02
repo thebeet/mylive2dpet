@@ -11,6 +11,14 @@ let nextCursor = null;
 let selectedId = null;
 let selectionVersion = 0;
 let loading = false;
+let activeTab = "requests";
+let viewGeneration = 0, clearing = false;
+const screenshotsEl = document.getElementById("screenshots");
+const screenshotDetailEl = document.getElementById("screenshot-detail");
+const screenshotErrorEl = document.getElementById("screenshots-error");
+const screenshotsMoreEl = document.getElementById("screenshots-more");
+let screenshots = [], screenshotsCursor = null, selectedScreenshotId = null;
+let screenshotsLoading = false, screenshotSelectionVersion = 0;
 
 function addText(parent, tag, className, value) {
   const node = document.createElement(tag);
@@ -21,6 +29,7 @@ function addText(parent, tag, className, value) {
 }
 
 function statusText(entry) {
+  if (entry.requestCount != null) return `${entry.requestCount} 次请求${entry.pendingCount ? ` · ${entry.pendingCount} 次进行中` : ""}${entry.errorCount ? ` · ${entry.errorCount} 次失败` : ""}`;
   return entry.finishedAt === null ? "发送中…" : entry.error ? "失败" : "成功";
 }
 
@@ -35,7 +44,7 @@ function renderUsage(parent, usage, pending = false) {
 
 function renderList() {
   requestsEl.replaceChildren();
-  countEl.textContent = `已显示 ${entries.length} 次请求 · 每 2 秒自动更新`;
+  countEl.textContent = `已显示 ${entries.length} 个对话会话 / 文本请求 · 每 2 秒自动更新`;
   if (!entries.length) addText(requestsEl, "div", "empty", "还没有请求。下次发送给模型的完整内容会显示在这里。");
   let sessionId;
   for (const entry of entries) {
@@ -46,9 +55,10 @@ function renderList() {
     const button = document.createElement("button");
     button.className = "request";
     button.setAttribute("aria-pressed", String(entry.id === selectedId));
-    addText(button, "span", "", `#${entry.sequence} · ${labels[entry.label] || entry.label}`);
+    addText(button, "span", "", `#${entry.sequence} · ${entry.id.startsWith("conversation:") ? "对话会话" : labels[entry.label] || entry.label}`);
     addText(button, "time", "muted", new Date(entry.t).toLocaleString("zh-CN"));
     addText(button, "span", "muted", `${entry.model} · ${statusText(entry)}`);
+    if (entry.id.startsWith("conversation:")) addText(button, "span", "muted", `${entry.turnCount} 轮输入${entry.summaryCount ? ` · ${entry.summaryCount} 次汇总请求` : ""}`);
     renderUsage(button, entry.usage, entry.finishedAt === null);
     button.addEventListener("click", () => void select(entry));
     requestsEl.appendChild(button);
@@ -56,7 +66,7 @@ function renderList() {
   moreEl.hidden = !nextCursor;
 }
 
-function renderContent(parent, content) {
+function renderContent(parent, content, requestId, imagePreviews = {}, showImageFields = true) {
   if (typeof content === "string") {
     addText(parent, "div", "content", content);
     return;
@@ -70,34 +80,139 @@ function renderContent(parent, content) {
       addText(parent, "div", "content", typeof part === "string" ? part : part.text);
     } else if (part?.type === "image_url") {
       const url = part.image_url?.url || "";
-      if (/^data:image\/(jpeg|png|webp|gif);base64,/i.test(url)) {
+      const preview = imagePreviews[url];
+      const imageUrl = preview?.url || url;
+      if (/^data:image\/(jpeg|png|webp|gif);base64,/i.test(imageUrl)) {
         const image = document.createElement("img");
-        image.src = url;
-        image.alt = "本次发送给模型的图片";
+        image.src = imageUrl;
+        image.alt = part.logImageSource === "original" ? "保存的原始截图" : "本次发送给模型的图片";
         image.loading = "lazy";
         parent.appendChild(image);
+        if (part.logImageSource === "original") addText(parent, "div", "muted", "保存的原始截图；发送给模型前会缩放、压缩。日志引用原图，不重复保存编码图片。");
       } else {
-        addText(parent, "div", "content", `图片 URL：${url}`);
+        addText(parent, "div", "content", `图片 URL：${url}${preview?.error ? `（${preview.error}）` : ""}`);
+        if (url.startsWith("storage://") && requestId && !preview?.error) {
+          const holder = document.createElement("div");
+          const button = addText(holder, "button", "", "查看截图");
+          button.type = "button";
+          button.addEventListener("click", async () => {
+            button.disabled = true;
+            try {
+              const result = await window.rawLog.get(requestId);
+              if (!holder.isConnected) return;
+              holder.replaceChildren();
+              renderContent(holder, [part], undefined, result.imagePreviews || {}, false);
+            } catch (error) {
+              button.disabled = false;
+              addText(holder, "div", "error", `读取图片失败：${error.message || error}`);
+            }
+          });
+          parent.appendChild(holder);
+        }
       }
-      const detail = document.createElement("details");
-      addText(detail, "summary", "", "原始图片字段");
-      addText(detail, "div", "content", JSON.stringify(part, null, 2));
-      parent.appendChild(detail);
+      if (showImageFields) {
+        const detail = document.createElement("details");
+        addText(detail, "summary", "", "原始图片字段");
+        addText(detail, "div", "content", JSON.stringify(part, null, 2));
+        parent.appendChild(detail);
+      }
     } else {
       addText(parent, "div", "content", JSON.stringify(part, null, 2));
     }
   }
 }
 
-function renderMessage(message) {
+function renderMessage(message, parent = messagesEl, requestId, previews) {
   const card = document.createElement("article");
   card.className = "message";
   if (["user", "assistant"].includes(message.role)) card.classList.add(message.role);
   addText(card, "div", "role", `${roles[message.role] || message.role || "消息"}${message.name ? ` · ${message.name}` : ""}`);
-  renderContent(card, message.content);
+  renderContent(card, message.content, requestId, previews);
   const extra = Object.fromEntries(Object.entries(message).filter(([key]) => !["role", "content", "name"].includes(key)));
   if (Object.keys(extra).length) addText(card, "div", "content", JSON.stringify(extra, null, 2));
-  messagesEl.appendChild(card);
+  parent.appendChild(card);
+}
+
+function renderResponse(response, parent, requestId) {
+  if (!response) return;
+  if (response.choices?.length) {
+    for (const choice of response.choices) if (choice.message) renderMessage(choice.message, parent, requestId);
+  } else {
+    renderMessage({ role: "assistant", content: typeof response === "string" ? response : JSON.stringify(response, null, 2) }, parent, requestId);
+  }
+}
+
+function renderFullRequest(record, parent) {
+  const details = document.createElement("details");
+  details.className = "full-request";
+  details.dataset.key = `full:${record.id}`;
+  addText(details, "summary", "", `查看请求 #${record.sequence} 的完整消息与原始返回`);
+  const content = document.createElement("div");
+  content.className = "request-content";
+  details.appendChild(content);
+  let loaded = false, pending = false;
+  details.addEventListener("toggle", async () => {
+    if (!details.open || loaded || pending) return;
+    pending = true;
+    content.replaceChildren();
+    addText(content, "div", "muted", "正在读取…");
+    try {
+      const result = await window.rawLog.get(record.id);
+      if (!details.isConnected) return;
+      content.replaceChildren();
+      addText(content, "div", "content", JSON.stringify(record.parameters, null, 2));
+      for (const message of result.request.messages || []) renderMessage(message, content, record.id, result.imagePreviews);
+      if (result.response) addText(content, "div", "content", JSON.stringify(result.response, null, 2));
+      loaded = true;
+    } catch (error) {
+      content.replaceChildren();
+      addText(content, "div", "error", `读取请求失败：${error.message || error}`);
+    } finally { pending = false; }
+  });
+  parent.appendChild(details);
+}
+
+function renderGroup(result) {
+  messagesEl.replaceChildren();
+  if (result.initialMessages.length) {
+    const context = document.createElement("details");
+    context.className = "shared-context";
+    context.dataset.key = "context";
+    addText(context, "summary", "", "本会话的系统提示词与初始上下文");
+    for (const message of result.initialMessages) renderMessage(message, context);
+    messagesEl.appendChild(context);
+  }
+  const turns = new Map();
+  for (const record of result.entries) {
+    const key = record.conversation?.turnId || record.id;
+    if (!turns.has(key)) turns.set(key, []);
+    turns.get(key).push(record);
+  }
+  for (const records of turns.values()) {
+    const first = records[0];
+    const summary = first.conversation?.kind === "summary";
+    const section = document.createElement(summary ? "details" : "section");
+    section.className = summary ? "summary-request" : "conversation-turn";
+    if (summary) section.dataset.key = `summary:${first.id}`;
+    addText(section, summary ? "summary" : "div", summary ? "" : "role", summary ? "上下文汇总请求" :
+      first.conversation ? `第 ${first.conversation.turn} 轮 · ${new Date(first.t).toLocaleString("zh-CN")}` : `请求 #${first.sequence}`);
+    if (first.input) renderMessage(first.input, section, first.id);
+    for (let index = 0; index < records.length; index++) {
+      const record = records[index];
+      const attempt = document.createElement(records.length > 1 && index < records.length - 1 ? "details" : "div");
+      attempt.className = "attempt";
+      if (attempt.tagName === "DETAILS") attempt.dataset.key = `attempt:${record.id}`;
+      const elapsed = record.finishedAt === null ? "" : ` · ${Math.max(0, record.finishedAt - record.t)} ms`;
+      addText(attempt, attempt.tagName === "DETAILS" ? "summary" : "div", "muted",
+        `请求 #${record.sequence}${records.length > 1 ? ` · 第 ${index + 1} 次尝试` : ""} · ${statusText(record)}${record.status ? ` · HTTP ${record.status}` : ""}${elapsed}`);
+      renderUsage(attempt, record.usage, record.finishedAt === null);
+      renderResponse(record.response, attempt, record.id);
+      if (record.error) addText(attempt, "div", "error", record.error);
+      renderFullRequest(record, attempt);
+      section.appendChild(attempt);
+    }
+    messagesEl.appendChild(section);
+  }
 }
 
 async function select(entry, preserveScroll = false) {
@@ -105,41 +220,32 @@ async function select(entry, preserveScroll = false) {
   selectedId = entry.id;
   renderList();
   try {
-    const result = await window.rawLog.get(entry.id);
-    if (version !== selectionVersion) return;
+    const result = await window.rawLog.getGroup(entry.id);
+    if (version !== selectionVersion || activeTab !== "requests") return;
     errorEl.textContent = "";
     metaEl.replaceChildren();
-    const elapsed = entry.finishedAt === null ? "" : ` · ${Math.max(0, entry.finishedAt - entry.t)} ms`;
-    addText(metaEl, "div", "", `#${entry.sequence} · ${new Date(entry.t).toLocaleString("zh-CN")} · ${statusText(entry)}${entry.status ? ` · HTTP ${entry.status}` : ""}${elapsed}`);
-    renderUsage(metaEl, result.usage, entry.finishedAt === null);
-    const parameters = Object.fromEntries(Object.entries(result.request).filter(([key]) => key !== "messages"));
-    const details = document.createElement("details");
-    addText(details, "summary", "", "请求参数");
-    addText(details, "div", "content", JSON.stringify(parameters, null, 2));
-    metaEl.appendChild(details);
-    messagesEl.replaceChildren();
-    for (const message of result.request.messages || []) renderMessage(message);
-    if (result.response) {
-      addText(messagesEl, "div", "muted", "模型返回内容");
-      if (result.response.choices?.length) {
-        for (const choice of result.response.choices) if (choice.message) renderMessage(choice.message);
-      } else {
-        renderMessage({ role: "assistant", content: typeof result.response === "string" ? result.response : JSON.stringify(result.response, null, 2) });
-      }
-    }
-    if (entry.error) addText(messagesEl, "div", "error", entry.error);
-    if (!preserveScroll) document.querySelector("main").scrollTop = 0;
+    addText(metaEl, "div", "", `${entry.id.startsWith("conversation:") ? "对话会话" : "文本 / 历史请求"} #${entry.sequence} · ${new Date(entry.t).toLocaleString("zh-CN")} · ${statusText(entry)}`);
+    addText(metaEl, "div", "muted", "按轮次展示新增输入与回复；系统提示词和初始上下文只展示一次。完整请求可分别展开查看。");
+    renderUsage(metaEl, entry.usage, entry.finishedAt === null);
+    if (!entry.usageComplete) addText(metaEl, "div", "muted", "部分请求尚未提供用量，无法完整汇总的计数显示为未提供。");
+    const expanded = preserveScroll ? new Set([...messagesEl.querySelectorAll("details[open][data-key]")]
+      .map(details => details.dataset.key)) : new Set();
+    renderGroup(result);
+    for (const details of messagesEl.querySelectorAll("details[data-key]")) if (expanded.has(details.dataset.key)) details.open = true;
+    if (!preserveScroll) document.querySelector("#requests-panel main").scrollTop = 0;
   } catch (error) {
-    if (version === selectionVersion) errorEl.textContent = `读取请求失败：${error.message || error}`;
+    if (version === selectionVersion && activeTab === "requests") errorEl.textContent = `读取会话失败：${error.message || error}`;
   }
 }
 
 async function load(mode = "update") {
-  if (loading) return;
+  if (loading || clearing) return;
+  const epoch = viewGeneration;
   loading = true;
   moreEl.disabled = true;
   try {
-    const result = await window.rawLog.list({ before: mode === "more" ? nextCursor : null });
+    const result = await window.rawLog.listGroups({ before: mode === "more" ? nextCursor : null });
+    if (activeTab !== "requests" || epoch !== viewGeneration) return;
     const oldSelected = entries.find(({ id }) => id === selectedId);
     if (mode === "reset" || !entries.length) {
       entries = result.entries;
@@ -148,21 +254,203 @@ async function load(mode = "update") {
       const merged = new Map(entries.map((entry) => [entry.id, entry]));
       for (const entry of result.entries) merged.set(entry.id, entry);
       entries = [...merged.values()].sort((a, b) => b.sequence - a.sequence);
-      if (mode === "more") nextCursor = result.nextCursor;
+      if (mode === "more" || nextCursor === null) nextCursor = result.nextCursor;
     }
     errorEl.textContent = "";
     renderList();
     const selected = entries.find(({ id }) => id === selectedId) || entries[0];
-    if (selected && (!oldSelected || selected.id !== selectedId || selected.finishedAt !== oldSelected.finishedAt || mode === "reset")) {
-      await select(selected, mode === "update");
+    if (selected && (!oldSelected || selected.id !== selectedId || selected.updatedAt !== oldSelected.updatedAt || selected.revision !== oldSelected.revision || selected.pendingCount !== oldSelected.pendingCount || selected.errorCount !== oldSelected.errorCount || mode === "reset" || mode === "activate")) {
+      await select(selected, mode === "update" || mode === "activate");
     }
   } catch (error) {
-    errorEl.textContent = `读取日志失败：${error.message || error}`;
-  } finally { loading = false; moreEl.disabled = false; }
+    if (activeTab === "requests" && epoch === viewGeneration) errorEl.textContent = `读取日志失败：${error.message || error}`;
+  } finally { loading = false; moreEl.disabled = clearing; }
 }
 
-document.getElementById("refresh").addEventListener("click", () => void load("reset"));
+function screenshotTime(entry) {
+  return new Date(entry.metadata.capturedAt || entry.createdAt).toLocaleString("zh-CN");
+}
+
+function screenshotSize(size) {
+  return size >= 1024 * 1024 ? `${(size / (1024 * 1024)).toFixed(2)} MB` : `${(size / 1024).toFixed(1)} KB`;
+}
+
+function renderScreenshots() {
+  screenshotsEl.replaceChildren();
+  countEl.textContent = `已显示 ${screenshots.length} 张截图 · 每 2 秒自动更新`;
+  if (!screenshots.length) {
+    addText(screenshotsEl, "div", "empty", "暂无保存的截图。自动采集和手动保存的截图会显示在这里。");
+    screenshotDetailEl.replaceChildren();
+    addText(screenshotDetailEl, "div", "empty", "选择左侧截图，查看原图与分析摘要。");
+  }
+  for (const entry of screenshots) {
+    const button = document.createElement("button");
+    button.className = "request";
+    button.setAttribute("aria-pressed", String(entry.id === selectedScreenshotId));
+    addText(button, "time", "", screenshotTime(entry));
+    addText(button, "span", "muted", `${entry.metadata.manual ? "手动保存" : "自动采集"} · ${screenshotSize(entry.size)}`);
+    addText(button, "span", "muted", entry.metadata.analyses?.length ? `已分析 ${entry.metadata.analyses.length} 次` : "尚无分析摘要");
+    button.addEventListener("click", () => void selectScreenshot(entry));
+    screenshotsEl.appendChild(button);
+  }
+  screenshotsMoreEl.hidden = !screenshotsCursor;
+}
+
+async function selectScreenshot(entry, preserveScroll = false) {
+  const version = ++screenshotSelectionVersion;
+  selectedScreenshotId = entry.id;
+  renderScreenshots();
+  try {
+    const result = await window.rawLog.getScreenshot(entry.id);
+    if (version !== screenshotSelectionVersion || activeTab !== "screenshots") return;
+    screenshotErrorEl.textContent = "";
+    screenshotDetailEl.replaceChildren();
+    const metadata = result.metadata;
+    addText(screenshotDetailEl, "div", "muted", `${screenshotTime(result)} · ${metadata.manual ? "手动保存" : "自动采集"} · ${metadata.width || "?"} × ${metadata.height || "?"} · ${screenshotSize(result.size)}`);
+    const image = document.createElement("img");
+    image.src = result.imageUrl;
+    image.alt = `截图：${screenshotTime(result)}`;
+    screenshotDetailEl.appendChild(image);
+    for (const analysis of metadata.analyses || []) {
+      const card = document.createElement("article");
+      card.className = "message";
+      const count = analysis.screenshotIds?.length || 1;
+      addText(card, "div", "role", `分析时间 ${new Date(analysis.completedAt).toLocaleString("zh-CN")} · ${count > 1 ? `本批 ${count} 张截图的共同摘要` : "单张截图摘要"}`);
+      if (analysis.screenSummary) {
+        addText(card, "div", "muted", "画面摘要");
+        addText(card, "div", "content", analysis.screenSummary);
+      }
+      if (analysis.workSummary) {
+        addText(card, "div", "muted", "工作摘要");
+        addText(card, "div", "content", analysis.workSummary);
+      }
+      if (!analysis.screenSummary && !analysis.workSummary) addText(card, "div", "muted", "本次分析未返回摘要。");
+      screenshotDetailEl.appendChild(card);
+    }
+    if (!metadata.analyses?.length) addText(screenshotDetailEl, "div", "muted", "尚无分析摘要。手动保存、未送入模型或分析失败的截图可能没有摘要。");
+    const details = document.createElement("details");
+    addText(details, "summary", "", "截图信息");
+    addText(details, "div", "content", JSON.stringify({ id: result.id, uri: result.uri, size: result.size, createdAt: result.createdAt, ...metadata }, null, 2));
+    screenshotDetailEl.appendChild(details);
+    if (!preserveScroll) document.getElementById("screenshots-main").scrollTop = 0;
+  } catch (error) {
+    if (version === screenshotSelectionVersion && activeTab === "screenshots") {
+      screenshotDetailEl.replaceChildren();
+      screenshotErrorEl.textContent = `读取截图失败：${error.message || error}`;
+    }
+  }
+}
+
+async function loadScreenshots(mode = "update") {
+  if (screenshotsLoading || clearing) return;
+  const epoch = viewGeneration;
+  screenshotsLoading = true;
+  screenshotsMoreEl.disabled = true;
+  try {
+    const result = await window.rawLog.listScreenshots({ before: mode === "more" ? screenshotsCursor : null });
+    if (activeTab !== "screenshots" || epoch !== viewGeneration) return;
+    const oldSelected = screenshots.find(({ id }) => id === selectedScreenshotId);
+    if (mode === "reset" || !screenshots.length) {
+      screenshots = result.entries;
+      screenshotsCursor = result.nextCursor;
+    } else {
+      const merged = new Map(screenshots.map(entry => [entry.id, entry]));
+      for (const entry of result.entries) merged.set(entry.id, entry);
+      // Storage returns reverse insertion order; retain it even if capture clocks differ.
+      screenshots = mode === "more" ? [...merged.values()] : [
+        ...result.entries, ...screenshots.filter(entry => !result.entries.some(item => item.id === entry.id)),
+      ];
+      if (mode === "more" || screenshotsCursor === null) screenshotsCursor = result.nextCursor;
+    }
+    screenshotErrorEl.textContent = "";
+    renderScreenshots();
+    const selected = screenshots.find(({ id }) => id === selectedScreenshotId) || screenshots[0];
+    if (selected && (!oldSelected || selected.id !== selectedScreenshotId || mode === "reset" || mode === "activate" ||
+      JSON.stringify(selected.metadata) !== JSON.stringify(oldSelected.metadata))) {
+      await selectScreenshot(selected, mode === "update" || mode === "activate");
+    }
+  } catch (error) {
+    if (activeTab === "screenshots" && epoch === viewGeneration) screenshotErrorEl.textContent = `读取截图列表失败：${error.message || error}`;
+  } finally { screenshotsLoading = false; screenshotsMoreEl.disabled = clearing; }
+}
+
+function switchTab(tab) {
+  if (clearing) return;
+  activeTab = tab;
+  selectionVersion++;
+  screenshotSelectionVersion++;
+  for (const name of ["requests", "screenshots"]) {
+    const selected = name === tab;
+    const button = document.getElementById(`${name}-tab`);
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+    document.getElementById(`${name}-panel`).hidden = !selected;
+  }
+  if (tab === "screenshots") { renderScreenshots(); void loadScreenshots("activate"); }
+  else { renderList(); void load("activate"); }
+}
+
+for (const name of ["requests", "screenshots"]) {
+  const button = document.getElementById(`${name}-tab`);
+  button.addEventListener("click", () => switchTab(name));
+  button.addEventListener("keydown", event => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const target = event.key === "Home" ? "requests" : event.key === "End" ? "screenshots" : name === "requests" ? "screenshots" : "requests";
+    switchTab(target);
+    document.getElementById(`${target}-tab`).focus();
+  });
+}
+const refresh = mode => activeTab === "screenshots" ? loadScreenshots(mode) : load(mode);
+document.getElementById("refresh").addEventListener("click", () => void refresh("reset"));
 moreEl.addEventListener("click", () => void load("more"));
-const timer = setInterval(() => void load(), 2000);
+screenshotsMoreEl.addEventListener("click", () => void loadScreenshots("more"));
+const clearDialog = document.getElementById("clear-dialog");
+const clearStatusEl = document.getElementById("clear-status");
+const clearErrorEl = document.getElementById("clear-error");
+const clearConfirmEl = document.getElementById("clear-confirm");
+document.getElementById("clear").addEventListener("click", () => {
+  clearErrorEl.textContent = "";
+  clearDialog.showModal();
+  document.getElementById("clear-cancel").focus();
+});
+clearDialog.addEventListener("cancel", event => { if (clearing) event.preventDefault(); });
+document.getElementById("clear-form").addEventListener("submit", async event => {
+  if (event.submitter?.value !== "confirm") return;
+  event.preventDefault();
+  if (clearing) return;
+  clearing = true;
+  viewGeneration++;
+  selectionVersion++;
+  screenshotSelectionVersion++;
+  clearConfirmEl.textContent = "清理并压缩中…";
+  clearErrorEl.textContent = "";
+  const controls = ["clear", "clear-confirm", "clear-cancel", "refresh", "requests-tab", "screenshots-tab", "more", "screenshots-more"];
+  for (const id of controls) document.getElementById(id).disabled = true;
+  try {
+    const result = await window.rawLog.clear();
+    entries = []; nextCursor = null; selectedId = null;
+    screenshots = []; screenshotsCursor = null; selectedScreenshotId = null;
+    requestsEl.replaceChildren(); messagesEl.replaceChildren(); metaEl.replaceChildren();
+    screenshotsEl.replaceChildren(); screenshotDetailEl.replaceChildren();
+    errorEl.textContent = screenshotErrorEl.textContent = "";
+    moreEl.hidden = screenshotsMoreEl.hidden = true;
+    if (activeTab === "screenshots") renderScreenshots(); else renderList();
+    clearStatusEl.className = result.warnings?.length ? "error" : "muted";
+    clearStatusEl.textContent = `已清理 ${result.requests} 条请求日志、${result.screenshots} 张截图。` +
+      (result.compacted ? "数据库已压缩。" : "") +
+      (result.legacyLogs || result.legacyScreenshots ? `另清理 ${result.legacyLogs + result.legacyScreenshots} 个旧文件。` : "") +
+      (result.warnings?.length ? `\n${result.warnings.join("\n")}` : "");
+    clearDialog.close();
+  } catch (error) {
+    clearErrorEl.textContent = `清理失败：${error.message || error}`;
+  } finally {
+    clearing = false;
+    clearConfirmEl.textContent = "全部清理";
+    for (const id of controls) document.getElementById(id).disabled = false;
+    if (!clearDialog.open) void refresh("reset");
+  }
+});
+const timer = setInterval(() => void refresh("update"), 2000);
 window.addEventListener("beforeunload", () => clearInterval(timer));
 void load();

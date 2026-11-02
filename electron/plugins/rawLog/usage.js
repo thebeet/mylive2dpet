@@ -28,4 +28,12 @@ function responseUsage(response) {
   return normalizeUsage(response?.usage);
 }
 
-module.exports = { normalizeUsage, responseUsage };
+/** Missing counters stay unknown instead of understating a conversation's total. */
+function sumUsage(usages) {
+  if (!usages.length || !usages.some(Boolean)) return null;
+  const fields = ["inputTokens", "outputTokens", "totalTokens", "cachedTokens", "uncachedTokens", "cacheWriteTokens", "reasoningTokens"];
+  return Object.fromEntries(fields.map(field => [field, usages.every(usage => usage?.[field] != null)
+    ? usages.reduce((sum, usage) => sum + usage[field], 0) : null]));
+}
+
+module.exports = { normalizeUsage, responseUsage, sumUsage };

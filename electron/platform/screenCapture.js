@@ -1,12 +1,4 @@
 const { desktopCapturer, screen } = require("electron");
-const fs = require("fs");
-const path = require("path");
-
-const SCREENSHOTS_DIR = path.join(__dirname, "../../logs/screenshots");
-
-function ensureDir(directory) {
-  fs.mkdirSync(directory, { recursive: true });
-}
 
 /** 2026-10-10_00-53-12.jpg */
 function timestampFilename() {
@@ -22,15 +14,6 @@ function timestampFilename() {
     [pad(d.getHours()), pad(d.getMinutes()), pad(d.getSeconds())].join("-") +
     ".jpg";
   return name;
-}
-
-function uniqueJpgPath(filename, directory) {
-  const filePath = path.join(directory, filename);
-  if (!fs.existsSync(filePath)) return filePath;
-  return path.join(
-    directory,
-    filename.replace(/\.jpg$/, `_${Date.now() % 1000}.jpg`),
-  );
 }
 
 function pickSourceForDisplay(sources, display) {
@@ -51,11 +34,10 @@ function pickPrimarySource(sources, primary) {
 }
 
 /**
- * 截取主屏全屏，保存为 JPG，返回绝对路径。
+ * 截取主屏全屏，返回 JPEG 字节；持久化由感知插件通过 Storage 完成。
  */
 async function captureFullscreenToJpg(options = {}) {
-  const { quality = 25, directory = SCREENSHOTS_DIR } = typeof options === "number" ? { quality: options } : options;
-  ensureDir(directory);
+  const { quality = 25 } = typeof options === "number" ? { quality: options } : options;
 
   const primary = screen.getPrimaryDisplay();
   const { width, height } = primary.size;
@@ -78,18 +60,16 @@ async function captureFullscreenToJpg(options = {}) {
     throw new Error("屏幕缩略图为空，截图失败");
   }
 
-  const finalPath = uniqueJpgPath(timestampFilename(), directory);
-  fs.writeFileSync(finalPath, source.thumbnail.toJPEG(quality));
-
   return {
-    path: finalPath,
-    filename: path.basename(finalPath),
+    data: source.thumbnail.toJPEG(quality),
+    mimeType: "image/jpeg",
+    capturedAt: new Date().toISOString(),
+    filename: timestampFilename(),
     width: source.thumbnail.getSize().width,
     height: source.thumbnail.getSize().height,
   };
 }
 
 module.exports = {
-  SCREENSHOTS_DIR,
   captureFullscreenToJpg,
 };

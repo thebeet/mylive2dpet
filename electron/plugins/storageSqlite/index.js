@@ -1,6 +1,7 @@
 const path = require("path");
 const { getPlugin } = require("../registry");
 const { createDatabase } = require("./database");
+const { createSqliteBackend } = require("./backend");
 
 function activate(context) {
   const options = getPlugin(context.config.get(), "storage-sqlite") || {};
@@ -12,7 +13,7 @@ function activate(context) {
     busyTimeoutMs: Number.isFinite(rawTimeout) ? Math.max(0, Math.min(60000, Math.floor(rawTimeout))) : 5000,
   });
   let unregister;
-  try { unregister = context.services.register("database", database.api, { allowWhileStopped: true }); }
+  try { unregister = context.storage.registerBackend(createSqliteBackend(database.api)); }
   catch (error) { database.close(); throw error; }
   context.logger.info("database opened:", filePath);
   return {

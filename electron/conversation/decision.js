@@ -1,19 +1,21 @@
 const { buildSystemPrompt } = require("./prompt");
 const { extractChatPayload } = require("./parseChatText");
-const { buildRequestBody, prepareObservations } = require("./request");
+const { buildRequestBody, prepareObservations, imageReferences } = require("./request");
 const { sleep, isRetryableError, messageContentToText } = require("../llm/retry");
 const { resolveExpressions, createResponseFormat, unsupportedResponseFormat } = require("./output");
+const { randomUUID } = require("node:crypto");
 
 /** Pet dialogue policy; transport and text generation belong to the shared client. */
-function createConversationPolicy({ client, getOptions, getExpressions = () => [], logger = console, encodeImage, retryWait = sleep }) {
+function createConversationPolicy({ client, getOptions, getExpressions = () => [], logger = console, encodeImage, storage, retryWait = sleep }) {
   const MAX_RETRIES = 3;
   const RETRY_BASE_MS = 800;
   const encode = encodeImage || imageToBase64Jpeg;
   let negotiatedFormat = "json_schema";
-  function imageToBase64Jpeg(filePath, maxWidth = 1920, quality = 25) {
-    let image = require("electron").nativeImage.createFromPath(filePath);
+  function imageToBase64Jpeg(input, maxWidth = 1920, quality = 25) {
+    const { nativeImage } = require("electron");
+    let image = input instanceof Uint8Array ? nativeImage.createFromBuffer(Buffer.from(input)) : nativeImage.createFromPath(input);
     if (image.isEmpty()) {
-      throw new Error(`无法读取截图: ${filePath}`);
+      throw new Error("无法读取截图");
     }
     const { width } = image.getSize();
     if (width > maxWidth) {
@@ -26,7 +28,7 @@ function createConversationPolicy({ client, getOptions, getExpressions = () => [
    * Make a decision from queued observations produced by the perception module.
    * @param {Array<object>} observations Generic observations with text/image content.
    */
-  async function decideFromObservations(observations, { context = [], signal, history, refreshContext } = {}) {
+  async function decideFromObservations(observations, { context = [], signal, history, refreshContext, logGeneration } = {}) {
     signal?.throwIfAborted();
     if (!Array.isArray(observations) || observations.length === 0) {
       throw new Error("没有可用于决策的感知观察");
@@ -35,20 +37,22 @@ function createConversationPolicy({ client, getOptions, getExpressions = () => [
     const { ai, character } = getOptions();
     const expressions = resolveExpressions(getExpressions());
     signal?.throwIfAborted();
-    const inputs = prepareObservations(observations, encode);
+    const inputs = prepareObservations(observations, encode, storage);
     const systemPrompt = buildSystemPrompt(character, {
       expressions,
     });
     let prepared = history?.prepare(context);
     let body = buildRequestBody(ai, systemPrompt, inputs, history ? [] : context, prepared, expressions);
     if (history) {
-      if (await history.compact(context, body.messages, signal, refreshContext)) {
+      if (await history.compact(context, body.messages, signal, refreshContext, logGeneration)) {
         prepared = history.prepare(context);
         body = buildRequestBody(ai, systemPrompt, inputs, [], prepared, expressions);
       }
       history.assertBudget(body.messages);
     }
     let response = "";
+    const conversation = prepared ? { id: prepared.conversationId, kind: "turn", turn: prepared.turn,
+      turnId: randomUUID() } : undefined;
     let expression = "neutral";
     let screenSummary = "";
     let audioSummary = "";
@@ -67,7 +71,8 @@ function createConversationPolicy({ client, getOptions, getExpressions = () => [
           if (format) body.response_format = format;
           else delete body.response_format;
         }
-        const data = await client.complete(body, { signal, maxRetries: 0, label: "ai:vision" });
+        const data = await client.complete(body, { signal, maxRetries: 0, label: "ai:vision",
+          imageReferences: imageReferences(body, inputs), conversation, logGeneration });
 
         signal?.throwIfAborted();
         const choice = data?.choices?.[0];
@@ -134,7 +139,7 @@ function createConversationPolicy({ client, getOptions, getExpressions = () => [
 
   return {
     decideFromObservations: (observations, options = {}) => client.withBudget(
-      (signal) => decideFromObservations(observations, { ...options, signal }), options),
+      (signal, logGeneration) => decideFromObservations(observations, { ...options, signal, logGeneration }), options),
   };
 }
 

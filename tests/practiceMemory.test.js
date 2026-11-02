@@ -33,7 +33,7 @@ function app(t, generate, overrides = {}) {
   let clock = 1000, model = generate, provide;
   const plugin = createMemoryPlugin({ bus, config: { get: () => config }, logger: quiet,
     model: { get generateText() { return model; } },
-    services: { get: name => name === 'storage-sqlite.database' ? h.storage : undefined },
+    services: { get: name => name === 'storage' ? h.storage : undefined },
     decisionContext: { register: fn => { provide = fn; return () => {}; } },
   }, { now: () => clock });
   t.after(() => plugin.dispose());

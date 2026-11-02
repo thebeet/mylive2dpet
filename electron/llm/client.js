@@ -1,11 +1,11 @@
-const path = require("path");
 const { randomUUID } = require("crypto");
 const { withTimeout } = require("./timeout");
-const { createRotatingLog } = require("./log");
+const { createStorageLog } = require("../storage/log");
+const { getLogGeneration } = require("../storage/logLifecycle");
 const { sleep, isRetryableError, isRetryableStatus, messageContentToText } = require("./retry");
 
 /** Shared Chat Completions client; receives model settings without plugin dependencies. */
-function createModelClient({ getOptions, logger = console, fetchImpl, writeLog, onRequest, onResult, configureProxy }) {
+function createModelClient({ getOptions, logger = console, fetchImpl, writeLog, storage, onRequest, onResult, configureProxy }) {
   function getNetworkSession() {
     return require("electron").session.fromPartition("conversation");
   }
@@ -30,18 +30,21 @@ function createModelClient({ getOptions, logger = console, fetchImpl, writeLog, 
 
   const MAX_RETRIES = 3;
   const RETRY_BASE_MS = 800;
-  const OPENAI_LOG_PATH = path.join(__dirname, "../../logs/openai.jsonl");
-  const appendLog = writeLog || createRotatingLog(OPENAI_LOG_PATH);
+  const appendLog = writeLog || createStorageLog(storage);
   const sessionId = randomUUID();
+  function readLogGeneration() {
+    try { return getLogGeneration(storage); }
+    catch (error) { logger.warn("[ai:raw-log] generation unavailable:", error.message); return 0; }
+  }
 
   async function notifyLog(observer, entry) {
     try { await observer?.(entry); }
     catch (error) { logger.warn("[ai:raw-log] record failed:", error.message); }
   }
 
-  function appendOpenAiLog(entry) {
+  function appendOpenAiLog(entry, generation) {
     try {
-      appendLog(entry);
+      appendLog(entry, generation);
     } catch (err) {
       logger.warn(
         "[ai:log] write failed:",
@@ -56,6 +59,7 @@ function createModelClient({ getOptions, logger = console, fetchImpl, writeLog, 
    * @param {{ maxRetries?: number, label?: string, timeoutMs?: number }} [opts]
    */
   async function fetchChatJson(url, init, opts = {}) {
+    const logGeneration = opts.logGeneration ?? readLogGeneration();
     const maxRetries =
       Number.isFinite(opts.maxRetries) && opts.maxRetries >= 0
         ? Math.floor(opts.maxRetries)
@@ -76,7 +80,8 @@ function createModelClient({ getOptions, logger = console, fetchImpl, writeLog, 
           requestId = randomUUID();
           startedAt = Date.now();
           await notifyLog(onRequest, { id: requestId, sessionId, t: startedAt,
-            label, request: JSON.parse(init.body) });
+            label, request: JSON.parse(init.body), imageReferences: opts.imageReferences || [],
+            conversation: opts.conversation, logGeneration });
           signal.throwIfAborted();
           const res = await fetchChat(url, { ...init, signal });
           status = res.status;
@@ -96,7 +101,7 @@ function createModelClient({ getOptions, logger = console, fetchImpl, writeLog, 
             ok: false,
             status: res.status,
             body: text.slice(0, 4000),
-          });
+          }, logGeneration);
           const err = new Error(
             `API 返回非 JSON (${res.status}): ${text.slice(0, 200)}`,
           );
@@ -111,7 +116,7 @@ function createModelClient({ getOptions, logger = console, fetchImpl, writeLog, 
             ok: false,
             status: res.status,
             body: data,
-          });
+          }, logGeneration);
           const err = new Error(
             `API ${res.status}: ${data?.error?.message || text.slice(0, 200)}`,
           );
@@ -127,7 +132,7 @@ function createModelClient({ getOptions, logger = console, fetchImpl, writeLog, 
             data?.choices?.[0]?.message?.content,
           ).trim(),
           body: data,
-        });
+        }, logGeneration);
         await notifyLog(onResult, { id: requestId, status, response: data,
           finishedAt: Date.now(), error: "" });
         return data;
@@ -184,12 +189,16 @@ function createModelClient({ getOptions, logger = console, fetchImpl, writeLog, 
       const usage = data?.usage;
       const details = `model=${data?.model || ai.model}, finish_reason=${reason}, max_tokens=${maxTokens}, ` +
         `completion_tokens=${usage?.completion_tokens ?? "unknown"}, reasoning_tokens=${usage?.completion_tokens_details?.reasoning_tokens ?? "unknown"}`;
-      throw new Error(`${reason === "length" ? "AI 文本输出达到 token 上限，内容不完整；请增大 maxTokens" : "AI 文本接口返回空正文"}（${details}）`);
+      throw Object.assign(new Error(`${reason === "length" ? "AI 文本输出达到 token 上限，内容不完整；请增大 maxTokens" : "AI 文本接口返回空正文"}（${details}）`), {
+        code: reason === "length" ? "AI_OUTPUT_TRUNCATED" : "AI_EMPTY_OUTPUT",
+        retryable: false,
+      });
     }
     return text;
   }
 
   async function complete(body, opts = {}) {
+    opts = { ...opts, logGeneration: opts.logGeneration ?? readLogGeneration() };
     opts.signal?.throwIfAborted();
     const ai = getOptions();
     if (!ai?.endpoint || !ai?.apiKey || !ai?.model) {
@@ -204,16 +213,16 @@ function createModelClient({ getOptions, logger = console, fetchImpl, writeLog, 
     }, opts);
   }
 
-  function withBudget(operation, { signal, retryBudgetMs } = {}) {
+  function withBudget(operation, { signal, retryBudgetMs, logGeneration = readLogGeneration() } = {}) {
     const ai = getOptions();
-    return withTimeout(operation, { signal,
+    return withTimeout(signal => operation(signal, logGeneration), { signal,
       timeoutMs: Number(retryBudgetMs) > 0 ? Number(retryBudgetMs) : Number(ai.retryBudgetMs) || 360000,
       label: "AI 整轮请求" });
   }
 
   return { complete, withBudget,
     generateText: (messages, options = {}) => withBudget(
-      (signal) => callChatCompletions(messages, { ...options, signal }), options),
+      (signal, logGeneration) => callChatCompletions(messages, { ...options, signal, logGeneration }), options),
   };
 }
 

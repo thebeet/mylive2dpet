@@ -17,6 +17,7 @@ const { createScreenPerceptionPlugin } = require("../electron/plugins/screenPerc
 const { getOptions: getAiOptions } = require("../electron/conversation/options");
 const { getOptions: getScreenOptions } = require("../electron/plugins/screenPerception/options");
 const { petPayload } = require("./helpers/petPayload");
+const { workStorage } = require("./helpers/workStorage");
 
 const quiet = { info() {}, warn() {}, error() {} };
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -245,15 +246,15 @@ function screenHarness(overrides = {}) {
   const bus = new MessageBus();
   const perception = createPerceptionService(bus);
   const timers = new Map();
-  const removed = [];
+  const { db, storage } = workStorage();
   let nextTimer = 0;
   let getMenu;
   let captures = 0;
   let comparisons = 0;
   const context = {
-    bus, perception, logger: quiet,
+    bus, perception, storage, logger: quiet,
     config: { get: () => ({ plugins: [{ name: "screen-perception", enabled: true, interval_ms: 50 }] }) },
-    screen: { captureFullscreen: async () => ({ path: `/virtual/${++captures}.jpg`, filename: `${captures}.jpg` }) },
+    screen: { captureFullscreen: async () => ({ data: Buffer.from(`jpeg-${++captures}`), filename: `${captures}.jpg`, width: 1920, height: 1080 }) },
     menu: { register: (provider) => { getMenu = provider; return () => { getMenu = null; }; } },
     ...overrides,
   };
@@ -261,16 +262,15 @@ function screenHarness(overrides = {}) {
     detector: { reset() {}, compareWithPrevious: () => ({ changed: ++comparisons === 1, distance: 0, threshold: 4 }) },
     setInterval: (callback) => { timers.set(++nextTimer, callback); return nextTimer; },
     clearInterval: (id) => timers.delete(id),
-    removeFile: (imagePath) => removed.push(imagePath),
   };
   const plugin = createScreenPerceptionPlugin(context, dependencies);
-  return { bus, perception, plugin, timers, removed, getMenu: () => getMenu?.(),
+  return { bus, perception, plugin, timers, storage, db, getMenu: () => getMenu?.(),
     getCaptures: () => captures, getComparisons: () => comparisons };
 }
 
 test("screen plugin owns its cadence, skips unchanged images and keeps manual capture independent", async (t) => {
   const h = screenHarness();
-  t.after(() => h.plugin.dispose());
+  t.after(async () => { await h.plugin.dispose(); h.db.close(); });
   h.plugin.start();
   await settle();
   assert.equal(h.timers.size, 1);
@@ -281,12 +281,16 @@ test("screen plugin owns its cadence, skips unchanged images and keeps manual ca
   h.timers.values().next().value();
   await settle();
   assert.equal(h.bus.queueSize(EVENTS.PERCEPTION_OBSERVATION), 0);
-  assert.deepEqual(h.removed, ["/virtual/2.jpg"]);
+  assert.equal(h.storage.blobs("screenshots").list().entries.length, 1);
+  assert.ok(h.storage.blobs("screenshots").get(observation.metadata.screenshotId));
   const comparisons = h.getComparisons();
   assert.equal(h.getMenu(), undefined);
-  await h.perception.capture("screen", { trigger: "manual-capture", enqueue: false });
+  const manual = await h.perception.capture("screen", { trigger: "manual-capture", enqueue: false });
   assert.equal(h.getComparisons(), comparisons);
   assert.equal(h.getCaptures(), 3);
+  assert.equal(h.storage.blobs("screenshots").list().entries.length, 2);
+  assert.equal(h.storage.blobs("screenshots").get(manual.id).data.toString(), "jpeg-3");
+  assert.equal(manual.manual, true);
   assert.equal(h.bus.queueSize(EVENTS.PERCEPTION_OBSERVATION), 0);
   h.plugin.start();
   assert.equal(h.timers.size, 1);
@@ -300,14 +304,91 @@ test("stopping a visual source drops an unfinished periodic capture and disposal
   h.plugin.start();
   await settle();
   h.plugin.stop();
-  finishCapture({ path: "/virtual/stale.jpg" });
+  finishCapture({ data: Buffer.from("stale") });
   await settle();
   assert.equal(h.bus.queueSize(EVENTS.PERCEPTION_OBSERVATION), 0);
-  assert.deepEqual(h.removed, ["/virtual/stale.jpg"]);
-  h.plugin.dispose();
+  assert.equal(h.storage.blobs("screenshots").list().entries.length, 0);
+  await h.plugin.dispose();
+  h.db.close();
   assert.equal(h.perception.hasSource("screen"), false);
   assert.equal(h.getMenu(), undefined);
   await assert.rejects(h.perception.capture("screen"), /未加载/);
+});
+
+test("log cleanup drops a capture already in progress and subsequent captures can be saved", async t => {
+  let finishCapture, captures = 0;
+  const h = screenHarness({ screen: { captureFullscreen: () => ++captures === 1
+    ? new Promise(resolve => { finishCapture = resolve; })
+    : Promise.resolve({ data: Buffer.from("new-capture"), mimeType: "image/jpeg" }) } });
+  t.after(async () => { await h.plugin.dispose(); h.db.close(); });
+  h.plugin.start();
+  await settle();
+  const { createRawLogRepository } = require("../electron/plugins/rawLog/repository");
+  const { clearRawLog } = require("../electron/plugins/rawLog/clear");
+  await clearRawLog({ bus: h.bus, perception: h.perception }, createRawLogRepository(h.storage), h.storage);
+  finishCapture({ data: Buffer.from("old-capture"), mimeType: "image/jpeg" });
+  await settle();
+  assert.equal(h.storage.blobs("screenshots").list().entries.length, 0);
+  assert.equal(h.perception.pendingCount(), 0);
+  const fresh = await h.perception.capture("screen");
+  assert.equal(h.storage.blobs("screenshots").get(fresh.id).data.toString(), "new-capture");
+  assert.equal(h.perception.pendingCount(), 1);
+});
+
+test("persisted screenshots survive observation release and retain explicitly grouped model summaries", async t => {
+  const h = screenHarness();
+  t.after(async () => { await h.plugin.dispose(); h.db.close(); });
+  const first = await h.perception.capture("screen");
+  // A manual capture is persisted independently, and can later be analysed with another image.
+  const second = await h.perception.capture("screen", { enqueue: false });
+  const observations = await h.perception.takeBatch();
+  observations[0].content.push({ type: "image", uri: second.uri });
+  const event = { id: "decision-images", completedAt: 123, observations,
+    result: { summaries: { screen: "这批画面展示项目代码", work: "正在修改桌宠" } } };
+  await h.bus.notify(EVENTS.DECISION_COMPLETED, event);
+  await h.bus.notify(EVENTS.DECISION_COMPLETED, event);
+  await h.perception.release(observations, "completed");
+  await h.plugin.dispose();
+  for (const shot of [first, second]) {
+    const record = h.storage.blobs("screenshots").get(shot.id);
+    assert.ok(record.data.length);
+    assert.equal(record.metadata.analyses.length, 1);
+    assert.deepEqual(record.metadata.analyses[0], {
+      decisionId: "decision-images", completedAt: 123, screenshotIds: [first.id, second.id],
+      screenSummary: "这批画面展示项目代码", workSummary: "正在修改桌宠",
+    });
+    assert.equal(record.metadata.width, 1920);
+    assert.equal(record.metadata.height, 1080);
+  }
+  assert.equal(h.storage.blobs("screenshots").getMetadata(second.id).metadata.manual, true);
+});
+
+test("conversation reads Storage screenshot bytes, keeps their reference and does not resend old images", async t => {
+  const { db, storage } = workStorage(); t.after(() => db.close());
+  const image = storage.blobs("screenshots").put(Buffer.from("persisted-jpeg"));
+  const uri = `storage://screenshots/${image.id}`;
+  const calls = [], encoded = [];
+  const core = createConversation({ storage,
+    getConfig: () => ({ conversation: { ai: { endpoint: "https://test.invalid/v1", apiKey: "test", model: "test" } } }),
+    logger: quiet, writeLog() {}, configureProxy: async () => {},
+    encodeImage: data => { encoded.push(data); return data.toString("base64"); },
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body); calls.push(body);
+      const hasImages = body.messages.at(-1).content.some(part => part.type === "image_url");
+      return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: {
+        content: JSON.stringify(petPayload({ response: "reply", screenSummary: hasImages ? "项目代码" : "" })),
+      } }] }) };
+    },
+  });
+  t.after(() => core.dispose());
+  const result = await core.decideFromObservations([{ id: "stored-shot", source: "screen", content: [{ type: "image", uri }] }]);
+  assert.deepEqual(encoded, [Buffer.from("persisted-jpeg")]);
+  assert.equal(result.metadata.resources[0].uri, uri);
+  await core.decideFromObservations([textInput("next")]);
+  assert.ok(!JSON.stringify(calls[1]).includes("data:image/"));
+  storage.blobs("screenshots").delete(image.id);
+  await assert.rejects(core.decideFromObservations([{ id: "missing-shot", source: "screen", content: [{ type: "image", uri }] }]),
+    error => error.observationId === "missing-shot");
 });
 
 test("host registers context extensions and menus but cannot replace the core decision", async () => {
@@ -355,10 +436,13 @@ test("the core owns AI while the plugin manifest retains manual screenshot capab
   t.after(() => core.dispose());
   const services = createServiceRegistry();
   let captures = 0;
-  const host = createPluginHost({ bus, perception, model: core.model, services, getConfig: () => config, logger: quiet,
+  const stored = workStorage(); t.after(() => stored.db.close());
+  services.register("storage", stored.storage);
+  const host = createPluginHost({ bus, perception, model: core.model, services, storage: stored.core, getConfig: () => config, logger: quiet,
+    definitions: require("../electron/plugins/manifest").filter(item => item.name !== "storage-sqlite"),
     screen: { captureFullscreen: async () => {
       captures++;
-      return { path: "/virtual/manual.jpg", filename: "manual.jpg" };
+      return { data: Buffer.from("manual-jpeg"), filename: "manual.jpg", width: 100, height: 100 };
     } },
   });
   t.after(() => host.dispose());
@@ -367,7 +451,10 @@ test("the core owns AI while the plugin manifest retains manual screenshot capab
   assert.equal(services.get("ai-conversation.text"), undefined);
   assert.ok(perception.hasSource("screen"));
   assert.equal(captures, 0);
-  assert.equal((await perception.capture("screen", { enqueue: false })).path, "/virtual/manual.jpg");
+  const shot = await perception.capture("screen", { enqueue: false });
+  assert.equal(shot.filename, "manual.jpg");
+  assert.match(shot.uri, /^storage:\/\/screenshots\//);
+  assert.deepEqual(stored.storage.blobs("screenshots").get(shot.id).data, Buffer.from("manual-jpeg"));
   assert.equal(captures, 1);
   assert.equal(perception.pendingCount(), 0);
   await host.dispose();
@@ -452,5 +539,5 @@ test("practice-only memory is blocked before activation when its storage is miss
   t.after(() => host.dispose());
   await host.activate();
   assert.equal(host.getState().memory.status, "blocked");
-  assert.match(host.getState().memory.reason, /storage-sqlite.database/);
+  assert.match(host.getState().memory.reason, /storage/);
 });

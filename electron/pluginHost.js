@@ -5,12 +5,14 @@ const { createServiceRegistry } = require("./architecture/serviceRegistry");
 const { createContextProviders } = require("./architecture/contextProviders");
 const { planPlugins } = require("./architecture/pluginDependencies");
 const EVENTS = require("./architecture/events");
+const { createStorage } = require("./storage");
 const { isDeepStrictEqual } = require("node:util");
 
 /** Loads built-in plugins and supplies only the host capabilities they need. */
 function createPluginHost({ bus, getConfig, perception, model, requestDecision, screen, pet,
   paths = {}, windows = {}, dialogs = {}, ipc = {}, attention = {},
   services = createServiceRegistry(),
+  storage = createStorage({ services }),
   contextProviders = createContextProviders(),
   platform = process.platform, logger = console, definitions = pluginDefinitions }) {
   const active = new Map();
@@ -92,6 +94,29 @@ function createPluginHost({ bus, getConfig, perception, model, requestDecision, 
       bus: scopedBus,
       platform,
       paths,
+      storage: {
+        ...Object.fromEntries(Object.entries(storage.api).map(([key, value]) => [key,
+          (...args) => {
+            assertNotDisposed();
+            const result = value(...args);
+            if (!["repository", "collection", "blobs"].includes(key)) return result;
+            return new Proxy(result, { get(target, property) {
+              const item = Reflect.get(target, property, target);
+              return typeof item === "function" ? (...input) => { assertNotDisposed(); return item.apply(target, input); } : item;
+            } });
+          }])),
+        subscribe: (listener) => {
+          assertAvailable();
+          return track(storage.api.subscribe(event => { if (available()) listener(event); }));
+        },
+        registerBackend: (backend) => {
+          assertAvailable();
+          if (!dependencyValues(definitions.find(definition => definition.name === name), "provides", readConfig()).includes("storage")) {
+            throw new Error(`插件未声明 Storage 提供能力: ${name}`);
+          }
+          return track(storage.registerBackend(backend));
+        },
+      },
       attention: { getIdleSeconds: () => { assertAvailable(); return attention.getIdleSeconds?.(); } },
       windows: {
         create: (options) => {

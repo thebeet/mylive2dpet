@@ -2,11 +2,12 @@ const path = require("path");
 const EVENTS = require("../../architecture/events");
 const { getPlugin } = require("../registry");
 const { createHistoryRepository } = require("./repository");
+const { storageService } = require("../../storage");
 
 function createHistoryPlugin(context, dependencies = {}) {
   const options = getPlugin(context.config.get(), "dialogue-history") || {};
-  const storage = context.services.get(options.storageService || "storage-sqlite.database");
-  if (!storage && !dependencies.repository) throw new Error("历史对话需要 SQLite 存储服务");
+  const storage = context.services.get(storageService(options.storageService));
+  if (!storage && !dependencies.repository) throw new Error("历史对话需要 Storage 存储服务");
   const repository = dependencies.repository || createHistoryRepository(storage);
   let win = null;
   let running = true;

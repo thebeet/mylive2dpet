@@ -1,4 +1,5 @@
 const { getPlugin } = require("../registry");
+const { storageService } = require("../../storage");
 module.exports = {
   name: "dialogue-history",
   normalizeOptions(plugin) {
@@ -7,9 +8,9 @@ module.exports = {
         throw new Error(`不支持的历史对话配置字段: ${key}`);
       }
     }
-    return plugin;
+    return { ...plugin, storageService: storageService(plugin.storageService) };
   },
-  requires: (config) => [getPlugin(config, "dialogue-history")?.storageService || "storage-sqlite.database"],
+  requires: (config) => [storageService(getPlugin(config, "dialogue-history")?.storageService)],
   shouldLoad: (config) => getPlugin(config, "dialogue-history")?.enabled !== false,
   load: () => require("./index"),
 };

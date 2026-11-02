@@ -9,9 +9,9 @@ const { petPayload } = require("./helpers/petPayload");
 
 const quiet = { info() {}, warn() {}, error() {} };
 const settle = () => new Promise((resolve) => setImmediate(resolve));
-const response = (content, usage) => {
+const response = (content, usage, finishReason) => {
   try { const parsed = JSON.parse(content); if (Object.hasOwn(parsed, "response")) content = JSON.stringify(petPayload(parsed)); } catch {}
-  return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content } }], usage }) };
+  return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content }, finish_reason: finishReason }], usage }) };
 };
 const observation = (text, images = 0) => ({ source: "manual-input", role: "user", capturedAt: "2026-10-30T01:00:00Z",
   content: [{ type: "text", text }, ...Array.from({ length: images }, (_, i) => ({ type: "image", path: `/shot-${text}-${i}.jpg` }))] });
@@ -52,6 +52,88 @@ test("all current images are sent; stable text history grows without resending o
   assert.deepEqual(calls[1].messages.slice(0, -1), calls[2].messages.slice(0, calls[1].messages.length - 1));
   assert.deepEqual(calls.map(({ messages }) => messages.filter(({ role }) => role === "assistant").length), [0, 1, 2]);
   assert.ok(!calls[0].messages[1].content[0].text.includes("当前时间"));
+});
+
+test("raw logs share a context ID across turns, attach summary to the old segment and rotate only after compaction", async t => {
+  const starts = [];
+  const { conversation, calls } = harness(t, { history: { maxTurns: 3, keepTurns: 1 }, onRequest: entry => starts.push(entry) });
+  for (let i = 1; i <= 4; i++) await conversation.decideFromObservations([observation(`turn-${i}`)]);
+  const first = starts[0].conversation.id;
+  assert.deepEqual(starts.slice(0, 3).map(entry => entry.conversation.id), [first, first, first]);
+  assert.deepEqual(starts.slice(0, 3).map(entry => entry.conversation.turn), [1, 2, 3]);
+  assert.equal(new Set(starts.slice(0, 3).map(entry => entry.conversation.turnId)).size, 3);
+  assert.deepEqual(starts[3].conversation, { id: first, kind: "summary" });
+  assert.notEqual(starts[4].conversation.id, first);
+  assert.equal(starts[4].conversation.turn, 1);
+  for (const call of calls) {
+    assert.equal(call.conversation, undefined);
+    assert.equal(call.conversationId, undefined);
+    assert.equal(call.turnId, undefined);
+  }
+  conversation.clearHistory();
+  await conversation.decideFromObservations([observation("fresh")]);
+  assert.notEqual(starts.at(-1).conversation.id, starts[4].conversation.id);
+  assert.equal(starts.at(-1).conversation.turn, 1);
+});
+
+test("failed summaries keep the same logged context and request retries keep the same turn identity", async t => {
+  const starts = [];
+  let failFirst = true;
+  const { conversation } = harness(t, { history: { maxTurns: 2, keepTurns: 1 },
+    onRequest: entry => starts.push(entry), retryWait: async () => {},
+    fetchImpl: async body => {
+      if (failFirst) {
+        failFirst = false;
+        return { ok: false, status: 503, text: async () => '{"error":{"message":"retry"}}' };
+      }
+      return response(isSummary(body) ? 'invalid-json' : '{"response":"reply","expression":"neutral"}');
+    },
+  });
+  for (let i = 1; i <= 3; i++) await conversation.decideFromObservations([observation(`turn-${i}`)]);
+  assert.equal(new Set(starts.map(entry => entry.conversation.id)).size, 1);
+  assert.deepEqual(starts[0].conversation, starts[1].conversation);
+  assert.notEqual(starts[0].id, starts[1].id);
+  assert.equal(starts.at(-1).conversation.turn, 3);
+  assert.equal(starts.filter(entry => entry.conversation.kind === "summary").length, 1);
+});
+
+test("cleanup during summary retries keeps the entire old decision out of new logs without clearing dialogue history", async t => {
+  const { workStorage } = require("./helpers/workStorage");
+  const { createRawLogRepository } = require("../electron/plugins/rawLog/repository");
+  const { db, storage } = workStorage();
+  t.after(() => db.close());
+  const repository = createRawLogRepository(storage), starts = [];
+  let summaries = 0;
+  const { conversation } = harness(t, { storage, writeLog: undefined, history: { maxTurns: 2, keepTurns: 1 },
+    onRequest: entry => { starts.push(entry); repository.append(entry); }, onResult: entry => repository.finish(entry),
+    fetchImpl: async body => {
+      if (isSummary(body)) {
+        if (++summaries === 1) { repository.clear(); return response('partial', undefined, 'length'); }
+        return response('{"summary":"保留对话主题"}');
+      }
+      return response('{"response":"reply","expression":"neutral"}');
+    },
+  });
+  for (let i = 1; i <= 3; i++) await conversation.decideFromObservations([observation(`turn-${i}`)]);
+  assert.equal(summaries, 2);
+  assert.ok(starts.every(entry => entry.logGeneration === 0));
+  assert.equal(repository.list().entries.length, 0);
+  assert.equal(storage.collection("core.ai-log").list().length, 0);
+  await conversation.generateText([{ role: "user", content: "new request" }]);
+  assert.equal(starts.at(-1).logGeneration, 1);
+  assert.equal(repository.list().entries.length, 1);
+});
+
+test("context provider changes and model reconfiguration create new logged conversation segments", async t => {
+  const starts = [], providers = createContextProviders({ logger: quiet });
+  const { conversation } = harness(t, { contextProviders: providers, onRequest: entry => starts.push(entry) });
+  await conversation.decideFromObservations([observation("first")]);
+  providers.register("new-provider", () => []);
+  await conversation.decideFromObservations([observation("changed-provider")]);
+  assert.notEqual(starts[0].conversation.id, starts[1].conversation.id);
+  await conversation.reconfigure({ conversation: { ai: { endpoint: "https://test.invalid/v1", model: "other", apiKey: "test" } } });
+  await conversation.decideFromObservations([observation("changed-model")]);
+  assert.notEqual(starts[1].conversation.id, starts[2].conversation.id);
 });
 
 test("changed retrieval blocks are not appended again within the same conversation segment", async (t) => {
@@ -169,6 +251,68 @@ test("repeated summary failures stop history growth at the hard ceiling without 
   assert.equal(calls.at(-1).messages.filter(({ role }) => role === "assistant").length, 0);
 });
 
+test("truncated summaries increase their budget, recover at the hard ceiling and reuse the successful budget", async (t) => {
+  let recover = false;
+  const { conversation, calls } = harness(t, { history: { maxTurns: 2, keepTurns: 1, summaryMaxTokens: 1600 },
+    fetchImpl: async (body) => {
+      if (!isSummary(body)) return response('{"response":"reply","expression":"neutral"}');
+      if (!recover) return response('invalid-json');
+      if (body.max_tokens < 4096) return response('{"summary":"partial', { completion_tokens: 1600 }, 'length');
+      return response('{"summary":"保留用户约束和未完成事项"}');
+    },
+  });
+  for (let i = 1; i <= 4; i++) await conversation.decideFromObservations([observation(`turn-${i}`)]);
+  recover = true;
+  const start = calls.length;
+  await conversation.decideFromObservations([observation("turn-5")]);
+  const retried = calls.slice(start).filter(isSummary);
+  assert.deepEqual(retried.map(body => body.max_tokens), [1600, 4096]);
+  assert.deepEqual(retried[0].messages[1], retried[1].messages[1]);
+  assert.match(JSON.stringify(calls.at(-1).messages), /保留用户约束/);
+  assert.ok(!JSON.stringify(calls.at(-1).messages).includes('partial'));
+  assert.equal(calls.at(-1).messages.filter(m => m.role === 'assistant').length, 1);
+  await conversation.decideFromObservations([observation("turn-6")]);
+  assert.equal(calls.filter(isSummary).at(-1).max_tokens, 4096);
+});
+
+test("summary truncation retries are bounded and preserve history when even the larger budgets fail", async (t) => {
+  const { conversation, calls } = harness(t, { history: { maxTurns: 2, keepTurns: 1 },
+    fetchImpl: async body => isSummary(body)
+      ? response('{"summary":"partial', undefined, 'length')
+      : response('{"response":"reply","expression":"neutral"}'),
+  });
+  await conversation.decideFromObservations([observation("turn-1")]);
+  await conversation.decideFromObservations([observation("turn-2")]);
+  await conversation.decideFromObservations([observation("turn-3")]);
+  assert.deepEqual(calls.filter(isSummary).map(body => body.max_tokens), [4096, 8192, 16384]);
+  assert.equal(calls.at(-1).messages.filter(m => m.role === 'assistant').length, 2);
+  assert.match(JSON.stringify(calls.at(-1).messages), /turn-1/);
+  assert.ok(!JSON.stringify(calls.at(-1).messages).includes('partial'));
+});
+
+test("clearing history during an increased-budget summary cancels it and rejects late results", async (t) => {
+  let pending;
+  const { conversation, calls } = harness(t, { history: { maxTurns: 2, keepTurns: 1 },
+    fetchImpl: async (body, init) => {
+      if (!isSummary(body)) return response('{"response":"reply","expression":"neutral"}');
+      if (body.max_tokens === 4096) return response('partial', undefined, 'length');
+      return new Promise(resolve => { pending = { init, resolve }; });
+    },
+  });
+  for (let i = 1; i <= 2; i++) await conversation.decideFromObservations([observation(`turn-${i}`)]);
+  const rejected = assert.rejects(conversation.decideFromObservations([observation('turn-3')]), /记忆已清空/);
+  await settle();
+  assert.ok(pending);
+  conversation.clearHistory();
+  await rejected;
+  assert.equal(pending.init.signal.aborted, true);
+  pending.resolve(response('{"summary":"迟到的旧摘要"}'));
+  await settle();
+  await conversation.decideFromObservations([observation('fresh')]);
+  assert.ok(!JSON.stringify(calls.at(-1)).includes('迟到的旧摘要'));
+  assert.equal(calls.at(-1).messages.filter(m => m.role === 'assistant').length, 0);
+});
+
 test("memory clear cancels an in-flight summary and a late result cannot restore history", async (t) => {
   const bus = new MessageBus({ logger: quiet });
   let pending;
@@ -223,6 +367,7 @@ test("history budgets validate configuration and provide immutable defaults for 
   assert.equal(defaults.keepTurns, 4);
   assert.equal(defaults.maxInputTokens, 50000);
   assert.equal(defaults.hardInputTokens, 100000);
+  assert.equal(defaults.summaryMaxTokens, 4096);
   assert.ok(Object.isFrozen(defaults));
   for (const history of [[], { maxTurns: 1 }, { maxTurns: 3, keepTurns: 3 },
     { hardInputTokens: 50000 }, { summaryMaxTokens: 0 }, { maxInputTokens: "invalid" }]) {

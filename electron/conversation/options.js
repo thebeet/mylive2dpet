@@ -20,7 +20,7 @@ function normalizeOptions(input = {}) {
   for (const [key, fallback, min, max] of [
     ["maxTurns", 32, 2, 200], ["keepTurns", 4, 1, 199],
     ["maxInputTokens", 50000, 1000, 1000000], ["hardInputTokens", 100000, 1000, 1000000],
-    ["summaryMaxTokens", 1600, 128, 16384], ["summaryMaxChars", 6000, 256, 64000],
+    ["summaryMaxTokens", 4096, 128, 16384], ["summaryMaxChars", 6000, 256, 64000],
   ]) history[key] = number(input.history?.[key], fallback, min, max, `conversation.history.${key}`);
   if (history.keepTurns >= history.maxTurns) throw new Error("conversation.history.keepTurns 必须小于 maxTurns");
   if (history.hardInputTokens <= history.maxInputTokens) throw new Error("conversation.history.hardInputTokens 必须大于 maxInputTokens");

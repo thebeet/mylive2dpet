@@ -254,7 +254,7 @@ test("question history preserves every display and response across reopening and
 
 function memoryHarness(storage, generate, clock = Date.now) {
   const bus = new MessageBus({ logger: quiet });
-  const services = new Map([["storage-sqlite.database", storage], ["model.text", generate]]);
+  const services = new Map([["storage", storage], ["model.text", generate]]);
   const config = { plugins: [{ name: "memory", enabled: true,
     longTerm: { enabled: false }, work: { enabled: true, extractEveryNObservations: 1 } }] };
   let provide;

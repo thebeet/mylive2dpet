@@ -1,5 +1,7 @@
 const { DatabaseSync } = require("node:sqlite");
 const { EventEmitter } = require("node:events");
+const { createStorage } = require("../../electron/storage");
+const { createSqliteBackend } = require("../../electron/plugins/storageSqlite/backend");
 
 function workStorage() {
   const db = new DatabaseSync(":memory:");
@@ -22,7 +24,10 @@ function workStorage() {
       });
     },
   };
-  return { db, storage };
+  const core = createStorage();
+  core.registerBackend(createSqliteBackend(storage));
+  // Raw SQL is available only to adapter tests for fault injection and schema inspection.
+  return { db, storage: Object.assign({}, storage, core.api), core };
 }
 
 function mockWindows() {

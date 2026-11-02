@@ -24,7 +24,7 @@ function createConversation({ getConfig, getExpressions, contextProviders = crea
   function createSession(snapshot) {
     const client = createModelClient({ ...dependencies, logger, getOptions: () => snapshot.ai });
     const policy = createConversationPolicy({ client, getOptions: () => snapshot,
-      getExpressions, logger, encodeImage: dependencies.encodeImage, retryWait: dependencies.retryWait });
+      getExpressions, logger, encodeImage: dependencies.encodeImage, storage: dependencies.storage, retryWait: dependencies.retryWait });
     const history = createConversationHistory({ options: () => snapshot.history, client, logger });
     return { client, policy, history, decisionQueue: Promise.resolve(), contextRevision: contextProviders.getRevision?.() };
   }

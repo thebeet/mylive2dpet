@@ -15,17 +15,34 @@
     button { color: inherit; font: inherit; border: 1px solid #ffffff22; border-radius: 8px; background: #ffffff08; padding: 8px 12px; cursor: pointer; }
     button:hover { background: #ffffff14; }
     button:disabled { opacity: .5; cursor: default; }
+    .actions { display: flex; gap: 8px; }
+    .danger { color: #ffb0bb; border-color: #ff718544; }
+    dialog { color: inherit; background: #181d28; border: 1px solid #ffffff22; border-radius: 12px; padding: 24px; max-width: 440px; }
+    dialog::backdrop { background: #0009; }
+    dialog h2 { margin-top: 0; font-size: 18px; }
+    dialog p { line-height: 1.8; }
+    dialog .actions { justify-content: flex-end; margin-top: 20px; }
+    #clear-status:empty, #clear-error:empty { display: none; }
+    [hidden] { display: none !important; }
+    .tabs { display: flex; gap: 8px; padding: 12px 24px; border-bottom: 1px solid #ffffff18; }
+    .tabs button[aria-selected=true] { background: #7760bf36; border-color: #a88de8; }
     .layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 270px 1fr; }
     aside { overflow: auto; padding: 12px; border-right: 1px solid #ffffff18; }
-    #requests { display: grid; gap: 8px; }
+    #requests, #screenshots { display: grid; gap: 8px; }
     .request { text-align: left; width: 100%; display: grid; gap: 5px; }
     .request[aria-pressed=true] { background: #7760bf36; border-color: #a88de8; }
     .usage-summary { display: block; font-size: 12px; color: #b9c9db; line-height: 1.6; }
     .session { color: #a6a9b8; font-size: 12px; margin: 12px 0 2px; overflow-wrap: anywhere; }
-    #more { width: 100%; margin-top: 12px; }
+    #more, #screenshots-more { width: 100%; margin-top: 12px; }
     main { overflow: auto; padding: 22px; }
     #meta { margin-bottom: 18px; color: #a6a9b8; line-height: 1.7; overflow-wrap: anywhere; }
     #messages { display: flex; flex-direction: column; gap: 16px; }
+    .conversation-turn, .request-content { display: flex; flex-direction: column; gap: 12px; }
+    .conversation-turn { padding: 14px 0; border-top: 1px solid #ffffff18; }
+    .attempt { display: flex; flex-direction: column; gap: 8px; }
+    details.attempt { display: block; }
+    .full-request, .shared-context, .summary-request { padding: 12px; border: 1px solid #ffffff18; border-radius: 8px; }
+    .shared-context > .message { margin-top: 12px; }
     .message { width: 92%; border-radius: 12px; background: #ffffff08; border: 1px solid #ffffff14; padding: 14px 16px; }
     .message.user { align-self: flex-end; background: #5469b429; }
     .message.assistant { background: #32685429; }
@@ -38,17 +55,39 @@
     .error { color: #ff9eae; white-space: pre-wrap; overflow-wrap: anywhere; }
     .empty { color: #a6a9b8; padding: 36px 0; line-height: 1.8; }
     #error:empty { display: none; }
+    #screenshots-error:empty { display: none; }
+    #screenshot-detail { display: grid; gap: 16px; }
+    #screenshot-detail > img { width: 100%; max-height: 65vh; background: #0004; }
+    #screenshot-detail .message { width: 100%; }
   </style>
 </head>
 <body>
   <header>
-    <div><h1>OpenAI 原始日志</h1><div id="count">正在读取…</div></div>
-    <button id="refresh" type="button">刷新</button>
+    <div><h1>OpenAI 原始日志</h1><div id="count">正在读取…</div><div id="clear-status" class="muted" role="status"></div></div>
+    <div class="actions"><button id="refresh" type="button">刷新</button><button id="clear" class="danger" type="button">清理日志与截图</button></div>
   </header>
-  <div class="layout">
-    <aside aria-label="请求列表"><div id="requests"></div><button id="more" type="button" hidden>加载更早的请求</button></aside>
+  <nav class="tabs" role="tablist" aria-label="日志类型">
+    <button id="requests-tab" type="button" role="tab" aria-selected="true" aria-controls="requests-panel">请求日志</button>
+    <button id="screenshots-tab" type="button" role="tab" aria-selected="false" aria-controls="screenshots-panel" tabindex="-1">截图</button>
+  </nav>
+  <div id="requests-panel" class="layout" role="tabpanel" aria-labelledby="requests-tab">
+    <aside aria-label="对话会话与文本请求列表"><div id="requests"></div><button id="more" type="button" hidden>加载更早的会话 / 请求</button></aside>
     <main><div id="error" class="error" role="alert"></div><div id="meta"></div><section id="messages" aria-label="请求消息"></section></main>
   </div>
+  <div id="screenshots-panel" class="layout" role="tabpanel" aria-labelledby="screenshots-tab" hidden>
+    <aside aria-label="截图列表"><div id="screenshots"></div><button id="screenshots-more" type="button" hidden>加载更早的截图</button></aside>
+    <main id="screenshots-main"><div id="screenshots-error" class="error" role="alert"></div><section id="screenshot-detail" aria-label="截图详情"></section></main>
+  </div>
+  <dialog id="clear-dialog" aria-labelledby="clear-title">
+    <form method="dialog" id="clear-form">
+      <h2 id="clear-title">清理全部日志与截图？</h2>
+      <p>将永久删除已有原始请求日志、AI 诊断日志、截图及其摘要，以及旧版日志与截图文件。</p>
+      <p class="muted">记忆和对话历史会保留。清理后继续记录新日志和截图。</p>
+      <p class="muted">清理后自动压缩数据库以释放磁盘空间，期间应用可能暂时无响应，请等待完成。</p>
+      <div id="clear-error" class="error" role="alert"></div>
+      <div class="actions"><button id="clear-cancel" value="cancel" type="submit">取消</button><button id="clear-confirm" class="danger" value="confirm" type="submit">全部清理</button></div>
+    </form>
+  </dialog>
   <script src="window.js"></script>
 </body>
 </html>

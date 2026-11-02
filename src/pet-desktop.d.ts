@@ -15,7 +15,11 @@ declare global {
       moveWindow: (dx: number, dy: number) => void;
       forcePaint: () => void;
       captureScreenshot: () => Promise<{
-        path: string;
+        id: string;
+        uri: string;
+        size: number;
+        mimeType: string;
+        capturedAt: string;
         filename: string;
         width: number;
         height: number;

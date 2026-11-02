@@ -103,7 +103,7 @@ function createWorkMemory(context, { options, now = Date.now, isAvailable }) {
       if (store) store.clear();
       else {
         const storage = context.services.get(options().storageService);
-        if (storage?.prepare("SELECT 1 FROM sqlite_master WHERE name = 'work_evidence'").get()) createWorkStore(storage, { now }).clear();
+        if (storage?.hasRepository("work-memory")) createWorkStore(storage, { now }).clear();
       }
     },
   };

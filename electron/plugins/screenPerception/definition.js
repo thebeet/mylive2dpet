@@ -2,6 +2,7 @@ const { normalizeOptions } = require("./options");
 const { validateOptions } = require("../../architecture/configValidation");
 module.exports = {
   name: "screen-perception",
+  requires: ["storage"],
   defaultConfig: true,
   normalizeOptions(plugin) {
     validateOptions(plugin, { objects: ["changeDetect"], toggles: ["changeDetect"], capture: true });

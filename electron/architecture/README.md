@@ -21,7 +21,7 @@
 
 `observations` 配置默认总容量 128、每批 16、回队重试 2 次；来源配额为视觉 6、音频 20、手动输入 100，其它来源默认 32。补充观察达到容量时淘汰最旧补充项；用户消息容量不足时提交直接报错，输入窗口保留文本。回队不会淘汰已接收的用户消息，因此故障恢复时队列最多额外保留一个在途批次。失败记录在进程内最多保留 100 条，可通过核心 `perception.getRejected()` 查询；`pipeline.failed` 带有回队和拒绝数量。
 
-生产者通过 `perception.submit()`、`discard()` 操作观察。核心取批、完成、过期、失败或丢弃观察时发布 `perception.observation.released`，资源所有者据此释放文件。视觉观察默认有效期 60 秒，自动截图写入 `userData/cache/screen-perception/`，由视觉插件追踪和删除；启动时清理该临时目录的遗留 JPG。手动保存截图仍写入 `logs/screenshots/`。以前该目录中的文件不自动删除。
+生产者通过 `perception.submit()`、`discard()` 操作观察。核心取批、完成、过期、失败或丢弃观察时发布 `perception.observation.released`，资源所有者据此释放文件。视觉观察默认有效期60秒。自动和手动截图通过核心 Storage 的 `screenshots` 二进制命名空间保存，不再写临时 JPG；观察完成、过期、丢弃或插件重载仅释放队列，不删除已存截图。自动截图先检测变化，哈希距离严格大于 changeDetect.threshold 才保存并入队，未超过阈值则仅更新检测基准并发布跳过事件；首帧保存，关闭变化检测时全部保存。手动保存截图跳过检测、直接保存且不入队。旧目录里的截图文件保留。
 
 `decisionScheduler.js` 独立管理串行请求、间隔计时和等待者取消，不使用轮询。忙碌期间相同 trigger 的等待请求合并为下一轮；即使关闭自动决策，批次剩余的用户消息仍会触发后续决策。自动感知的剩余观察遵循配置间隔。停止时取消等待者和在途决策，应用等待调度器与插件完成清理后退出。
 
@@ -75,7 +75,7 @@ context.decisionContext.register(async () => [
 
 manifest 使用 `provides`、`requires`、`optional` 声明服务，字段可以是数组或读取配置的函数。宿主按依赖排序，检测缺失服务和循环，并在启动时检查必需依赖是否已启动。失败不会阻止无关插件加载；`pluginHost.getState()` 返回每个插件的状态和不可用原因。存储关闭前，依赖插件先完成卸载。
 
-停止后的插件菜单隐藏，旧菜单回调不再执行，IPC、观察提交、来源捕获、决策请求和新注册被拒绝；停止期间的普通订阅不执行，卸载后已被总线取出的订阅快照也不会执行。用于清理文件或维护播放状态的订阅可以显式设置 `{ allowWhileStopped: true }`。服务函数和对象方法也受生命周期检查；SQLite 服务显式允许停止期间访问，供依赖插件收尾。窗口由拥有它的插件在停止时关闭，宿主在卸载时兜底销毁。
+停止后的插件菜单隐藏，旧菜单回调不再执行，IPC、观察提交、来源捕获、决策请求和新注册被拒绝；停止期间的普通订阅不执行，卸载后已被总线取出的订阅快照也不会执行。用于清理文件或维护播放状态的订阅可以显式设置 `{ allowWhileStopped: true }`。服务函数和对象方法也受生命周期检查；核心 Storage 在停止期间仍允许访问，供依赖插件收尾；卸载后旧句柄失效。窗口由拥有它的插件在停止时关闭，宿主在卸载时兜底销毁。
 
 菜单通过 `context.menu.register()` 挂载，通过 `context.menu.refresh()` 请求刷新。来源插件通过 `context.perception.registerSource(name, capture)` 注册可主动调用的来源，宿主通过 `perception.capture(name, request)` 调用。底层 Electron 截图适配器 `electron/platform/screenCapture.js` 通过 `context.screen.captureFullscreen()` 提供给视觉插件。
 
@@ -121,11 +121,11 @@ electron/
         ├── options.js             # 插件配置默认值与校验
         ├── shortTerm.js           # 实例缓冲与快照压缩
         ├── context.js             # 近期对话格式化和记忆上下文块
-        ├── longTerm.js            # SQLite 存储与检索
+        ├── longTerm.js            # Storage 仓库入口与纯文本检索工具
         └── extractor.js           # 长期事实提取
 ```
 
-测试直接引用插件内的实现。全屏采集由宿主注入视觉插件，插件为自动截图指定临时目录，手动截图使用项目根目录的 `logs/screenshots/`。
+测试直接引用插件内的实现。全屏采集由宿主注入视觉插件，采集返回 JPEG 字节，视觉插件通过 Storage 保存原图，并生成 `storage://screenshots/<id>` 观察引用；模型请求从 Storage 读取字节，旧图片不进入多轮历史。
 
 ## 上下文与通用服务
 
@@ -143,9 +143,9 @@ AI 对话请求的 `system` 仅包含角色设定、固定行为/记忆使用规
 
 宿主统一追踪总线订阅、菜单、来源、上下文、服务、模型及服务变化监听的注册清理函数。激活失败会回滚已注册能力，卸载时也会清理残留注册项。
 
-## SQLite 存储与历史插件
+## 核心 Storage 与 SQLite 后端
 
-`storage-sqlite` 默认启用，使用 `better-sqlite3`；`path` 默认为 Electron `userData` 目录下的 `pet.sqlite3`，相对路径以 `userData` 为基准，绝对路径直接使用。数据库路径和服务选择在激活时确定，配置变化后自动重载存储及其必需依赖消费者。启用外键、WAL 和锁等待超时，数据库连接保持到依赖插件全部卸载后再执行检查点并关闭。
+`storage-sqlite` 默认启用，使用 `better-sqlite3`；`path` 默认为 Electron `userData` 目录下的 `pet.sqlite3`，相对路径以 `userData` 为基准，绝对路径直接使用。数据库路径在激活时确定，消费者始终使用核心 Storage，配置变化后自动重载存储及其必需依赖消费者。启用外键、WAL 和锁等待超时，数据库连接保持到依赖插件全部卸载后再执行检查点并关闭。
 
 ```json
 {
@@ -153,20 +153,20 @@ AI 对话请求的 `system` 仅包含角色设定、固定行为/记忆使用规
     { "name": "manual-input", "enabled": true },
     { "name": "storage-sqlite", "enabled": true, "path": "pet.sqlite3", "busyTimeoutMs": 5000 },
     { "name": "dialogue-history", "enabled": true,
-      "storageService": "storage-sqlite.database" }
+      "storageService": "storage" }
   ]
 }
 ```
 
 核心提供 `context.paths`、`context.windows.create(options)` 和自动清理的 `context.ipc.handle(channel, handler)`。IPC 通道自动加上插件命名空间。历史窗口只通过自己的 preload 调用 `dialogue-history:list`，插件验证发送窗口身份；主进程不包含历史窗口、菜单或读取路由，宿主不再提供 `context.history`。
 
-存储插件注册 `storage-sqlite.database`，提供同步的 `prepare`、`exec`、`transaction`和 `migrate`。事务回调必须同步。历史与记忆各自维护表结构和迁移版本：`sessions` 保存应用会话时间，`dialogue_turns` 保存用户文本、回复、表情、通用摘要、来源和决策 ID，`memory_entries` 保存事实、标签、重要性及提取批次的来源决策/会话 ID。来源 ID 表示提取时覆盖的回合集合，不代表模型已精确定位每条事实的出处；记忆插件可以独立于历史插件运行。
+核心 `electron/storage` 定义 [Storage 契约](../storage/README.md)，存储插件通过 `context.storage.registerBackend(backend)` 提供实现，依赖服务统一为 `storage`。消费者使用 `context.storage.collection(namespace)` 的 JSON 键值接口或 `repository(name, options)` 的业务仓库，不接触 SQL、驱动或表结构。`transaction(work)` 支持跨仓库及命名空间的同步原子操作；仓库方法和事务回调必须同步，异步返回会明确报错。已有 `storageService=storage-sqlite.database` 自动标准化为 `storage`。SQLite 的 `prepare`、`exec`、`migrate` 仅在后端内部使用，各仓库维护原有表结构和迁移版本：`sessions` 保存应用会话时间，`dialogue_turns` 保存用户文本、回复、表情、通用摘要、来源和决策 ID，`memory_entries` 保存事实、标签、重要性及提取批次的来源决策/会话 ID。来源 ID 表示提取时覆盖的回合集合，不代表模型已精确定位每条事实的出处；记忆插件可以独立于历史插件运行。
 
 历史记录来自核心验证后的 `decision.completed`，与决策实现无关。事件携带统一的 `id`、`sessionId`、`sessionStartedAt` 和 `completedAt`。历史按时间和序号倒序分页，默认每页 100 条，窗口支持搜索用户输入和回复；搜索使用文字包含匹配。来源摘要保存在通用 `summaries` 中。
 
 长期记忆使用标准化文本唯一索引去重，保留旧的相似文本检查及中文分词/评分规则；SQLite 不执行语义检索。每批提取结果的插入和超限清理在同一事务中完成。`memory.longTerm.maxEntries` 继续控制容量，`maxInject` 控制注入数量。历史插件和启用长期记忆的插件声明存储为必需依赖；缺少存储时被标记为不可用。仅使用近期记忆与摘要时可以关闭 `longTerm.enabled`，它们仍能运行；清空全部记忆需要可用的存储服务。
 
-记忆和历史对话统一使用共享 SQLite，不再自动导入旧 JSONL。SQLite 表结构版本由各插件的 `migrate` 管理，已有数据库记录继续保留。
+记忆和历史对话统一使用共享 SQLite，不再自动导入旧 JSONL。SQLite 表结构版本由 SQLite 后端各仓库的 `migrate` 管理，已有数据库记录继续保留。
 
 安装依赖时 `postinstall` 会执行 `npm run rebuild:native`，按已安装的 Electron 版本重建 `better-sqlite3`。`npm start` 前也会检查并重建原生模块。构建工具要求 Node.js >=22.12，pnpm 的原生构建许可位于 `pnpm-workspace.yaml`。仓库当前没有 Electron 分发打包流程；后续打包需要为目标平台/架构重建模块，并在使用 ASAR 时解包原生 `.node` 文件。
 
@@ -176,11 +176,11 @@ AI 对话请求的 `system` 仅包含角色设定、固定行为/记忆使用规
 
 共享模型客户端的 `conversation.ai.timeoutMs` 默认 120000，覆盖单次网络请求与响应正文读取；`conversation.ai.retryBudgetMs` 默认 360000，覆盖整轮请求和重试等待。外部取消与超时都向网络操作传递 AbortSignal，并终止等待。瞬时状态码 408、429、5xx 与网络故障可以重试；配置错误和不支持的观察类型不反复重试。
 
-`logs/openai.jsonl` 达到 5 MiB 时轮转，最多保留 3 个历史文件。不会把请求头或 API key 写入日志。
+模型客户端通过核心 Storage 的 `core.ai-log` JSON 集合记录响应诊断日志，正文总量超过5 MiB时删除最旧记录。原有 `logs/openai.jsonl` 保留，不再追加。不会把请求头或 API key 写入日志。
 
-共享模型客户端在每次网络发送前通过应用注入的回调通知 `ai.request.started`，在返回、失败或取消时通知 `ai.request.finished`，每次重试拥有独立请求 ID。`raw-log` 插件依赖 `storage-sqlite.database`，维护 `ai_requests` 表，保存实际序列化的请求正文（包括所有 messages 和图片）、返回内容、时间及 HTTP 状态。日志观察者的失败不会阻断模型请求；停止期间仍接收完成通知，防止丢失取消结果。上次进程遗留的未完成记录在激活时标记为结果未记录。
+共享模型客户端在每次网络发送前通过应用注入的回调通知 `ai.request.started`，在返回、失败或取消时通知 `ai.request.finished`，每次重试拥有独立请求 ID。`raw-log` 插件依赖核心 `storage`，通过 `raw-log` 仓库保存数据；SQLite 后端维护 `ai_requests` 表，保存请求消息、图片的 Storage 引用、返回内容、时间及 HTTP 状态。请求事件中的 `imageReferences` 在正文之外传递原图引用与消息位置，实际网络请求仍发送 Base64。日志优先引用已持久化原图，并标记 `logImageSource=original`；原图与发送前缩放压缩后的字节不同。无原图引用及历史内联图片按内容哈希转存到 `raw-log-images`，标记 `encoded-request`，保留编码字节并在重试间复用。日志观察者的失败不会阻断模型请求；停止期间仍接收完成通知，防止丢失取消结果。上次进程遗留的未完成记录在激活时标记为结果未记录。
 
-「原始日志…」窗口按运行会话分组并倒序分页，每页 50 次请求；列表只读取元数据及从 response_json 提取的小型 usage 对象，选中时才读取完整正文，按消息原始顺序展示角色、文本、图片和模型返回。窗口每 2 秒刷新列表，关闭后停止轮询。`rawLog/usage.js` 统一 Chat Completions 与 Responses 用量字段，展示输入、输出、总量、缓存命中、未命中、可选缓存写入和推理 token；未命中优先使用接口显式字段，否则用已知输入减已知命中计算。缺失和异常字段保持未知，缓存写入与推理不重复计入总量。列表与详情均读取已保存响应，不更改原始数据、不新增数据库列，兼容历史记录与字符串形式的失败响应。使用隔离的 sandbox preload 和自身发送者校验，只允许 `raw-log:list/get` IPC；文本通过 textContent 展示，图片仅加载内联 data URL，远程图片显示原始 URL。功能默认启用，可通过插件 `raw-log.enabled=false` 关闭；记录持久保存，不复用历史响应 JSONL，也不记录请求头或 API key。
+「原始日志…」窗口在运行会话内按上下文段合并主对话，每页50个完整分组（主对话会话或独立文本请求）。history 在创建、重置和成功 compact 后分配新的 conversationId，prepare 返回该标识及段内成功轮次数；policy 每轮创建独立 turnId，重试沿用。客户端通过请求事件的 conversation 字段传递 id、kind、turn 和 turnId，不加入模型正文。汇总请求关联旧段，失败不换段；配置、上下文提供者变化和清空记忆沿用原有 history 重置边界。SQLite raw-log 迁移版本2新增 conversation_id、conversation_json 及索引，旧记录保留为独立请求。listGroups 使用首个请求序号作稳定分页游标，汇总请求数、轮数、状态和已上报 usage，缺失计数保持未知；getGroup 保留一个初始上下文和各次请求的最后输入及响应，避免重复展示此前对话。get 继续提供逐次完整原始正文，展开完整请求或查看截图时才加载对应图片。窗口每 2 秒刷新列表，关闭后停止轮询。`rawLog/usage.js` 统一 Chat Completions 与 Responses 用量字段，展示输入、输出、总量、缓存命中、未命中、可选缓存写入和推理 token；未命中优先使用接口显式字段，否则用已知输入减已知命中计算。缺失和异常字段保持未知，缓存写入与推理不重复计入总量。列表与详情均读取已保存响应，用量直接从原始响应读取，兼容历史记录与字符串形式的失败响应。使用隔离的 sandbox preload 和自身发送者校验，只允许 `raw-log:list/get/listGroups/getGroup/listScreenshots/getScreenshot/clear` IPC；文本通过 textContent 展示，图片仅加载内联 data URL，远程图片显示原始 URL。功能默认启用，可通过插件 `raw-log.enabled=false` 关闭；记录持久保存，不复用历史响应 JSONL，也不记录请求头或 API key。
 
 ## 配置管理
 
@@ -241,7 +241,7 @@ AI 输出新增 `workSummary` 与 `shouldSpeak`。纯观察可返回 `shouldSpea
     "maxTurns": 8,
     "ttlMs": 1800000
   },
-  "storageService": "storage-sqlite.database",
+  "storageService": "storage",
   "longTerm": {
     "enabled": true,
     "maxInject": 5,
@@ -292,7 +292,7 @@ AI 输出新增 `workSummary` 与 `shouldSpeak`。纯观察可返回 `shouldSpea
 
 `decision.interval_ms` 控制每次决策结束后等待多久；0 时至少等待 1 秒，负数或 `decision.enabled=false` 时关闭自动决策，仍可手动触发。视觉采集周期独立配置，设备音频也独立采集。
 
-模型与角色配置从根节点 `conversation.ai`、`conversation.character` 读取；感知、记忆和输出配置从对应 `plugins` 项读取。配置只接受当前格式，不转换旧插件或旧字段。`ai-conversation` 不在插件清单中，`decision.provider`、`memory.textService`、`memory.summary`、`memory.longTerm.legacyPath` 和历史插件的 `legacyPath` 以及其它旧根节点功能配置和记忆平铺字段会明确报错；未注册的插件也会报错。记忆和历史仅使用 SQLite，不提供旧 JSONL 导入入口。
+模型与角色配置从根节点 `conversation.ai`、`conversation.character` 读取；感知、记忆和输出配置从对应 `plugins` 项读取。配置只接受当前格式，不转换旧插件或旧字段。`ai-conversation` 不在插件清单中，`decision.provider`、`memory.textService`、`memory.summary`、`memory.longTerm.legacyPath` 和历史插件的 `legacyPath` 以及其它旧根节点功能配置和记忆平铺字段会明确报错；未注册的插件也会报错。记忆和历史通过核心 Storage 访问当前 SQLite 后端，不提供旧 JSONL 导入入口。
 
 手动对话插件在桌宠右键菜单挂载「手动对话…」，打开桌宠附近的输入窗口，Ctrl+Enter 发送，Esc 关闭，单条最多 4000 字。内容以 `role=user` 的文本观察入队，提交成功即关闭窗口，后台请求决策；当前决策忙碌时等待下一轮。记忆与历史插件独立记录决策完成事件，手动对话插件不直接调用它们。窗口、preload 和提交逻辑均位于 `electron/plugins/manualInput/`，主进程只提供通用宿主接口与调度。
 
@@ -364,8 +364,12 @@ TTS 插件发布带播放 ID 的通用 `execution.speech.state`。桌宠语音�
 
 ### 项目状态与经验记忆
 
-`memory.practice` 使用 `practiceMemory.js` 管理采集、到期与更新，`practicePlanner.js` 校验模型计划和来源，`practiceStore.js` 管理独立 SQLite 表、来源队列、版本历史与上下文检索。直接用户输入、音频转写和有截图关联的观察摘要作为来源；不会保存宠物回答作为验证证据。来源达到数量或等待时间门槛后，在现有串行维护任务中执行，原有长期更新的20轮门槛不影响该任务。
+`memory.practice` 使用 `practiceMemory.js` 管理采集、到期与更新，`practicePlanner.js` 校验模型计划和来源，`practiceStore.js` 通过核心 Storage 仓库管理来源队列、版本历史与上下文检索，SQLite 表位于后端实现。直接用户输入、音频转写和有截图关联的观察摘要作为来源；不会保存宠物回答作为验证证据。来源达到数量或等待时间门槛后，在现有串行维护任务中执行，原有长期更新的20轮门槛不影响该任务。
 
 项目与经验 ID、范围、来源引用及验证摘录在写入前检查，旧来源不能覆盖更近的状态。来源队列消费与条目／历史保存同一事务提交，请求期间到达的新来源不被消费。手动整理通过 `organizer.js` 在原有请求中携带实践记忆和待处理来源，返回的 `practice` 计划与长期事实／人物画像统一提交；会话停止、清空或开关变化拦截迟到结果。
 
 `provideContext` 添加 `project-state` 与 `experience-memory` 上下文块，标记项目来源时间和未验证经验。查看窗口新增项目与经验页，可读原始来源和更新前版本；旧用户数据不做推测迁移，开启后从新的来源开始积累。
+
+原始日志窗口的「截图」Tab 通过 `storage.blobs("screenshots")` 读取持久截图，不依赖截图插件的运行状态。`listScreenshots` 只返回分页元数据，`getScreenshot` 仅读取固定 screenshots 命名空间并返回临时图片预览；界面展示原图、采集信息和 analyses，明确单图与整批多图摘要范围。两个 Tab 保留各自选择与分页状态，仅轮询当前 Tab，切换或快速选择后忽略过时的异步详情结果。
+
+原始日志清理通过自身窗口发送者校验的 clear IPC 执行。消费层在同一 Storage 事务中删除 ai_requests、screenshots 与 raw-log-images 二进制集合、raw-log.image-index 和 core.ai-log，并递增 core.log-lifecycle 的 generation。模型整轮预算捕获 logGeneration，主对话重试、摘要预算重试及文本客户端网络重试沿用该值；原始日志和诊断日志拒绝旧代次写入，不取消正在处理的对话或清空记忆。截图采集在等待平台返回前捕获代次，清理后丢弃迟到结果。清理提交后发布 raw-log.cleared，重置截图检测基准并从观察队列移除已删除的截图；有效的新截图与用户文字保留。旧版 AI JSONL 数字备份和固定格式截图 JPG 先移到同目录暂存区，Storage 清理失败时恢复，成功后删除；旧记忆文件、对话历史及其它文件保留，文件删除或队列清理异常会返回警告。界面停止轮询、使在途读取失效并重置两个 Tab 的列表、详情与游标。

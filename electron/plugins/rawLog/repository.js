@@ -1,50 +1,49 @@
-const { normalizeUsage, responseUsage } = require("./usage");
+/** Backend-independent repository factory. */
+const { compactRequestImages, requestImagePreviews } = require("./images");
+const { LOG_LIFECYCLE, getLogGeneration } = require("../../storage/logLifecycle");
 
-function createRawLogRepository(storage) {
-  storage.migrate("raw-log", [(db) => db.exec(`
-    CREATE TABLE ai_requests (
-      sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
-      session_id TEXT NOT NULL, created_at INTEGER NOT NULL,
-      label TEXT NOT NULL, model TEXT NOT NULL, request_json TEXT NOT NULL,
-      finished_at INTEGER, status INTEGER, response_json TEXT, error TEXT NOT NULL DEFAULT ''
-    );
-  `)]);
-  // An unfinished request from a previous process cannot resume.
-  storage.prepare("UPDATE ai_requests SET finished_at = created_at, error = '应用退出，请求结果未记录' WHERE finished_at IS NULL").run();
-  const insert = storage.prepare(`INSERT INTO ai_requests
-    (id, session_id, created_at, label, model, request_json) VALUES (?, ?, ?, ?, ?, ?)`);
-  const finish = storage.prepare(`UPDATE ai_requests SET finished_at = ?, status = ?, response_json = ?, error = ? WHERE id = ?`);
-
+function createRawLogRepository(storage, options) {
+  const repository = storage.repository("raw-log", options);
+  const migrations = storage.collection("raw-log.migrations");
+  if (!migrations.get("image-references-v1")) {
+    repository.rewriteRequests(request => compactRequestImages(storage, request));
+    migrations.set("image-references-v1", true);
+  }
   return {
     append(entry) {
-      insert.run(entry.id, entry.sessionId, entry.t, entry.label,
-        String(entry.request.model || ""), JSON.stringify(entry.request));
+      if (entry.logGeneration != null && entry.logGeneration !== getLogGeneration(storage)) return;
+      return storage.transaction(() => repository.append({ ...entry,
+        request: compactRequestImages(storage, entry.request, entry.imageReferences) }));
     },
-    finish(entry) {
-      finish.run(entry.finishedAt, entry.status ?? null, JSON.stringify(entry.response ?? null), entry.error || "", entry.id);
+    finish: entry => repository.finish(entry),
+    clear() {
+      return storage.transaction(() => {
+        const generation = getLogGeneration(storage) + 1;
+        const requests = repository.clear();
+        const screenshots = storage.blobs("screenshots").clear();
+        const requestImages = storage.blobs("raw-log-images").clear();
+        storage.collection("raw-log.image-index").clear();
+        const diagnostics = storage.collection("core.ai-log").list().length;
+        storage.collection("core.ai-log").clear();
+        storage.collection(LOG_LIFECYCLE).set("generation", generation);
+        return { requests, screenshots, requestImages, diagnostics, generation };
+      });
     },
-    list({ before = null, limit = 50 } = {}) {
-      if (before !== null && (!Number.isSafeInteger(before) || before <= 0)) throw new Error("无效的分页游标");
-      const size = Math.max(1, Math.min(100, Math.floor(Number(limit) || 50)));
-      const rows = storage.prepare(`SELECT sequence, id, session_id AS sessionId, created_at AS t,
-        label, model, finished_at AS finishedAt, status, error,
-        CASE WHEN json_type(response_json) = 'text' AND json_valid(json_extract(response_json, '$'))
-          THEN json_extract(json_extract(response_json, '$'), '$.usage')
-          ELSE json_extract(response_json, '$.usage') END AS usageJson FROM ai_requests
-        ${before === null ? "" : "WHERE sequence < ?"} ORDER BY sequence DESC LIMIT ?`)
-        .all(...(before === null ? [] : [before]), size + 1);
-      return { entries: rows.slice(0, size).map(({ usageJson, ...row }) => ({ ...row,
-        usage: normalizeUsage(usageJson) })),
-        nextCursor: rows.length > size ? rows[size - 1].sequence : null };
+    list: options => repository.list(options),
+    listGroups: options => repository.listGroups(options),
+    getGroup(id) {
+      const records = repository.getGroup(id);
+      const first = records.find(record => record.conversation?.kind !== "summary") || records[0];
+      return { initialMessages: first.request.messages?.slice(0, -1) || [],
+        entries: records.map(({ request, ...record }) => ({ ...record,
+          input: request.messages?.at(-1),
+          parameters: Object.fromEntries(Object.entries(request).filter(([key]) => key !== "messages")),
+        })) };
     },
     get(id) {
-      if (typeof id !== "string" || id.length > 100) throw new Error("无效的请求 ID");
-      const row = storage.prepare("SELECT request_json, response_json FROM ai_requests WHERE id = ?").get(id);
-      if (!row) throw new Error("请求日志不存在");
-      const response = row.response_json === null ? null : JSON.parse(row.response_json);
-      return { request: JSON.parse(row.request_json), response, usage: responseUsage(response) };
+      const result = repository.get(id);
+      return { ...result, imagePreviews: requestImagePreviews(storage, result.request) };
     },
   };
 }
-
 module.exports = { createRawLogRepository };

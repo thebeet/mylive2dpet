@@ -98,13 +98,10 @@ test("question-history menu opens its tab and reuses the memory window", async (
 
 test("long-term inspection handles missing tables and missing storage without hiding recent memory", (t) => {
   const queries = [];
-  const storage = { prepare(sql) {
-    queries.push(sql);
-    return { get: () => null };
-  } };
+  const storage = { hasRepository(name) { queries.push(name); return false; } };
   assert.deepEqual(listEntries(storage), []);
   assert.equal(queries.length, 1);
-  assert.match(queries[0], /sqlite_master/);
+  assert.equal(queries[0], "memory");
   const h = harness();
   t.after(() => h.plugin.dispose());
   const snapshot = h.plugin.getSnapshot();

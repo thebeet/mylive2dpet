@@ -22,6 +22,7 @@ const { isDeepStrictEqual } = require("node:util");
 const { createDecisionScheduler } = require("./architecture/decisionScheduler");
 const { createServiceRegistry } = require("./architecture/serviceRegistry");
 const { createContextProviders } = require("./architecture/contextProviders");
+const { createStorage } = require("./storage");
 const { captureFullscreenToJpg } = require("./platform/screenCapture");
 const { registerDecisionModule } = require("./modules/decision");
 const { createExecutionModule } = require("./modules/execution");
@@ -142,8 +143,10 @@ const messageBus = new MessageBus();
 const execution = createExecutionModule(messageBus, { sendBubble });
 const perception = createPerceptionService(messageBus, { getPolicy: () => loadConfig().observations || {} });
 const services = createServiceRegistry();
+const storage = createStorage({ services });
 const contextProviders = createContextProviders();
 const conversation = createConversation({
+  storage: storage.api,
   getConfig: loadConfig, contextProviders, bus: messageBus,
   getExpressions: () => loadExpressionNames({ includeInternal: false }),
   onRequest: (entry) => messageBus.notify(EVENTS.AI_REQUEST_STARTED, entry),
@@ -166,6 +169,7 @@ const pluginHost = createPluginHost({
   model: conversation.model,
   requestDecision: (request) => scheduler.request(request),
   services,
+  storage,
   contextProviders,
   paths: { getUserData: () => app.getPath("userData"), projectRoot: path.resolve(__dirname, "..") },
   windows: { create: (options) => new BrowserWindow(options) },

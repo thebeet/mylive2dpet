@@ -166,14 +166,18 @@ function createMemoryPlugin(context, dependencies = {}) {
   }, { allowWhileStopped: true });
 
   function clearStores() {
-    work.clear();
-    practice.clear();
     const config = options();
     const store = getDurable();
     if (typeof store.clear !== "function") throw new Error("记忆存储未提供清空能力");
-    const deleted = store.clear();
     const storage = context.services.get(config.storageService);
-    if (storage) createUpdateBuffer(storage).clear();
+    const apply = () => {
+      work.clear();
+      practice.clear();
+      const deleted = store.clear();
+      if (storage) createUpdateBuffer(storage).clear();
+      return deleted;
+    };
+    const deleted = storage ? storage.transaction(apply) : apply();
     context.logger.info(`all memory cleared; long-term removed=${deleted}`);
     return { deleted };
   }

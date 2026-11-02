@@ -1,76 +1,88 @@
-const fs = require("fs");
-const path = require("path");
 const EVENTS = require("../../architecture/events");
 const { getOptions } = require("./options");
 const { createScreenChangeDetector } = require("./screenChange");
+const { getLogGeneration } = require("../../storage/logLifecycle");
 
 /** Screenshot policy, observation production and capture cadence belong here. */
 function createScreenPerceptionPlugin(context, dependencies = {}) {
   const detector = dependencies.detector || createScreenChangeDetector();
   const setTimer = dependencies.setInterval || setInterval;
   const clearTimer = dependencies.clearInterval || clearInterval;
-  const removeFile = dependencies.removeFile || ((filePath) => fs.unlinkSync(filePath));
   let timer = null;
   let generation = 0;
   let pending = Promise.resolve();
   let busy = false;
   let disposed = false;
   let running = true;
-  const temporaryFiles = new Set();
-  const temporaryDir = path.join(context.paths?.getUserData?.() || path.resolve(__dirname, "../../.."), "cache", "screen-perception");
-  fs.mkdirSync(temporaryDir, { recursive: true });
-  // Only this plugin's temporary directory is swept; manual captures are retained.
-  for (const entry of fs.readdirSync(temporaryDir)) {
-    if (entry.endsWith(".jpg")) {
-      try { removeFile(path.join(temporaryDir, entry)); } catch { /* stale file cleanup */ }
-    }
-  }
-  function removeTemporary(filePath) {
-    if (!temporaryFiles.delete(filePath)) return;
-    try { removeFile(filePath); } catch (error) { context.logger.warn("temporary screenshot cleanup failed:", error); }
-  }
-  const unsubscribeRelease = context.bus.subscribe(EVENTS.PERCEPTION_OBSERVATION_RELEASED, ({ observation }) => {
-    for (const part of observation.content) if (part.path) removeTemporary(part.path);
+  const unsubscribeClear = context.bus.subscribe(EVENTS.RAW_LOG_CLEARED, () => detector.reset(), { allowWhileStopped: true });
+  const unsubscribeDecision = context.bus.subscribe(EVENTS.DECISION_COMPLETED, event => {
+    const ids = [...new Set(event.observations.flatMap(observation => observation.content
+      .filter(part => part.type === "image")
+      .map(part => /^storage:\/\/screenshots\/([^/?#]+)$/.exec(part.uri || "")?.[1])
+      .filter(Boolean)))];
+    if (!ids.length) return;
+    const blobs = context.storage.blobs("screenshots");
+    context.storage.transaction(() => {
+      for (const id of ids) {
+        const record = blobs.getMetadata(id);
+        if (!record) continue;
+        const analyses = record.metadata.analyses || [];
+        if (analyses.some(item => item.decisionId === event.id)) continue;
+        blobs.updateMetadata(id, { analyses: [...analyses, {
+          decisionId: event.id, completedAt: event.completedAt,
+          screenshotIds: ids,
+          screenSummary: event.result.summaries?.screen || "",
+          workSummary: event.result.summaries?.work || "",
+        }] });
+      }
+    });
   }, { allowWhileStopped: true });
-
   async function performCapture(request, captureGeneration) {
     if (disposed) throw new Error("视觉感知插件已卸载");
     if (!running) throw new Error("视觉感知插件已停止");
     if (captureGeneration != null && captureGeneration !== generation) return null;
     const trigger = request.trigger || "screen";
-    const shot = await context.screen.captureFullscreen(request.enqueue === false ? {} : { directory: temporaryDir });
-    if (request.enqueue !== false) temporaryFiles.add(shot.path);
-    // A stopped periodic source must not enqueue the result of an old capture.
-    if (disposed || !running || (captureGeneration != null && captureGeneration !== generation)) {
-      if (request.enqueue !== false) removeTemporary(shot.path);
-      return null;
+    const logGeneration = getLogGeneration(context.storage);
+    const captured = await context.screen.captureFullscreen();
+    // A stopped source must not persist or enqueue a late capture.
+    if (disposed || !running || (captureGeneration != null && captureGeneration !== generation)) return null;
+    if (logGeneration !== getLogGeneration(context.storage)) return null;
+    let options, change;
+    if (request.enqueue !== false) {
+      options = getOptions(context.config.get());
+      change = detector.compareWithPrevious(captured.data, { options: options.changeDetect });
+      if (!change.changed) {
+        context.logger.info(`screenshot skipped: little change hamming=${change.distance}/${change.threshold}`);
+        await context.bus.notify(EVENTS.PERCEPTION_SKIPPED, {
+          source: "screen", trigger, reason: "little-change", metadata: change,
+        });
+        return null;
+      }
     }
+    const saved = context.storage.blobs("screenshots").put(captured.data, {
+      filename: captured.filename, width: captured.width, height: captured.height,
+      capturedAt: captured.capturedAt || new Date().toISOString(),
+      mimeType: captured.mimeType || "image/jpeg", trigger,
+      manual: request.enqueue === false,
+    });
+    const shot = { ...saved.metadata, id: saved.id, size: saved.size,
+      uri: `storage://screenshots/${saved.id}` };
     if (request.enqueue === false) return shot;
-    const options = getOptions(context.config.get());
-    let change;
-    try { change = detector.compareWithPrevious(shot.path, { options: options.changeDetect }); }
-    catch (error) { removeTemporary(shot.path); throw error; }
-    if (!change.changed) {
-      removeTemporary(shot.path);
-      context.logger.info(`screenshot skipped: little change hamming=${change.distance}/${change.threshold}`);
-      await context.bus.notify(EVENTS.PERCEPTION_SKIPPED, {
-        source: "screen", trigger, reason: "little-change", metadata: change,
-      });
-      return null;
-    }
-    try { await context.perception.submit({
+    await context.perception.submit({
       source: "screen",
       trigger,
       expiresAt: Date.now() + options.observationTtlMs,
-      content: [{ type: "image", path: shot.path, mimeType: "image/jpeg" }],
+      capturedAt: shot.capturedAt,
+      content: [{ type: "image", uri: shot.uri, mimeType: shot.mimeType }],
       metadata: {
         modality: "screen",
         label: "桌面全屏",
         filename: shot.filename,
+        screenshotId: shot.id,
         distance: change.distance,
         threshold: change.threshold,
       },
-    }); } catch (error) { removeTemporary(shot.path); throw error; }
+    });
     return shot;
   }
 
@@ -130,8 +142,8 @@ function createScreenPerceptionPlugin(context, dependencies = {}) {
       unregisterSource();
       return done.then(async () => {
         await context.perception.discard((item) => item.source === "screen", "plugin-unloaded");
-        unsubscribeRelease();
-        for (const filePath of [...temporaryFiles]) removeTemporary(filePath);
+        unsubscribeDecision();
+        unsubscribeClear();
       });
     },
   };
