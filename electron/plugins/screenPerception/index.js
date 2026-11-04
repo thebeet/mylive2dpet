@@ -52,7 +52,6 @@ function createScreenPerceptionPlugin(context, dependencies = {}) {
       options = getOptions(context.config.get());
       change = detector.compareWithPrevious(captured.data, { options: options.changeDetect });
       if (!change.changed) {
-        context.logger.info(`screenshot skipped: little change hamming=${change.distance}/${change.threshold}`);
         await context.bus.notify(EVENTS.PERCEPTION_SKIPPED, {
           source: "screen", trigger, reason: "little-change", metadata: change,
         });

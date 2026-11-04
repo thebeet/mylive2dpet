@@ -15,6 +15,7 @@ const { createSqliteBackend } = require("../electron/plugins/storageSqlite/backe
 const { createScreenshotReader } = require("../electron/plugins/rawLog/screenshots");
 const { clearRawLog } = require("../electron/plugins/rawLog/clear");
 const { getLogGeneration } = require("../electron/storage/logLifecycle");
+const { createWebHistory } = require("../electron/plugins/webSearch/history");
 const { createPerceptionService } = require("../electron/architecture/perceptionService");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 
@@ -51,6 +52,45 @@ function chat(options = {}) {
     configureProxy: async () => {}, writeLog() {}, logger: quiet, ...options,
   });
 }
+
+test("web history persists results and HTTP attempts, pages without bodies and recovers interrupted requests", (t) => {
+  const db = new DatabaseSync(":memory:"); t.after(() => db.close());
+  const storage = storageFor(db), options = { providers: { deepseek: { apiKey: "history-secret" } } };
+  const makeHistory = () => createWebHistory({ getStorage: () => storage, options, logger: quiet });
+  const history = makeHistory();
+  history.begin({ id: "search-1", operation: "search", state: "queued", request: { query: "news history-secret" } });
+  history.http("http.response", { requestId: "search-1", status: 200, apiUrl: "https://api.example/search?key=history-secret" });
+  history.update("search-1", { state: "success", result: { results: [{ title: "news", url: "https://news.example/page", content: "page body" }] } });
+  history.begin({ id: "fetch-2", operation: "fetch", state: "running", request: { url: "https://news.example/page" } });
+  const restored = makeHistory();
+  assert.equal(restored.get("search-1").result.results[0].content, "page body");
+  assert.equal(restored.get("search-1").http[0].status, 200);
+  assert.equal(JSON.stringify(restored.get("search-1")).includes("history-secret"), false);
+  assert.equal(restored.get("fetch-2").state, "cancelled");
+  const first = restored.list({ limit: 1 });
+  assert.equal(first.entries.length, 1);
+  assert.equal(first.entries[0].result, undefined);
+  assert.equal(first.entries[0].http, undefined);
+  const second = restored.list({ limit: 1, before: first.nextCursor });
+  assert.equal(second.entries.length, 1);
+  assert.notEqual(first.entries[0].id, second.entries[0].id);
+  assert.equal(second.nextCursor, null);
+  assert.throws(() => restored.list({ before: "bad" }), /游标/);
+});
+
+test("raw log clear also removes web history and late HTTP or request completion cannot restore it", (t) => {
+  const db = new DatabaseSync(":memory:"); t.after(() => db.close());
+  const storage = storageFor(db), repository = createRawLogRepository(storage);
+  const history = createWebHistory({ getStorage: () => storage, options: {}, logger: quiet });
+  history.begin({ id: "pending-web", operation: "search", state: "running" });
+  history.begin({ id: "finished-web", operation: "fetch", state: "success", result: { content: "old page" } });
+  assert.equal(repository.clear().webSearch, 2);
+  history.http("http.response", { requestId: "pending-web", status: 200 });
+  history.update("pending-web", { state: "success", result: { results: [] } });
+  assert.equal(history.list().entries.length, 0);
+  history.begin({ id: "new-web", operation: "search", state: "queued" });
+  assert.equal(history.list().entries.length, 1);
+});
 
 test("raw log captures exact wire messages and images before sending, including text services", async () => {
   const starts = [], ends = [];
@@ -399,7 +439,7 @@ test("clearing removes raw records and image stores atomically, preserves memory
   const history = storage.repository("dialogue-history");
   // Domain tables and unrelated plugin collections are outside the cleanup scope.
   const result = repository.clear();
-  assert.deepEqual(result, { requests: 1, screenshots: 1, requestImages: 1, diagnostics: 1, generation: 1 });
+  assert.deepEqual(result, { requests: 1, screenshots: 1, requestImages: 1, diagnostics: 1, webSearch: 0, generation: 1 });
   assert.equal(repository.list().entries.length, 0);
   assert.equal(repository.listGroups().entries.length, 0);
   assert.equal(storage.blobs("screenshots").list().entries.length, 0);
@@ -593,8 +633,10 @@ test("log plugin validates window identity and records late cancellation while s
   const handlers = new Map();
   const windows = [];
   let menu;
+  const storage = storageFor(db);
+  let webHistory;
   const plugin = activate({ bus, logger: quiet,
-    services: { get: () => storageFor(db) },
+    services: { get: name => name === "storage" ? storage : name === "web-search.history" ? webHistory : undefined },
     menu: { register: (provide) => { menu = provide; return () => { menu = null; }; } },
     ipc: { handle: (channel, handler) => { handlers.set(channel, handler); return () => handlers.delete(channel); } },
     windows: { create: (options) => {
@@ -619,6 +661,16 @@ test("log plugin validates window identity and records late cancellation while s
   assert.throws(() => handlers.get("clear")({ sender: {} }), /来源无效/);
   assert.throws(() => handlers.get("listScreenshots")({ sender: {} }), /来源无效/);
   assert.throws(() => handlers.get("getScreenshot")({ sender: {} }, "any"), /来源无效/);
+  for (const method of ["listTabs", "listWebSearch", "getWebSearch"]) assert.throws(() => handlers.get(method)({ sender: {} }), /来源无效/);
+  assert.equal(handlers.get("listTabs")({ sender: win.webContents }).webSearch, false);
+  assert.throws(() => handlers.get("listWebSearch")({ sender: win.webContents }), /未加载/);
+  const sample = { id: "search", operation: "search", request: { query: "news" }, state: "success" };
+  webHistory = { list: () => ({ entries: [sample], nextCursor: null }), get: id => ({ ...sample, id }) };
+  assert.equal(handlers.get("listTabs")({ sender: win.webContents }).webSearch, true);
+  assert.deepEqual(handlers.get("listWebSearch")({ sender: win.webContents }).entries, [sample]);
+  assert.equal(handlers.get("getWebSearch")({ sender: win.webContents }, "search").operation, "search");
+  webHistory = undefined;
+  assert.equal(handlers.get("listTabs")({ sender: win.webContents }).webSearch, false);
   assert.equal(handlers.get("list")({ sender: win.webContents }).entries.length, 1);
   assert.equal(handlers.get("listScreenshots")({ sender: win.webContents }).entries.length, 0);
   plugin.stop(); win.emit("ready-to-show");

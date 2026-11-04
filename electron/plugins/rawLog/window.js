@@ -19,6 +19,92 @@ const screenshotErrorEl = document.getElementById("screenshots-error");
 const screenshotsMoreEl = document.getElementById("screenshots-more");
 let screenshots = [], screenshotsCursor = null, selectedScreenshotId = null;
 let screenshotsLoading = false, screenshotSelectionVersion = 0;
+const webListEl = document.getElementById("web-search-list");
+const webDetailEl = document.getElementById("web-search-detail");
+const webErrorEl = document.getElementById("web-search-error");
+const webMoreEl = document.getElementById("web-search-more");
+const tabNames = ["requests", "screenshots", "web-search"];
+const webStates = { queued: "排队中", running: "进行中", success: "成功", failed: "失败", rejected: "已拦截", cancelled: "已取消", skipped: "已跳过" };
+let webEntries = [], webCursor = null, webSelectedId = null, webLoading = false, webSelectionVersion = 0;
+
+function renderWebList() {
+  webListEl.replaceChildren();
+  countEl.textContent = `已显示 ${webEntries.length} 条 Search / Fetch 记录 · 每 2 秒自动更新`;
+  if (!webEntries.length) {
+    addText(webListEl, "div", "empty", "暂无记录。之后的 Search 与 Fetch 请求会显示在这里。");
+    webDetailEl.replaceChildren();
+  }
+  for (const entry of webEntries) {
+    const button = addText(webListEl, "button", "request", "");
+    button.setAttribute("aria-pressed", String(entry.id === webSelectedId));
+    addText(button, "span", "", `${entry.operation === "search" ? "Search" : "Fetch"} · ${webStates[entry.state] || entry.state}`);
+    addText(button, "time", "muted", new Date(entry.t).toLocaleString("zh-CN"));
+    addText(button, "span", "content", entry.request?.query || entry.request?.url || "参数无效");
+    addText(button, "span", "muted", `${entry.provider || "未配置 provider"}${entry.elapsedMs != null ? ` · ${entry.elapsedMs} ms` : ""}`);
+    button.addEventListener("click", () => void selectWeb(entry));
+  }
+  webMoreEl.hidden = !webCursor;
+}
+
+async function selectWeb(entry, preserveScroll = false) {
+  const version = ++webSelectionVersion, epoch = viewGeneration;
+  webSelectedId = entry.id;
+  renderWebList();
+  try {
+    const record = await window.rawLog.getWebSearch(entry.id);
+    if (version !== webSelectionVersion || epoch !== viewGeneration || activeTab !== "web-search") return;
+    webErrorEl.textContent = "";
+    const main = document.querySelector("#web-search-panel main"), scroll = main.scrollTop;
+    webDetailEl.replaceChildren();
+    addText(webDetailEl, "h2", "", `${record.operation === "search" ? "Search" : "Fetch"} · ${webStates[record.state] || record.state}`);
+    addText(webDetailEl, "div", "muted", `${new Date(record.t).toLocaleString("zh-CN")} · ${record.provider || "未配置 provider"}${record.elapsedMs != null ? ` · ${record.elapsedMs} ms` : ""}`);
+    const { result, http, request, originalQuestion, modelReply, ...metadata } = record;
+    for (const [title, value] of [["触发问题", originalQuestion], ["模型回复", modelReply], ["请求参数", request],
+      ["请求标识与状态", metadata], ["HTTP 请求记录", http], ["Search / Fetch 结果", result], ["失败原因", record.error]]) {
+      if (value == null || value === "") continue;
+      const card = addText(webDetailEl, "article", "message", "");
+      addText(card, "div", "role", title);
+      addText(card, "div", "content", typeof value === "string" ? value : JSON.stringify(value, null, 2));
+    }
+    main.scrollTop = preserveScroll ? scroll : 0;
+  } catch (error) {
+    if (version === webSelectionVersion && epoch === viewGeneration && activeTab === "web-search") webErrorEl.textContent = `读取请求失败：${error.message || error}`;
+  }
+}
+
+async function loadWeb(mode = "update") {
+  if (webLoading || clearing) return;
+  const epoch = viewGeneration;
+  webLoading = true; webMoreEl.disabled = true;
+  try {
+    const result = await window.rawLog.listWebSearch({ before: mode === "more" ? webCursor : null });
+    if (epoch !== viewGeneration || activeTab !== "web-search") return;
+    const old = webEntries.find(entry => entry.id === webSelectedId);
+    if (mode === "reset" || !webEntries.length) { webEntries = result.entries; webCursor = result.nextCursor; }
+    else {
+      const merged = new Map(webEntries.map(entry => [entry.id, entry]));
+      for (const entry of result.entries) merged.set(entry.id, entry);
+      webEntries = [...merged.values()].sort((a, b) => b.t - a.t || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+      if (mode === "more" || webCursor === null) webCursor = result.nextCursor;
+    }
+    webErrorEl.textContent = ""; renderWebList();
+    const selected = webEntries.find(entry => entry.id === webSelectedId) || webEntries[0];
+    if (selected && (!old || JSON.stringify(old) !== JSON.stringify(selected) || ["reset", "activate"].includes(mode))) {
+      await selectWeb(selected, mode === "update" || mode === "activate");
+    }
+  } catch (error) {
+    if (epoch === viewGeneration && activeTab === "web-search") webErrorEl.textContent = `读取网页请求日志失败：${error.message || error}`;
+  } finally { webLoading = false; webMoreEl.disabled = clearing; }
+}
+
+async function updateTabs() {
+  try {
+    const available = await window.rawLog.listTabs();
+    if (clearing) return;
+    document.getElementById("web-search-tab").hidden = !available.webSearch;
+    if (!available.webSearch && activeTab === "web-search") switchTab("requests");
+  } catch { /* Existing tabs remain usable if discovery temporarily fails. */ }
+}
 
 function addText(parent, tag, className, value) {
   const node = document.createElement(tag);
@@ -379,7 +465,8 @@ function switchTab(tab) {
   activeTab = tab;
   selectionVersion++;
   screenshotSelectionVersion++;
-  for (const name of ["requests", "screenshots"]) {
+  webSelectionVersion++;
+  for (const name of tabNames) {
     const selected = name === tab;
     const button = document.getElementById(`${name}-tab`);
     button.setAttribute("aria-selected", String(selected));
@@ -387,24 +474,29 @@ function switchTab(tab) {
     document.getElementById(`${name}-panel`).hidden = !selected;
   }
   if (tab === "screenshots") { renderScreenshots(); void loadScreenshots("activate"); }
+  else if (tab === "web-search") { renderWebList(); void loadWeb("activate"); }
   else { renderList(); void load("activate"); }
 }
 
-for (const name of ["requests", "screenshots"]) {
+for (const name of tabNames) {
   const button = document.getElementById(`${name}-tab`);
   button.addEventListener("click", () => switchTab(name));
   button.addEventListener("keydown", event => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    const target = event.key === "Home" ? "requests" : event.key === "End" ? "screenshots" : name === "requests" ? "screenshots" : "requests";
+    const visible = tabNames.filter(tab => !document.getElementById(`${tab}-tab`).hidden);
+    const index = visible.indexOf(name);
+    const target = event.key === "Home" ? visible[0] : event.key === "End" ? visible.at(-1)
+      : visible[(index + (event.key === "ArrowLeft" ? -1 : 1) + visible.length) % visible.length];
     switchTab(target);
     document.getElementById(`${target}-tab`).focus();
   });
 }
-const refresh = mode => activeTab === "screenshots" ? loadScreenshots(mode) : load(mode);
+const refresh = mode => activeTab === "screenshots" ? loadScreenshots(mode) : activeTab === "web-search" ? loadWeb(mode) : load(mode);
 document.getElementById("refresh").addEventListener("click", () => void refresh("reset"));
 moreEl.addEventListener("click", () => void load("more"));
 screenshotsMoreEl.addEventListener("click", () => void loadScreenshots("more"));
+webMoreEl.addEventListener("click", () => void loadWeb("more"));
 const clearDialog = document.getElementById("clear-dialog");
 const clearStatusEl = document.getElementById("clear-status");
 const clearErrorEl = document.getElementById("clear-error");
@@ -423,21 +515,24 @@ document.getElementById("clear-form").addEventListener("submit", async event => 
   viewGeneration++;
   selectionVersion++;
   screenshotSelectionVersion++;
+  webSelectionVersion++;
   clearConfirmEl.textContent = "清理并压缩中…";
   clearErrorEl.textContent = "";
-  const controls = ["clear", "clear-confirm", "clear-cancel", "refresh", "requests-tab", "screenshots-tab", "more", "screenshots-more"];
+  const controls = ["clear", "clear-confirm", "clear-cancel", "refresh", "requests-tab", "screenshots-tab", "web-search-tab", "more", "screenshots-more", "web-search-more"];
   for (const id of controls) document.getElementById(id).disabled = true;
   try {
     const result = await window.rawLog.clear();
     entries = []; nextCursor = null; selectedId = null;
     screenshots = []; screenshotsCursor = null; selectedScreenshotId = null;
+    webEntries = []; webCursor = null; webSelectedId = null;
     requestsEl.replaceChildren(); messagesEl.replaceChildren(); metaEl.replaceChildren();
     screenshotsEl.replaceChildren(); screenshotDetailEl.replaceChildren();
+    webListEl.replaceChildren(); webDetailEl.replaceChildren(); webErrorEl.textContent = "";
     errorEl.textContent = screenshotErrorEl.textContent = "";
-    moreEl.hidden = screenshotsMoreEl.hidden = true;
-    if (activeTab === "screenshots") renderScreenshots(); else renderList();
+    moreEl.hidden = screenshotsMoreEl.hidden = webMoreEl.hidden = true;
+    if (activeTab === "screenshots") renderScreenshots(); else if (activeTab === "web-search") renderWebList(); else renderList();
     clearStatusEl.className = result.warnings?.length ? "error" : "muted";
-    clearStatusEl.textContent = `已清理 ${result.requests} 条请求日志、${result.screenshots} 张截图。` +
+    clearStatusEl.textContent = `已清理 ${result.requests} 条请求日志、${result.webSearch || 0} 条网页请求、${result.screenshots} 张截图。` +
       (result.compacted ? "数据库已压缩。" : "") +
       (result.legacyLogs || result.legacyScreenshots ? `另清理 ${result.legacyLogs + result.legacyScreenshots} 个旧文件。` : "") +
       (result.warnings?.length ? `\n${result.warnings.join("\n")}` : "");
@@ -451,6 +546,7 @@ document.getElementById("clear-form").addEventListener("submit", async event => 
     if (!clearDialog.open) void refresh("reset");
   }
 });
-const timer = setInterval(() => void refresh("update"), 2000);
+const timer = setInterval(() => { void updateTabs(); void refresh("update"); }, 2000);
 window.addEventListener("beforeunload", () => clearInterval(timer));
 void load();
+void updateTabs();

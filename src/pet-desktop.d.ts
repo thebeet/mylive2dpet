@@ -1,7 +1,6 @@
 export {};
 
 type BubblePayload =
-  | { type: "thinking" }
   | { type: "expression"; expression: string }
   | { type: "say"; text: string; expression?: string }
   | { type: "tts"; state: "start" | "end" | "error" }

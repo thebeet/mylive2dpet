@@ -25,8 +25,9 @@ function createRawLogRepository(storage, options) {
         storage.collection("raw-log.image-index").clear();
         const diagnostics = storage.collection("core.ai-log").list().length;
         storage.collection("core.ai-log").clear();
+        const webSearch = storage.collection("web-search.history").clear();
         storage.collection(LOG_LIFECYCLE).set("generation", generation);
-        return { requests, screenshots, requestImages, diagnostics, generation };
+        return { requests, screenshots, requestImages, diagnostics, webSearch, generation };
       });
     },
     list: options => repository.list(options),

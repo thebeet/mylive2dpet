@@ -397,6 +397,7 @@ flowchart LR
 | --- | --- |
 | `manual-input` | 输入窗口、文本验证、消息提交和菜单 |
 | `schedule` | 单次定时通知、持久化、到期提交观察和管理窗口 |
+| `web-search` | 可替换 provider 的网页搜索/读取，effects 请求与结果观察 |
 | `screen-perception` | 截图周期、变化检测、观察与临时资源 |
 | `audio-output-perception` | 输出音频采集、分段、ASR、去重和菜单 |
 | `tts` | 合成、播放、取消和运行期开关 |
@@ -432,6 +433,8 @@ assets/                   # 本地模型与声线资源
 插件通过静态 [manifest](electron/plugins/manifest.js) 注册，导出 `activate(context)` 并返回 `start`、`stop`、`dispose`。宿主提供菜单、IPC、窗口、感知入口、决策请求、上下文、核心模型和通用服务接口；插件声明必需与可选服务，宿主按依赖排序加载。
 
 详细契约、配置语义、生命周期和开发接口见 [electron/architecture/README.md](electron/architecture/README.md)。
+
+网页查询由可选 `web-search` 插件提供，支持 DeepSeek Search/Fetch 和 OpenAI Responses web_search，可分别选择搜索与读取 provider。插件默认关闭，需配置独立 API key；搜索 effect 后台执行，结果作为观察入队并触发后续决策。统一接口、配置和验证边界见 [Web Search 文档](electron/plugins/webSearch/README.md)。
 
 ## 定时通知
 

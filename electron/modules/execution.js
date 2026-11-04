@@ -13,7 +13,6 @@ function createExecutionModule(bus, { sendBubble }) {
       await bus.publish(EVENTS.SPEECH_OUTPUT_STOP_REQUESTED, {
         reason: "decision-started",
       });
-      sendBubble({ type: "thinking" });
     },
     { owner: "core:execution" },
   );

@@ -221,7 +221,7 @@ test("text-only manual and audio inputs reach output and memory without image en
   assert.equal(Object.hasOwn(turns[0].summaries, "screen"), false);
   assert.equal(turns[0].summaries.audio, "external video");
   assert.equal(history[0].userSaid, "hello pet");
-  assert.deepEqual(bubbles.map(({ type }) => type), ["thinking", "say"]);
+  assert.deepEqual(bubbles.map(({ type }) => type), ["say"]);
   assert.equal(speech[0].text, "heard");
   await perception.submit(textInput("continue", { role: "user" }));
   await bus.publish(EVENTS.DECISION_REQUESTED);
@@ -528,7 +528,7 @@ test("speech failure releases a completed batch and never repeats its decision o
   assert.equal(released.length, 1);
   assert.equal(released[0].reason, "completed");
   assert.equal(perception.pendingCount(), 0);
-  assert.deepEqual(bubbles.map((bubble) => bubble.type), ["thinking", "say", "error"]);
+  assert.deepEqual(bubbles.map((bubble) => bubble.type), ["say", "error"]);
   await bus.publish(EVENTS.DECISION_REQUESTED);
   assert.equal(calls, 1);
   assert.equal(recorded.length, 1);

@@ -7,6 +7,16 @@ const { clearRawLog } = require("./clear");
 function activate(context) {
   const storage = context.services.get("storage");
   const repository = { ...createRawLogRepository(storage), ...createScreenshotReader(storage) };
+  function webHistory() {
+    const history = context.services.get("web-search.history");
+    if (!history) throw new Error("web-search 插件未加载");
+    return history;
+  }
+  const readers = { ...repository,
+    listTabs: () => ({ webSearch: Boolean(context.services.get("web-search.history")) }),
+    listWebSearch: options => webHistory().list(options),
+    getWebSearch: id => webHistory().get(id),
+  };
   let win = null;
   let running = true;
   let disposed = false;
@@ -24,7 +34,7 @@ function activate(context) {
     }
     const created = context.windows.create({
       width: 1040, height: 780, minWidth: 680, minHeight: 480,
-      title: "OpenAI 原始日志", show: false, autoHideMenuBar: true, backgroundColor: "#10131a",
+      title: "原始日志", show: false, autoHideMenuBar: true, backgroundColor: "#10131a",
       webPreferences: { preload: path.join(__dirname, "preload.js"),
         contextIsolation: true, nodeIntegration: false, sandbox: true },
     });
@@ -43,11 +53,11 @@ function activate(context) {
     context.bus.subscribe(EVENTS.AI_REQUEST_STARTED, (entry) => repository.append(entry), { allowWhileStopped: true }),
     context.bus.subscribe(EVENTS.AI_REQUEST_FINISHED, (entry) => repository.finish(entry), { allowWhileStopped: true }),
     context.menu.register(() => [{ label: "原始日志…", enabled: running && !disposed, click: show }]),
-    ...["list", "get", "listGroups", "getGroup", "listScreenshots", "getScreenshot", "clear"].map((method) => context.ipc.handle(method, (event, request) => {
+    ...["list", "get", "listGroups", "getGroup", "listScreenshots", "getScreenshot", "listTabs", "listWebSearch", "getWebSearch", "clear"].map((method) => context.ipc.handle(method, (event, request) => {
       if (!running || disposed || !win || win.isDestroyed() || event.sender !== win.webContents) {
         throw new Error("日志窗口已关闭或请求来源无效");
       }
-      return method === "clear" ? clearRawLog(context, repository, storage) : repository[method](request);
+      return method === "clear" ? clearRawLog(context, repository, storage) : readers[method](request);
     })),
   ];
   return {

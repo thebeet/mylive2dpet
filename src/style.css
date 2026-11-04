@@ -64,12 +64,6 @@ canvas {
   border-bottom: 0;
 }
 
-.speech-bubble[data-kind="thinking"] {
-  color: #7a7380;
-  font-style: italic;
-  text-align: center;
-}
-
 .speech-bubble[data-kind="error"] {
   color: #7a2e2e;
   background: rgba(255, 236, 236, 0.95);
