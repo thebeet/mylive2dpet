@@ -3,11 +3,13 @@ const { createModelClient } = require("../llm/client");
 const { createConversationPolicy } = require("./decision");
 const { getOptions } = require("./options");
 const { createContextProviders } = require("../architecture/contextProviders");
+const { createPromptExtensions } = require("../architecture/promptExtensions");
 const { createConversationHistory } = require("./history");
 const EVENTS = require("../architecture/events");
 
 /** Application-owned conversation and model lifetime, independent of plugin loading. */
-function createConversation({ getConfig, getExpressions, contextProviders = createContextProviders(), bus,
+function createConversation({ getConfig, getExpressions, contextProviders = createContextProviders(),
+  promptExtensions = createPromptExtensions(), bus,
   logger = console, ...dependencies }) {
   let options = getOptions(getConfig());
   let session = createSession(options);
@@ -26,7 +28,8 @@ function createConversation({ getConfig, getExpressions, contextProviders = crea
     const policy = createConversationPolicy({ client, getOptions: () => snapshot,
       getExpressions, logger, encodeImage: dependencies.encodeImage, storage: dependencies.storage, retryWait: dependencies.retryWait });
     const history = createConversationHistory({ options: () => snapshot.history, client, logger });
-    return { client, policy, history, decisionQueue: Promise.resolve(), contextRevision: contextProviders.getRevision?.() };
+    return { client, policy, history, decisionQueue: Promise.resolve(), contextRevision: contextProviders.getRevision?.(),
+      promptSignature: promptExtensions.collect().signature };
   }
 
   function notify() {
@@ -129,16 +132,18 @@ function createConversation({ getConfig, getExpressions, contextProviders = crea
       const task = snapshot.decisionQueue.then(async () => {
         signal.throwIfAborted();
         const currentRevision = contextProviders.getRevision?.();
-        if (snapshot.contextRevision !== currentRevision) {
+        const extensions = promptExtensions.collect({ observations });
+        if (snapshot.contextRevision !== currentRevision || snapshot.promptSignature !== extensions.signature) {
           snapshot.history.reset();
           snapshot.contextRevision = currentRevision;
+          snapshot.promptSignature = extensions.signature;
         }
         const refreshContext = () => settings.context ?? collectContext({ observations,
           trigger: settings.trigger, signal, conversationHistory: true });
         const context = snapshot.history.needsContext() ? await refreshContext() : [];
         signal.throwIfAborted();
         return snapshot.policy.decideFromObservations(observations, { ...settings, context, signal,
-          history: snapshot.history, refreshContext });
+          history: snapshot.history, refreshContext, extensions });
       });
       snapshot.decisionQueue = task.catch(() => {});
       return task;

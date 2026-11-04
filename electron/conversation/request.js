@@ -42,7 +42,7 @@ function formatContext(context) {
   return `# 补充上下文\n\n${context.map(({ title, text }) => `## ${title}\n${text}`).join("\n\n")}`;
 }
 
-function buildRequestBody(ai, systemPrompt, observations, context = [], history = {}, expressions = []) {
+function buildRequestBody(ai, systemPrompt, observations, context = [], history = {}, expressions = [], effectSchemas = [], summarySchemas = {}) {
   const content = [{
     type: "text",
     text: `[当前时间 ${formatNowStamp()}；本轮输入 ${observations.length} 条]`,
@@ -77,7 +77,7 @@ function buildRequestBody(ai, systemPrompt, observations, context = [], history 
     temperature: 0.8,
     max_tokens: Number(ai.max_tokens) > 0 ? Number(ai.max_tokens) : 1024,
     stream: false,
-    ...(ai.outputFormat === "prompt" ? {} : { response_format: createResponseFormat(ai.outputFormat, expressions) }),
+    ...(ai.outputFormat === "prompt" ? {} : { response_format: createResponseFormat(ai.outputFormat, expressions, effectSchemas, summarySchemas) }),
     messages: [{ role: "system", content: systemPrompt },
       ...(history.prefix || []), ...(history.messages || []), { role: "user", content }],
   };

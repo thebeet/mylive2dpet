@@ -7,6 +7,7 @@ const { parseFactsJson } = require("../electron/plugins/memory/extractor");
 const { createLongTermStore } = require("../electron/plugins/memory/longTerm");
 const { createMemoryPlugin } = require("../electron/plugins/memory");
 const { createConversation } = require("../electron/conversation");
+const { summaryExtensions } = require("./helpers/summaryExtensions");
 const { createDecisionResult } = require("../electron/architecture/contracts");
 const { createExecutionModule } = require("../electron/modules/execution");
 const { MessageBus } = require("../electron/architecture/messageBus");
@@ -337,8 +338,8 @@ test("passive decisions can remain silent while preserving screenshot work evide
   bus.subscribe(EVENTS.SPEECH_OUTPUT_REQUESTED, (input) => speeches.push(input));
   const h = memoryHarness(storage, async (messages) => JSON.stringify(extraction(JSON.parse(messages[1].content).evidence)));
   t.after(() => h.plugin.dispose());
-  let output = { shouldSpeak: false, expression: "neutral", response: "", audioSummary: "", screenSummary: "飞书聊天", workSummary: "张琳在支付群里明确说负责接口联调" };
-  const chat = createConversation({ getConfig: () => ({ conversation: { ai: {
+  let output = { shouldSpeak: false, expression: "neutral", response: "", summaries: { screen: "飞书聊天", work: "张琳在支付群里明确说负责接口联调" }, effects: [] };
+  const chat = createConversation({ promptExtensions: summaryExtensions(), getConfig: () => ({ conversation: { ai: {
     endpoint: "https://example.invalid", apiKey: "test", model: "test" } } }), getExpressions: () => ["neutral"],
     configureProxy: async () => {}, encodeImage: () => "image", writeLog() {}, logger: quiet,
     fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: JSON.stringify(output) } }] }) }),
@@ -359,7 +360,7 @@ test("passive decisions can remain silent while preserving screenshot work evide
   const evidence = h.plugin.getSnapshot().work.recentEvidence[0];
   assert.equal(evidence.source, "screen");
   assert.deepEqual(evidence.metadata.observationIds, ["shot"]);
-  output = { shouldSpeak: true, expression: "neutral", response: "明白，张琳在对接接口", screenSummary: "", audioSummary: "", workSummary: "" };
+  output = { shouldSpeak: true, expression: "neutral", response: "明白，张琳在对接接口", summaries: {}, effects: [] };
   const direct = await chat.decideFromObservations([{ source: "manual-input", role: "user", content: [{ type: "text", text: "张琳负责什么？" }] }]);
   assert.equal(direct.speak, undefined);
   assert.equal(direct.reply, "明白，张琳在对接接口");

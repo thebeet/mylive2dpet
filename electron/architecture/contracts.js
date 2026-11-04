@@ -1,4 +1,5 @@
 const { randomUUID } = require("crypto");
+const { freeze } = require("./configValidation");
 
 /**
  * Observation: { id, source, role, capturedAt, expiresAt?, trigger?, content, metadata }.
@@ -44,24 +45,29 @@ function createObservation(input = {}) {
   };
 }
 
-/** Decision providers return { reply, speak?, expression?, summaries?, metadata? }. Explicit speak:false allows quiet observation. */
+/** Decision providers return { reply, speak?, expression?, summaries?, effects?, metadata? }. */
 function createDecisionResult(result) {
   if (!result || typeof result.reply !== "string" || (!result.reply.trim() && result.speak !== false)) {
     throw new TypeError("decision result must have a non-empty reply or explicitly set speak:false");
   }
   const summaries = result.summaries ?? {};
+  const effects = result.effects === undefined ? [] : result.effects;
+  if (!Array.isArray(effects) || effects.some((effect) => !effect || typeof effect !== "object" || Array.isArray(effect))) {
+    throw new TypeError("decision effects must be an array of objects");
+  }
   if (!summaries || typeof summaries !== "object" || Array.isArray(summaries) ||
       Object.values(summaries).some((value) => typeof value !== "string")) {
     throw new TypeError("decision summaries must map names to strings");
   }
-  return {
+  return Object.freeze({
     reply: result.speak === false ? "" : result.reply.trim(),
     ...(result.speak === false ? { speak: false } : {}),
     expression: typeof result.expression === "string" && result.expression.trim()
       ? result.expression : "neutral",
-    summaries: { ...summaries },
+    summaries: freeze({ ...summaries }),
+    effects: freeze(structuredClone(effects)),
     metadata: { ...result.metadata },
-  };
+  });
 }
 
 function createContextBlock(block) {

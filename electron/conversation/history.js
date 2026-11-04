@@ -124,8 +124,7 @@ function createConversationHistory({ options, client, logger }) {
       .map(([source, text]) => `${source === "audio" ? "设备音频" : source === "screen" ? "画面" : source === "work" ? "工作观察" : source}：${text}`).join("\n")}` });
     const assistant = JSON.stringify({ shouldSpeak: result.speak !== false,
       expression: result.expression, response: result.reply,
-      screenSummary: result.summaries.screen || "", audioSummary: result.summaries.audio || "",
-      workSummary: result.summaries.work || "" });
+      summaries: result.summaries, effects: result.effects || [] });
     turns.push({ messages: [{ role: "user", content }, { role: "assistant", content: assistant }] });
     segmentTurns++;
     lastUsage = Number(result.metadata?.inputTokens) || 0;

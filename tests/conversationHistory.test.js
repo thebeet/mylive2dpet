@@ -6,6 +6,7 @@ const { MessageBus } = require("../electron/architecture/messageBus");
 const { normalizeConfig } = require("../electron/config");
 const EVENTS = require("../electron/architecture/events");
 const { petPayload } = require("./helpers/petPayload");
+const { summaryExtensions } = require("./helpers/summaryExtensions");
 
 const quiet = { info() {}, warn() {}, error() {} };
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -20,6 +21,7 @@ const isSummary = (body) => body.messages[0].content.includes("你负责压缩�
 function harness(t, { history = {}, fetchImpl, ...dependencies } = {}) {
   const calls = [], encoded = [];
   const conversation = createConversation({
+    promptExtensions: summaryExtensions(),
     getConfig: () => ({ conversation: { ai: { endpoint: "https://test.invalid/v1", model: "test", apiKey: "test" }, history } }),
     logger: quiet, writeLog() {}, configureProxy: async () => {},
     encodeImage: (path) => { encoded.push(path); return `encoded-${path}`; },
@@ -30,7 +32,7 @@ function harness(t, { history = {}, fetchImpl, ...dependencies } = {}) {
       if (isSummary(body)) return response('{"summary":"用户正在实现桌宠，下一步验证缓存。"}');
       const hasImages = body.messages.at(-1).content.some(({ type }) => type === "image_url");
       return response(JSON.stringify(petPayload({ response: `reply-${calls.length}`,
-        screenSummary: hasImages ? "桌面有项目代码" : "", workSummary: hasImages ? "正在修改桌宠" : "" })));
+        summaries: hasImages ? { screen: "桌面有项目代码", work: "正在修改桌宠" } : {} })));
     }, ...dependencies,
   });
   t.after(() => conversation.dispose());

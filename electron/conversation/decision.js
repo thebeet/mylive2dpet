@@ -28,7 +28,8 @@ function createConversationPolicy({ client, getOptions, getExpressions = () => [
    * Make a decision from queued observations produced by the perception module.
    * @param {Array<object>} observations Generic observations with text/image content.
    */
-  async function decideFromObservations(observations, { context = [], signal, history, refreshContext, logGeneration } = {}) {
+  async function decideFromObservations(observations, { context = [], signal, history, refreshContext, logGeneration,
+    extensions = { contributions: [], effectSchemas: [], summarySchemas: {}, summaryValidators: [] } } = {}) {
     signal?.throwIfAborted();
     if (!Array.isArray(observations) || observations.length === 0) {
       throw new Error("没有可用于决策的感知观察");
@@ -40,13 +41,16 @@ function createConversationPolicy({ client, getOptions, getExpressions = () => [
     const inputs = prepareObservations(observations, encode, storage);
     const systemPrompt = buildSystemPrompt(character, {
       expressions,
+      extensions: extensions.contributions,
     });
     let prepared = history?.prepare(context);
-    let body = buildRequestBody(ai, systemPrompt, inputs, history ? [] : context, prepared, expressions);
+    let body = buildRequestBody(ai, systemPrompt, inputs, history ? [] : context, prepared, expressions,
+      extensions.effectSchemas, extensions.summarySchemas);
     if (history) {
       if (await history.compact(context, body.messages, signal, refreshContext, logGeneration)) {
         prepared = history.prepare(context);
-        body = buildRequestBody(ai, systemPrompt, inputs, [], prepared, expressions);
+        body = buildRequestBody(ai, systemPrompt, inputs, [], prepared, expressions,
+          extensions.effectSchemas, extensions.summarySchemas);
       }
       history.assertBudget(body.messages);
     }
@@ -54,20 +58,17 @@ function createConversationPolicy({ client, getOptions, getExpressions = () => [
     const conversation = prepared ? { id: prepared.conversationId, kind: "turn", turn: prepared.turn,
       turnId: randomUUID() } : undefined;
     let expression = "neutral";
-    let screenSummary = "";
-    let audioSummary = "";
-    let workSummary = "";
+    let summaries = {};
     let silent = false;
+    let effects = [];
     let raw = "";
     let inputTokens = null;
-    const hasImages = observations.some(({ content }) => content.some(({ type }) => type === "image"));
-    const hasAudio = observations.some(({ metadata }) => metadata?.modality === "audio");
     const hasUserInput = observations.some((observation) => observation.role === "user");
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
         if (ai.outputFormat === "auto") {
-          const format = createResponseFormat(negotiatedFormat, expressions);
+          const format = createResponseFormat(negotiatedFormat, expressions, extensions.effectSchemas, extensions.summarySchemas);
           if (format) body.response_format = format;
           else delete body.response_format;
         }
@@ -85,13 +86,13 @@ function createConversationPolicy({ client, getOptions, getExpressions = () => [
         }
         raw = messageContentToText(choice?.message?.content).trim();
         inputTokens = data?.usage?.prompt_tokens ?? data?.usage?.input_tokens ?? null;
-        const parsed = extractChatPayload(raw, expressions, { hasImages, hasAudio, hasUserInput });
+        const parsed = extractChatPayload(raw, expressions, { hasUserInput, observations,
+          summarySchemas: extensions.summarySchemas, summaryValidators: extensions.summaryValidators });
         response = (parsed.response || "").trim();
         expression = parsed.expression || "neutral";
-        screenSummary = hasImages ? (parsed.screenSummary || "").trim() : "";
-        audioSummary = hasAudio ? (parsed.audioSummary || "").trim() : "";
-        workSummary = hasImages ? (parsed.workSummary || "").trim() : "";
+        summaries = Object.fromEntries(Object.entries(parsed.summaries).map(([name, text]) => [name, text.trim()]));
         silent = parsed.shouldSpeak === false && observations.every((o) => o.role !== "user");
+        effects = parsed.effects;
 
         break;
       } catch (err) {
@@ -122,7 +123,8 @@ function createConversationPolicy({ client, getOptions, getExpressions = () => [
       reply: silent ? "" : response,
       ...(silent ? { speak: false } : {}),
       expression,
-      summaries: { screen: screenSummary, audio: audioSummary, ...(workSummary ? { work: workSummary } : {}) },
+      effects,
+      summaries,
       metadata: {
         raw,
         inputTokens,

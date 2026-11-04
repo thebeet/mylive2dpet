@@ -22,6 +22,7 @@ const { isDeepStrictEqual } = require("node:util");
 const { createDecisionScheduler } = require("./architecture/decisionScheduler");
 const { createServiceRegistry } = require("./architecture/serviceRegistry");
 const { createContextProviders } = require("./architecture/contextProviders");
+const { createPromptExtensions } = require("./architecture/promptExtensions");
 const { createStorage } = require("./storage");
 const { captureFullscreenToJpg } = require("./platform/screenCapture");
 const { registerDecisionModule } = require("./modules/decision");
@@ -145,9 +146,10 @@ const perception = createPerceptionService(messageBus, { getPolicy: () => loadCo
 const services = createServiceRegistry();
 const storage = createStorage({ services });
 const contextProviders = createContextProviders();
+const promptExtensions = createPromptExtensions();
 const conversation = createConversation({
   storage: storage.api,
-  getConfig: loadConfig, contextProviders, bus: messageBus,
+  getConfig: loadConfig, contextProviders, promptExtensions, bus: messageBus,
   getExpressions: () => loadExpressionNames({ includeInternal: false }),
   onRequest: (entry) => messageBus.notify(EVENTS.AI_REQUEST_STARTED, entry),
   onResult: (entry) => messageBus.notify(EVENTS.AI_REQUEST_FINISHED, entry),
@@ -171,6 +173,7 @@ const pluginHost = createPluginHost({
   services,
   storage,
   contextProviders,
+  promptExtensions,
   paths: { getUserData: () => app.getPath("userData"), projectRoot: path.resolve(__dirname, "..") },
   windows: { create: (options) => new BrowserWindow(options) },
   attention: { getIdleSeconds: () => powerMonitor.getSystemIdleTime() },

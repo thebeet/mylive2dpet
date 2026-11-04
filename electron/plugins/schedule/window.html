@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'">
+  <title>定时通知</title>
+  <style>
+    :root { color-scheme: dark; font-family: "Noto Sans SC", "Microsoft YaHei", sans-serif; background: #11131a; color: #eef0f6; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 22px; }
+    h1 { margin: 0 0 8px; font-size: 20px; }
+    .hint, .details { color: #a6a9b8; font-size: 12px; line-height: 1.6; }
+    label { display: block; margin: 16px 0 6px; font-size: 14px; }
+    input, textarea, select { font: inherit; padding: 10px; border: 1px solid #ffffff25; border-radius: 8px; background: #ffffff08; color: inherit; }
+    input, textarea { width: 100%; }
+    textarea { height: 90px; resize: vertical; }
+    button { font: inherit; cursor: pointer; border: 1px solid #ffffff25; border-radius: 8px; background: #ffffff08; color: inherit; padding: 8px 12px; }
+    button:disabled { opacity: .5; cursor: default; }
+    #create { background: #7654c9; border: 0; margin-top: 12px; }
+    #status { min-height: 22px; margin: 10px 0; font-size: 13px; color: #ffbdcb; }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 24px; }
+    h2 { font-size: 16px; margin: 0; }
+    #tasks { list-style: none; padding: 0; }
+    #tasks li { padding: 14px; margin: 10px 0; background: #ffffff06; border: 1px solid #ffffff15; border-radius: 10px; }
+    .text { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 8px; }
+    .details { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .cancel { margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>定时通知</h1>
+  <p class="hint">安排一条未来的通知，提交后由桌宠的正常对话流程处理，不保证立即回复。应用关闭期间错过的通知会在下次启动后补发。</p>
+  <form id="form">
+    <label for="time">通知时间 <span class="hint" id="timezone"></span></label>
+    <input id="time" type="datetime-local" step="1" required>
+    <label for="text">通知内容</label>
+    <textarea id="text" maxlength="4000" required placeholder="例如：提醒我开会"></textarea>
+    <button id="create" type="submit">添加通知</button>
+  </form>
+  <p id="status" role="status" aria-live="polite"></p>
+  <div class="toolbar">
+    <h2>通知记录</h2>
+    <select id="filter" aria-label="筛选通知">
+      <option value="active">待提交 / 失败</option>
+      <option value="all">全部</option>
+    </select>
+  </div>
+  <ul id="tasks"></ul>
+  <script src="window.js"></script>
+</body>
+</html>

@@ -3,6 +3,7 @@ const { getPlugin, isPluginEnabled } = require("./plugins/registry");
 const menuHooks = require("./menuHooks");
 const { createServiceRegistry } = require("./architecture/serviceRegistry");
 const { createContextProviders } = require("./architecture/contextProviders");
+const { createPromptExtensions } = require("./architecture/promptExtensions");
 const { planPlugins } = require("./architecture/pluginDependencies");
 const EVENTS = require("./architecture/events");
 const { createStorage } = require("./storage");
@@ -14,6 +15,7 @@ function createPluginHost({ bus, getConfig, perception, model, requestDecision, 
   services = createServiceRegistry(),
   storage = createStorage({ services }),
   contextProviders = createContextProviders(),
+  promptExtensions = createPromptExtensions(),
   platform = process.platform, logger = console, definitions = pluginDefinitions }) {
   const active = new Map();
   const registrations = new Map();
@@ -181,6 +183,12 @@ function createPluginHost({ bus, getConfig, perception, model, requestDecision, 
         register: (provide) => {
           assertAvailable();
           return track(contextProviders.register(name, (...args) => available() ? provide(...args) : []));
+        },
+      },
+      systemPrompt: {
+        register: (extension) => {
+          assertAvailable();
+          return track(promptExtensions.register(name, extension, { isActive: available }));
         },
       },
       services: {

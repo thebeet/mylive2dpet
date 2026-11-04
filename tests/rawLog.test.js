@@ -440,14 +440,15 @@ test("requests started before cleanup can finish and retry without restoring cle
   const storage = storageFor(db), repository = createRawLogRepository(storage), starts = [];
   const shot = storage.blobs("screenshots").put(Buffer.from("original"), { mimeType: "image/jpeg" });
   let resolveFirst, attempts = 0;
-  const service = chat({ storage, writeLog: undefined, encodeImage: () => Buffer.from("encoded").toString("base64"),
+  const service = chat({ storage, promptExtensions: require("./helpers/summaryExtensions").summaryExtensions(),
+    writeLog: undefined, encodeImage: () => Buffer.from("encoded").toString("base64"),
     retryWait: async () => {}, onRequest: entry => { starts.push(entry); repository.append(entry); },
     onResult: entry => repository.finish(entry),
     fetchImpl: async (_url, init) => {
       assert.equal(JSON.parse(init.body).logGeneration, undefined);
       if (++attempts === 1) return new Promise(resolve => { resolveFirst = resolve; });
       return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: {
-        content: JSON.stringify(petPayload({ response: "reply", screenSummary: "screen", workSummary: "work" })),
+        content: JSON.stringify(petPayload({ response: "reply", summaries: { screen: "screen", work: "work" } })),
       } }] }) };
     },
   });

@@ -6,6 +6,7 @@ const { createResponseFormat } = require("../electron/conversation/output");
 const { buildSystemPrompt } = require("../electron/conversation/prompt");
 const { normalizeConfig } = require("../electron/config");
 const { petPayload } = require("./helpers/petPayload");
+const { summaryExtensions } = require("./helpers/summaryExtensions");
 const { MessageBus } = require("../electron/architecture/messageBus");
 const { createPerceptionService } = require("../electron/architecture/perceptionService");
 const { registerDecisionModule } = require("../electron/modules/decision");
@@ -32,7 +33,7 @@ function harness(t, fetch, outputFormat = "auto") {
   return { conversation, calls };
 }
 
-test("strict parser accepts the six-field JSON contract without coercing types", () => {
+test("strict parser accepts the five-field JSON contract without coercing types", () => {
   const payload = petPayload({ expression: "smile", response: "你好" });
   assert.deepEqual(extractChatPayload(JSON.stringify(payload), ["neutral", "smile"]), payload);
   assert.deepEqual(extractChatPayload(JSON.stringify(petPayload({ shouldSpeak: false, response: "" }))),
@@ -43,7 +44,8 @@ test("strict parser rejects missing fields, wrong types, extra keys and unknown/
   for (const key of Object.keys(petPayload())) {
     const missing = petPayload(); delete missing[key];
     assert.throws(() => extractChatPayload(JSON.stringify(missing)), /缺少字段/);
-    for (const value of [null, [], {}, 1, key === "shouldSpeak" ? "false" : false]) {
+    for (const value of [null, ...(key === "effects" ? [[null], [1], [[]]] : [[]]),
+      ...(key === "summaries" ? [{ field: false }] : [{}]), 1, key === "shouldSpeak" ? "false" : false]) {
       assert.throws(() => extractChatPayload(JSON.stringify(petPayload({ [key]: value }))), /必须是/);
     }
   }
@@ -62,19 +64,20 @@ test("strict parser rejects plain text, fences, trailing prose, arrays and incom
 });
 
 test("business validation rejects silent user replies and summaries invented without the corresponding observation", () => {
+  const summaryInput = summaryExtensions({ includeAudio: true }).collect();
   for (const [payload, context] of [
     [petPayload({ response: "  " }), {}],
     [petPayload({ shouldSpeak: false }), {}],
     [petPayload({ shouldSpeak: false, response: " " }), {}],
     [petPayload({ shouldSpeak: false, response: "" }), { hasUserInput: true }],
-    [petPayload({ screenSummary: "invented screen" }), { hasImages: false }],
-    [petPayload({ workSummary: "invented task" }), { hasImages: false }],
-    [petPayload({ audioSummary: "invented speech" }), { hasAudio: false }],
+    [petPayload({ summaries: { screen: "invented screen", work: "", audio: "" } }), summaryInput],
+    [petPayload({ summaries: { screen: "", work: "invented task", audio: "" } }), summaryInput],
+    [petPayload({ summaries: { screen: "", work: "", audio: "invented speech" } }), summaryInput],
   ]) assert.throws(() => extractChatPayload(JSON.stringify(payload), ["neutral"], context),
     (error) => error.code === "AI_INVALID_OUTPUT");
 });
 
-test("request schema requires all six fields and uses the same expression enum as the prompt", async (t) => {
+test("request schema requires all five fields and uses the same expression enum as the prompt", async (t) => {
   const { conversation, calls } = harness(t, () => ok(JSON.stringify(petPayload())));
   await conversation.decideFromObservations(input);
   const format = calls[0].response_format;
@@ -83,7 +86,7 @@ test("request schema requires all six fields and uses the same expression enum a
   assert.equal(format.json_schema.schema.additionalProperties, false);
   assert.deepEqual(format.json_schema.schema.required, Object.keys(petPayload()));
   assert.deepEqual(format.json_schema.schema.properties.expression.enum, ["neutral", "smile"]);
-  assert.match(calls[0].messages[0].content, /六个字段必须全部提供/);
+  assert.match(calls[0].messages[0].content, /五个字段必须全部提供/);
   const defaults = createResponseFormat("json_schema").json_schema.schema.properties.expression.enum;
   assert.deepEqual(defaults, ["neutral", "smile", "thinking"]);
   assert.ok(buildSystemPrompt().includes(defaults.join(", ")));

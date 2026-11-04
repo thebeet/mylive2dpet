@@ -1,6 +1,7 @@
 /** Built-in catalog; options, loading rules, and dependencies belong to each plugin. */
 module.exports = [
   require("./manualInput/definition"),
+  require("./schedule/definition"),
   require("./storageSqlite/definition"),
   require("./dialogueHistory/definition"),
   require("./rawLog/definition"),

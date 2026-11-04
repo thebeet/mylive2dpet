@@ -355,10 +355,10 @@ test("request content supports both audio-only and mixed observations; audio sum
   assert.ok(audioBody.messages[1].content.some((part) => /a video narrator/.test(part.text)));
   const mixed = buildRequestBody({ model: "vision" }, "system", [audio, { source: "screen", role: "context", content: [{ type: "image", uri: "data:image/jpeg;base64,abc" }] }]);
   assert.equal(mixed.messages[1].content.filter((part) => part.type === "image_url").length, 1);
-  const parsed = extractChatPayload('{"shouldSpeak":true,"expression":"neutral","response":"heard","screenSummary":"","audioSummary":"外部视频在讲解代码","workSummary":""}');
-  assert.equal(parsed.audioSummary, "外部视频在讲解代码");
+  const parsed = extractChatPayload('{"shouldSpeak":true,"expression":"neutral","response":"heard","summaries":{"audio":"外部视频在讲解代码"},"effects":[]}');
+  assert.equal(parsed.summaries.audio, "外部视频在讲解代码");
   assert.throws(() => extractChatPayload('{"response":"old format"}'), /缺少字段/);
   const shortTerm = createShortTermStore();
-  shortTerm.append({ reply: parsed.response, summaries: { audio: parsed.audioSummary } });
+  shortTerm.append({ reply: parsed.response, summaries: parsed.summaries });
   assert.match(formatRecentDialogue(shortTerm.list()), /设备音频：外部视频/);
 });

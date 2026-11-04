@@ -44,6 +44,14 @@
   },
   "plugins": [
     {
+      "name": "schedule",
+      "enabled": true,
+      "observationTtlMs": 0,
+      "maxRetries": 2,
+      "retryDelayMs": 30000,
+      "_comment": "定时通知：默认启用，到期只提交 context 观察，不主动触发决策；未入队通知启动后补发。observationTtlMs=0 不设置观察有效期。"
+    },
+    {
       "name": "manual-input",
       "enabled": true,
       "_comment": "手动对话插件：右键输入窗口、用户文本观察与即时决策请求；默认启用。"

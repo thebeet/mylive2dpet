@@ -69,6 +69,41 @@ context.decisionContext.register(async () => [
 
 ## 插件宿主与扩展接口
 
+### 系统提示词与决策副作用
+
+主模型输出包含必填 `summaries: Record<string, string>` 和 `effects: object[]`（本轮没有适用摘要时 `{}`，没有副作用时 `[]`）。摘要是本轮产出的观察数据，副作用是交给插件的操作请求；两者都与 `speak` 独立。核心保留至规范化决策的 `result.summaries` 和 `result.effects`，现有 `decision.completed` 通知所有订阅插件，各插件读取感兴趣的数据或处理自己的 effect。通知错误隔离，逐个等待后再呈现回复。决策结果顶层、复制后的 summaries 和 effects 为只读。会话历史保存两者，但历史 effects 不作为执行请求重放。
+
+插件通过以下入口注册自己的可信系统指令与严格输出 Schema；业务类型和参数由插件声明，核心不包含特定插件分支：
+
+```js
+context.systemPrompt.register({
+  text: '本插件支持 {"type":"my-plugin.action","value":"..."}，按业务规则生成 effects。',
+  summarySchemas: { custom: { type: "string" } },
+  selectSummaryFields({ observations }) {
+    // 可选同步选择器，只返回本插件声明且适用于本轮观察的字段名。
+    return observations.length ? ["custom"] : [];
+  },
+  validateSummaries(summaries, { observations }) {
+    // 可选同步校验，业务不满足时抛出错误；此时整个模型结果无效，不广播完成。
+  },
+  effectSchemas: [{
+    type: "object", additionalProperties: false,
+    required: ["type", "value"],
+    properties: {
+      type: { type: "string", enum: ["my-plugin.action"] },
+      value: { type: "string" },
+    },
+  }],
+});
+context.bus.subscribe("decision.completed", ({ id, result }) => {
+  // 插件挑选 result.effects 中自己的类型，负责校验、处理错误及幂等。
+});
+```
+
+`main.js` 创建共享 `promptExtensions` 注入宿主和对话核心。宿主按插件名管理注册和卸载；停止时暂停贡献，恢复时重新生效，失败激活会回滚。核心每次主决策开始时取得贡献快照，追加至 system 消息；JSON Schema 的 effects items 合并各插件声明为 anyOf，没有声明时只允许空对象项。`summarySchemas` 定义插件可提供的摘要，`selectSummaryFields({ observations })` 可同步选择本轮适用的字段；不提供选择器时全部适用。核心按本轮选择合并 summaries 的严格对象 Schema，只要求本轮适用字段，禁止不适用字段（即使值为空字符串）；同名摘要声明会拒绝后注册插件，摘要值必须为字符串。所有输出模式都校验 summaries 的类型和声明字段，随后调用插件提供的同步 `validateSummaries` 进行业务校验；核心不硬编码 screen/audio/work 的处理规则。摘要错误沿用模型 JSON 重试机制，校验成功前不会广播决策完成或处理 effects。插件声明变化会在下一轮重置核心会话历史；每轮观察类型改变只调整输出 Schema，不重置历史，系统提示词保持稳定。此入口只影响主决策，不注入独立文本生成、记忆维护和会话汇总任务；它与观察背景的 `decisionContext.register()` 分开。
+
+视觉插件的 `screenPerception/prompt.js` 声明 `screen` 和 `work` 摘要；音频插件的 `audioOutputPerception/prompt.js` 声明 `audio`。各自注入具体摘要规则，并按实际图片或音频观察选择本轮字段；没有对应观察时必须省略对应字段。视觉自动采集关闭时仍加载手动截图能力，因此仍声明视觉摘要；音频插件只要已加载，也保留其摘要声明以支持菜单启用采集。停止整个插件宿主时贡献暂停。模型旧的 screenSummary/audioSummary/workSummary 平铺字段已移除；截图分析存储和旧历史数据保留原有字段名以兼容查看，不改写已有数据库。
+
 `electron/plugins/manifest.js` 只汇总各插件的 `definition.js`；每个定义集中声明 `normalizeOptions`、加载规则及服务依赖。`electron/pluginHost.js` 使用同一清单加载插件，注入配置读取、日志、总线、菜单、感知入口、决策请求、上下文注册、核心模型、通用服务、路径、窗口创建、受控 IPC、屏幕捕获及表情列表。插件通过 `activate(context)` 注册能力，并返回包含 `start`、`stop`、`dispose` 的生命周期对象。方法可以返回 Promise；不再使用单独的清理函数作为插件句柄。
 
 宿主串行处理激活、启动、停止和卸载请求，重复启动不会再次启动已运行的插件。停止时按加载的逆序向所有插件发出取消请求，再等待全部停止完成；卸载先停止所有插件，再按逆序等待各插件清理注册和资源。单个插件清理失败会记录日志，其余插件继续清理。重复卸载返回同一 Promise，卸载后的宿主不再启动或激活插件。应用在 `before-quit` 中等待卸载完成后退出。
@@ -82,6 +117,7 @@ manifest 使用 `provides`、`requires`、`optional` 声明服务，字段可以
 插件通过 `context.decisions.request({ trigger, signal, waitTimeoutMs })` 请求核心调度决策。默认等待上限为 120 秒。`signal` 可取消尚未开始的请求，已开始的模型任务由核心对话管理，调度器停止时统一取消在途请求。插件负责捕获返回 Promise 的错误。窗口定位可以读取 `context.pet.getBounds()`（桌宠未显示时为 `null`），以及 `context.screen.getPrimaryDisplay()`、`getDisplayNearestPoint(point)` 提供的显示器工作区。
 
 - `manual-input`：输入窗口、preload、文本验证、用户观察提交、即时决策请求与「手动对话…」菜单。IPC 使用 `manual-input:submit` 和 `manual-input:close`，仅接受自身窗口发送的请求。停止时关闭窗口并取消等待中的决策请求；卸载时清理菜单与 IPC。
+- `schedule`：单次定时通知与管理窗口，默认加载，`enabled=false` 时不加载。依赖 `storage`，使用 `schedule.tasks` JSON 集合并提供同名服务（`create`、`list`、`cancel`）。注册系统提示词及 `schedule.create` 的 effect Schema，在 `decision.completed` 中逐项校验和创建任务，按决策 ID 与 effect 序号持久化去重。到期仅提交 `source=schedule`、`role=context`、`trigger=scheduled` 的观察，不触发决策或执行输出。最近目标时间使用单个定时器，每次等待最多 30 秒以校准系统时间和休眠恢复；停止清理定时器、关闭窗口并等待在途提交完成，未入队任务在下次启动补发。状态为 pending/submitting/queued/failed/cancelled，queued 仅表示已入队，不跟踪队列淘汰或后续执行。IPC 校验自身窗口发送者，窗口使用 sandbox 与 contextIsolation。
 - `screen-perception`：截图周期、变化检测状态和图片观察生成。停止时清理定时器，丢弃并清理尚未完成的旧周期截图。手动保存截图不入队。
 - `audio-output-perception`：音频采集、分段、转写、去重与观察有效期。转写使用 `content: [{ type: "text", text }]`，音频详情保存在 `metadata`。
 - `tts`：独立订阅通用语音请求并发布播放状态。实例管理运行开关、任务队列、取消信号、合成器和播放器；停止或卸载时取消全部任务并等待清理完成。
@@ -204,7 +240,7 @@ AI 对话请求的 `system` 仅包含角色设定、固定行为/记忆使用规
 
 `memory.work.enabled=true` 启用工作记忆，并声明 SQLite 为必需依赖。`workStore.js` 维护 `work_evidence`、`work_entities`、`work_claims`、`work_questions`、`work_question_answers` 与 `work_memory_state`，迁移命名空间为 `work-memory`。证据保存原始文字或截图工作摘要、来源、采集时间与元数据；图片文件仍按现有观察释放策略清理。被画像引用的证据不参加普通容量清理。
 
-`workMemory.js` 订阅观察入队及决策完成：文字观察直接保存，不依赖宠物发言；截图优先使用独立 `workSummary`，旧提供者退回 `screenSummary`。整理读取来源证据与旧画像，不把宠物台词当作事实。`workExtractor.js` 返回实体、画像关系和问题候选；忽略旧提供者返回的 summary 字段，兼容旧提供者返回的 facts，但不直接把它们写入长期记忆。画像主要记录用户的身份、稳定职责、习惯、偏好、沟通方式与人际关系；具体工作、任务、项目和技术细节按原始来源通过 `updateBuffer.stageEvidence` 暂存，到20轮对话门槛后统一评估是否更新长期记忆。启动时将已有画像中不属于人物信息的记录迁入长期记忆，保留来源、证据和用户确认依据，并在画像整理历史中归档原记录。更新在事务中完成，证据 ID 必须属于本批；无效 JSON、无效字段或伪造证据会保留整批待处理状态。维护由记忆协调器统一执行串行快照、取消与代次检查，不能在清空后重建旧画像。
+`workMemory.js` 订阅观察入队及决策完成：文字观察直接保存，不依赖宠物发言；截图优先使用独立 `summaries.work`，缺少时退回 `summaries.screen`。整理读取来源证据与旧画像，不把宠物台词当作事实。`workExtractor.js` 返回实体、画像关系和问题候选；忽略旧提供者返回的 summary 字段，兼容旧提供者返回的 facts，但不直接把它们写入长期记忆。画像主要记录用户的身份、稳定职责、习惯、偏好、沟通方式与人际关系；具体工作、任务、项目和技术细节按原始来源通过 `updateBuffer.stageEvidence` 暂存，到20轮对话门槛后统一评估是否更新长期记忆。启动时将已有画像中不属于人物信息的记录迁入长期记忆，保留来源、证据和用户确认依据，并在画像整理历史中归档原记录。更新在事务中完成，证据 ID 必须属于本批；无效 JSON、无效字段或伪造证据会保留整批待处理状态。维护由记忆协调器统一执行串行快照、取消与代次检查，不能在清空后重建旧画像。
 
 关系按实体、字段、范围保存当前版本和被替代版本。`user_answer` 高于自动观察及猜测；用户可以在「人物画像」页修正已有关系，写入新的明确证据并关闭同一字段的待提问。名字和实体类型形成稳定键，别名保留为检索线索，不仅凭名字自动合并不同实体。检索使用当前转写、用户输入和最近工作摘要，用户画像作为核心背景保留，其他人物需要文字相关性命中。
 
@@ -218,7 +254,7 @@ AI 对话请求的 `system` 仅包含角色设定、固定行为/记忆使用规
 
 宿主新增通用 `attention.getIdleSeconds()`，生产环境来自 Electron `powerMonitor.getSystemIdleTime()`。会议判断仅采用音频活动与文字线索，不进行说话人身份识别。所有提问和修正 IPC 仅接受本插件窗口的请求，preload 使用隔离与 sandbox，文本用 `textContent` 显示。
 
-AI 输出新增 `workSummary` 与 `shouldSpeak`。纯观察可返回 `shouldSpeak=false`，转换成通用决策 `speak:false`；核心允许显式静默决策，呈现模块隐藏思考气泡并跳过 TTS，记忆仍记录观察摘要。未显式静默的空回复继续视为无效，直接用户输入不能被 AI 的静默标记跳过。
+AI 输出通过 `summaries.work` 与 `shouldSpeak` 保留工作观察和静默行为。纯观察可返回 `shouldSpeak=false`，转换成通用决策 `speak:false`；核心允许显式静默决策，呈现模块隐藏思考气泡并跳过 TTS，记忆仍记录观察摘要。未显式静默的空回复继续视为无效，直接用户输入不能被 AI 的静默标记跳过。
 
 ## 记忆插件
 
@@ -354,7 +390,7 @@ docker compose -f compose.whisper.yaml ps
 
 TTS 插件发布带播放 ID 的通用 `execution.speech.state`。桌宠语音开始时丢弃尚未完成的片段，播放期间丢弃采集数据，最后一个播放结束后额外抑制 `ttsCooldownMs`（默认 600ms），避免识别自身输出。这段时间其他应用的语音也会被跳过。
 
-原始音频只在内存中分段并发送给配置的 ASR，不创建录音文件、不写入日志。等待转写的片段最多 3 段，待决策音频队列最多保留最近 20 条，音频观察 60 秒后过期，相同转写在 15 秒内去重。关闭采集会中止转写、清空待处理音频并停止 `parec`。菜单的「实时显示内容 → 开启」会在主屏工作区右上角打开置顶小窗口，显示监听状态、错误和最近 20 条转写文字。FunASR 流式文字持续更新同一条字幕，段尾替换成最终修正文字；HTTP provider 在整段转写完成后更新。重复文字也会显示，不受观察队列去重影响；关闭显示只关闭窗口，停止采集会关闭窗口并清空显示缓存。实时显示开关仅影响本次运行。模型生成的 `audioSummary` 与已有 `screenSummary` 一起保留在短期记忆及对话历史中，并标注为外部播放内容。
+原始音频只在内存中分段并发送给配置的 ASR，不创建录音文件、不写入日志。等待转写的片段最多 3 段，待决策音频队列最多保留最近 20 条，音频观察 60 秒后过期，相同转写在 15 秒内去重。关闭采集会中止转写、清空待处理音频并停止 `parec`。菜单的「实时显示内容 → 开启」会在主屏工作区右上角打开置顶小窗口，显示监听状态、错误和最近 20 条转写文字。FunASR 流式文字持续更新同一条字幕，段尾替换成最终修正文字；HTTP provider 在整段转写完成后更新。重复文字也会显示，不受观察队列去重影响；关闭显示只关闭窗口，停止采集会关闭窗口并清空显示缓存。实时显示开关仅影响本次运行。模型生成的 `summaries.audio` 与 `summaries.screen` 一起保留在短期记忆及对话历史中，并标注为外部播放内容。
 
 转写通过过滤和去重并入队后，音频插件会打印 `[plugin:audio-output-perception] transcript: 识别出的语音文本`，可在启动桌宠的终端日志中查看。
 

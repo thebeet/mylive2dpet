@@ -17,6 +17,7 @@ const { createScreenPerceptionPlugin } = require("../electron/plugins/screenPerc
 const { getOptions: getAiOptions } = require("../electron/conversation/options");
 const { getOptions: getScreenOptions } = require("../electron/plugins/screenPerception/options");
 const { petPayload } = require("./helpers/petPayload");
+const { summaryExtensions } = require("./helpers/summaryExtensions");
 const { workStorage } = require("./helpers/workStorage");
 
 const quiet = { info() {}, warn() {}, error() {} };
@@ -119,6 +120,7 @@ function chatHarness(response) {
   } };
   const contexts = createContextProviders({ logger: quiet });
   const chat = createConversation({
+    promptExtensions: summaryExtensions({ includeAudio: true }),
     contextProviders: contexts,
     getConfig: () => config, getExpressions: () => ["neutral", "smile"],
     configureProxy: async () => {}, writeLog: () => {}, logger: quiet,
@@ -127,7 +129,8 @@ function chatHarness(response) {
       const body = JSON.parse(init.body);
       requests.push({ url, body });
       return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: {
-        content: JSON.stringify(petPayload(typeof response === "function" ? response(body) : response)),
+        content: JSON.stringify(petPayload(typeof response === "function" ? response(body) : response,
+          Object.fromEntries(Object.keys(body.response_format.json_schema.schema.properties.summaries.properties).map((name) => [name, ""])) )),
       } }] }) };
     },
   });
@@ -180,7 +183,7 @@ test("AI keeps system and memory snapshots stable without appending changed retr
 
 test("text-only manual and audio inputs reach output and memory without image encoding", async (t) => {
   const h = chatHarness((body) => ({ response: "heard", expression: "smile",
-    audioSummary: JSON.stringify(body.messages.at(-1)).includes("video narrator") ? "external video" : "" }));
+    summaries: { audio: JSON.stringify(body.messages.at(-1)).includes("video narrator") ? "external video" : "" } }));
   const bus = new MessageBus();
   const perception = createPerceptionService(bus);
   const memory = createMemoryPlugin({
@@ -215,7 +218,7 @@ test("text-only manual and audio inputs reach output and memory without image en
   const turns = memory.getState().turns;
   assert.equal(turns.length, 1);
   assert.equal(turns[0].userMessage, "hello pet");
-  assert.equal(turns[0].summaries.screen, "");
+  assert.equal(Object.hasOwn(turns[0].summaries, "screen"), false);
   assert.equal(turns[0].summaries.audio, "external video");
   assert.equal(history[0].userSaid, "hello pet");
   assert.deepEqual(bubbles.map(({ type }) => type), ["thinking", "say"]);
@@ -230,12 +233,12 @@ test("text-only manual and audio inputs reach output and memory without image en
 });
 
 test("AI provider accepts images from new sources and rejects unsupported parts before calling the model", async () => {
-  const h = chatHarness({ response: "image seen", screenSummary: "a picture" });
+  const h = chatHarness({ response: "image seen", summaries: { screen: "a picture" } });
   const image = { source: "custom-image-source", content: [{ type: "image", path: "/virtual/image.jpg" }] };
   const result = await h.chat.decideFromObservations([image]);
   assert.equal(h.requests[0].body.messages[1].content.find(({ type }) => type === "image_url").image_url.url,
     "data:image/jpeg;base64,encoded");
-  assert.deepEqual(result.summaries, { screen: "a picture", audio: "" });
+  assert.deepEqual(result.summaries, { screen: "a picture", work: "" });
   await assert.rejects(h.chat.decideFromObservations([{
     source: "new-sensor", content: [{ type: "custom-metric", value: 42 }],
   }]), /不支持内容类型/);
@@ -368,7 +371,7 @@ test("conversation reads Storage screenshot bytes, keeps their reference and doe
   const image = storage.blobs("screenshots").put(Buffer.from("persisted-jpeg"));
   const uri = `storage://screenshots/${image.id}`;
   const calls = [], encoded = [];
-  const core = createConversation({ storage,
+  const core = createConversation({ storage, promptExtensions: summaryExtensions(),
     getConfig: () => ({ conversation: { ai: { endpoint: "https://test.invalid/v1", apiKey: "test", model: "test" } } }),
     logger: quiet, writeLog() {}, configureProxy: async () => {},
     encodeImage: data => { encoded.push(data); return data.toString("base64"); },
@@ -376,7 +379,7 @@ test("conversation reads Storage screenshot bytes, keeps their reference and doe
       const body = JSON.parse(init.body); calls.push(body);
       const hasImages = body.messages.at(-1).content.some(part => part.type === "image_url");
       return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: {
-        content: JSON.stringify(petPayload({ response: "reply", screenSummary: hasImages ? "项目代码" : "" })),
+        content: JSON.stringify(petPayload({ response: "reply", summaries: hasImages ? { screen: "项目代码", work: "" } : {} })),
       } }] }) };
     },
   });

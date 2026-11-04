@@ -150,7 +150,9 @@ function createScreenPerceptionPlugin(context, dependencies = {}) {
 }
 
 function activate(context) {
-  return createScreenPerceptionPlugin(context);
+  const unregisterPrompt = context.systemPrompt.register(require("./prompt").promptExtension);
+  const plugin = createScreenPerceptionPlugin(context);
+  return { ...plugin, dispose() { unregisterPrompt(); return plugin.dispose(); } };
 }
 
 module.exports = { activate, createScreenPerceptionPlugin };

@@ -346,7 +346,8 @@ function registerAudioOutputPerceptionPlugin(bus, dependencies = {}) {
 }
 
 function activate(context) {
-  return registerAudioOutputPerceptionPlugin(context.bus, {
+  const unregisterPrompt = context.systemPrompt.register(require("./prompt").promptExtension);
+  const plugin = registerAudioOutputPerceptionPlugin(context.bus, {
     loadConfig: () => context.config.get(),
     platform: context.platform,
     menu: context.menu,
@@ -356,6 +357,7 @@ function activate(context) {
     screen: context.screen,
     ipc: context.ipc,
   });
+  return { ...plugin, dispose() { unregisterPrompt(); return plugin.dispose(); } };
 }
 
 function audioStatusLabel(state, platform) {
