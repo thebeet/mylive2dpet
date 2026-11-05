@@ -104,8 +104,14 @@ test("generated Furina clips fit named bones, animate dance legs and return to a
   const { bakeMotionPack, parseModel } = await import("../scripts/generate-furina-motions.mjs");
   const model = parseModel(modelFile);
   const pack = bakeMotionPack(model);
-  assert.equal(pack.clips.length, 9);
-  assert.equal(new Set(pack.clips.map(motion => motion.clip.uuid)).size, 9, "clips need distinct identities for the animation mixer");
+  assert.equal(pack.clips.length, 10);
+  assert.equal(new Set(pack.clips.map(motion => motion.clip.uuid)).size, 10, "clips need distinct identities for the animation mixer");
+  const hatClip = THREE.AnimationClip.parse(pack.clips.find(motion => motion.id === "hat_tip").clip);
+  const hatTrack = hatClip.tracks.find(track => track.name === ".bones[帽].position").createInterpolant();
+  const worn = new THREE.Vector3().fromArray(hatTrack.evaluate(0));
+  const carried = new THREE.Vector3().fromArray(hatTrack.evaluate(5.2));
+  assert.ok(worn.distanceTo(carried) > 4, "hat must actually leave the head");
+  assert.ok(worn.distanceTo(new THREE.Vector3().fromArray(hatTrack.evaluate(9.9))) < 1e-5, "hat must return to its original fit");
   const dance = THREE.AnimationClip.parse(pack.clips.find(motion => motion.id === "swan_dance").clip);
   for (const side of ["左", "右"]) {
     const arm = dance.tracks.find(track => track.name === `.bones[${side}腕].quaternion`);
@@ -130,11 +136,11 @@ test("generated Furina clips fit named bones, animate dance legs and return to a
       assert.ok(names.has(name));
       assert.ok(!/髪|スカート|全ての親/.test(name), "cloth and display root stay outside animation control");
       if (property === "position") {
-        assert.equal(name, "センター");
+        assert.ok(["センター", "帽"].includes(name));
         const start = new THREE.Vector3().fromArray(track.values);
         const end = new THREE.Vector3().fromArray(track.values, track.values.length - 3);
         assert.ok(start.distanceTo(end) < 1e-6);
-        if (motion.id !== "swan_dance") for (let i = 0; i < track.values.length; i += 3) assert.ok(start.distanceTo(new THREE.Vector3().fromArray(track.values, i)) < 1e-6);
+        if (motion.id !== "swan_dance" && motion.id !== "hat_tip") for (let i = 0; i < track.values.length; i += 3) assert.ok(start.distanceTo(new THREE.Vector3().fromArray(track.values, i)) < 1e-6);
         continue;
       }
       if (motion.id !== "swan_dance" && /足|ひざ|下半身|センター/.test(name)) {

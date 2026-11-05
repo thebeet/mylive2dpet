@@ -7,7 +7,7 @@ import * as THREE from "three";
 
 const coreBones = ["上半身", "上半身2", "上半身3", "首", "頭", "左肩", "右肩", "左腕", "右腕", "左ひじ", "右ひじ", "左手首", "右手首"];
 const danceBones = ["センター", "下半身", ...["左", "右"].flatMap(side => ["足", "ひざ", "足首", "足D", "ひざD", "足首D"].map(joint => `${side}${joint}`))];
-const animatedBones = [...coreBones, ...danceBones];
+const animatedBones = [...coreBones, ...danceBones, "帽"];
 const idleAngles = {
   左腕: [-0.12, -0.08, -0.65], 右腕: [-0.12, 0.08, 0.65],
   左ひじ: [-0.55, 0.12, -0.9], 右ひじ: [-0.55, -0.12, 0.9],
@@ -22,6 +22,7 @@ const definitions = [
   { id: "bow", label: "鞠躬", duration: 3.2, loop: false },
   { id: "happy", label: "开心", duration: 3.6, loop: false },
   { id: "clap", label: "鼓掌", duration: 3.6, loop: false },
+  { id: "hat_tip", label: "摘帽致意", duration: 10, loop: false },
   { id: "swan_dance", label: "天鹅舞", duration: 16, loop: false },
 ];
 
@@ -103,6 +104,7 @@ export function bakeMotionPack(model) {
     右: handOrientation(rig, "右", new THREE.Vector3(1, 0, 0)),
     thinking: handOrientation(rig, "左", new THREE.Vector3(0, 0, -1), new THREE.Vector3(-0.65, 0.76, 0).normalize()),
   };
+  const hatRest = worldPosition(bones["帽"]);
   const headRest = worldPosition(bones["頭"]);
   const neckRest = worldPosition(bones["首"]);
   const chestRest = worldPosition(bones["上半身2"]);
@@ -154,7 +156,7 @@ export function bakeMotionPack(model) {
   idlePose();
   const base = animatedBones.map(name => bones[name].quaternion.clone());
   const clips = definitions.map(definition => {
-    const times = [], positions = [], values = animatedBones.map(() => []);
+    const times = [], positions = [], hatPositions = [], values = animatedBones.map(() => []);
     const frameCount = Math.round(definition.duration * 30);
     for (let frame = 0; frame <= frameCount; frame++) {
       const time = frame / 30;
@@ -201,6 +203,29 @@ export function bakeMotionPack(model) {
             reach(rig, "右", center.clone().add(new THREE.Vector3(-gap, 0, 0)), handRotations.右);
             break;
           }
+          case "hat_tip": {
+            const ease = (a, b) => THREE.MathUtils.smootherstep(time, a, b);
+            const lift = ease(2, 3) * (1 - ease(7.1, 8.1));
+            const carry = ease(3, 4.6) * (1 - ease(5.8, 7.1));
+            const hold = ease(0.3, 2) * (1 - ease(8.1, 9.7));
+            const bow = ease(4.6, 5) * (1 - ease(5.4, 5.9));
+            bones["上半身"].rotation.x = 0.09 * bow;
+            bones["頭"].rotation.set(0.07 * bow, -0.04 * hold, -0.03 * hold);
+            root.updateMatrixWorld(true);
+            const rotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.2 * carry, -0.15 * carry, -0.2 * carry));
+            const target = hatRest.clone().add(new THREE.Vector3(0, 1.4 * lift, 0).multiplyScalar(bodyScale));
+            target.lerp(hatRest.clone().add(new THREE.Vector3(1.65, -5.2, 3.3).multiplyScalar(bodyScale)), carry);
+            if (time >= 2 && time <= 8.1) {
+              bones["帽"].position.copy(bones["帽"].parent.worldToLocal(target.clone()));
+              setWorldRotation(bones["帽"], rotation);
+            }
+            const grip = new THREE.Vector3(0.95, -0.8, 0.5).multiplyScalar(bodyScale);
+            const handTarget = target.clone().add(grip.applyQuaternion(rotation));
+            const before = ["腕", "ひじ", "手首"].map(joint => bones[`左${joint}`].quaternion.clone());
+            reach(rig, "左", handTarget, handRotations.左);
+            ["腕", "ひじ", "手首"].forEach((joint, i) => bones[`左${joint}`].quaternion.slerpQuaternions(before[i], bones[`左${joint}`].quaternion.clone(), hold));
+            break;
+          }
           case "swan_dance": {
             const ease = t => { const u = THREE.MathUtils.clamp(t, 0, 1); return u*u*u*(10+u*(-15+6*u)); };
             const envelope = ease(time / 1.8) * ease((definition.duration - time) / 1.8);
@@ -243,9 +268,11 @@ export function bakeMotionPack(model) {
       }
       animatedBones.forEach((name, i) => values[i].push(...bones[name].quaternion.toArray()));
       positions.push(...bones["センター"].position.toArray());
+      hatPositions.push(...bones["帽"].position.toArray());
     }
     const tracks = animatedBones.map((name, i) => new THREE.QuaternionKeyframeTrack(`.bones[${name}].quaternion`, times, values[i]).optimize());
     tracks.push(new THREE.VectorKeyframeTrack(".bones[センター].position", times, positions).optimize());
+    tracks.push(new THREE.VectorKeyframeTrack(".bones[帽].position", times, hatPositions).optimize());
     const json = THREE.AnimationClip.toJSON(new THREE.AnimationClip(definition.id, definition.duration, tracks));
     delete json.uuid;
     const hash = createHash("sha256").update(JSON.stringify(json)).digest("hex");

@@ -13,6 +13,7 @@ const path = require("path");
 const { loadConfig, startConfigWatcher, stopConfigWatcher, subscribeConfig } = require("./config");
 const { getMenuContributions, setMenuRefreshHandler } = require("./menuHooks");
 const { createAvatarHost } = require("./architecture/avatar");
+const { avatarWindowSize } = require("./architecture/avatarViewport");
 const avatarPluginNames = new Set(require("./plugins/manifest").filter(item => item.kind === "avatar").map(item => item.name));
 const { MessageBus } = require("./architecture/messageBus");
 const EVENTS = require("./architecture/events");
@@ -52,12 +53,9 @@ let runtimeUpdates = Promise.resolve();
 function readWindowSize() {
   try {
     const ui = loadConfig().ui || {};
-    const width = Number(ui.windowWidth) || DEFAULT_WIN.width;
-    const height = Number(ui.windowHeight) || DEFAULT_WIN.height;
-    winSize = {
-      width: Math.max(280, Math.round(width)),
-      height: Math.max(420, Math.round(height)),
-    };
+    const display = mainWindow && !mainWindow.isDestroyed()
+      ? screen.getDisplayMatching(mainWindow.getBounds()) : screen.getPrimaryDisplay();
+    winSize = avatarWindowSize(ui, avatar.getSnapshot().avatar?.renderer, display.workArea);
   } catch {
     winSize = { ...DEFAULT_WIN };
   }
@@ -143,6 +141,19 @@ function sendBubble(payload) {
 const avatar = createAvatarHost({
   onChange: snapshot => {
     if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+      if (snapshot.avatar) {
+        const previous = mainWindow.getBounds();
+        const size = readWindowSize();
+        const area = screen.getDisplayMatching(previous).workArea;
+        mainWindow.setMinimumSize(1, 1);
+        mainWindow.setMaximumSize(Math.max(previous.width, size.width), Math.max(previous.height, size.height));
+        mainWindow.setBounds({ ...size,
+          x: Math.max(area.x, Math.min(previous.x + previous.width - size.width, area.x + area.width - size.width)),
+          y: Math.max(area.y, Math.min(previous.y + previous.height - size.height, area.y + area.height - size.height)),
+        });
+        mainWindow.setMinimumSize(size.width, size.height);
+        mainWindow.setMaximumSize(size.width, size.height);
+      }
       mainWindow.webContents.send("pet:avatar-changed", snapshot);
     }
     refreshTrayMenu();

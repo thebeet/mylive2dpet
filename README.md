@@ -66,7 +66,7 @@ assets/
 
 `assets/` 被 Git 忽略，需要自行准备模型包。形象由 `plugins` 中的 `avatar-live2d` 和 `avatar-3d` 控制，同时只允许启用一个；模型路径、大小、偏移和图标均通过插件配置，不需要改代码。完整配置见 [config.example.json](config.example.json)，接口和模型说明见 [形象插件文档](electron/plugins/avatarShared/README.md)。
 
-默认启用 `avatar-live2d`，支持 Setsuna_v081l_b，保留 Thinking 待机、ReachStudy 点击动作及模型表情。`avatar-3d` 支持本地 `assets/【芙宁娜】/【芙宁娜】.pmx`（也可使用同目录下的 `【芙宁娜_荒】.pmx`），包含 PMX 贴图、表情、自动眨眼、头部跟随、呼吸待机和招手。运行 `npm run motions:furina` 可根据模型骨骼离线预生成待机、招手、点头、摇头、思考、鞠躬、开心、鼓掌、天鹅舞，重载形象后从右键「播放动作」使用，结束后平滑返回待机。切换到芙宁娜时，在同一次配置保存中将 `avatar-live2d.enabled` 设为 `false`、`avatar-3d.enabled` 设为 `true`；应用自动释放旧形象并加载新形象。3D 默认开启 PMX 头发和服饰刚体物理，可通过 `avatar-3d.physicsEnabled=false` 关闭；当前不包含 VMD 动画播放或其它 3D 文件格式。
+默认启用 `avatar-live2d`，支持 Setsuna_v081l_b，保留 Thinking 待机、ReachStudy 点击动作及模型表情。`avatar-3d` 支持本地 `assets/【芙宁娜】/【芙宁娜】.pmx`（也可使用同目录下的 `【芙宁娜_荒】.pmx`），包含 PMX 贴图、表情、自动眨眼、头部跟随、呼吸待机和招手。运行 `npm run motions:furina` 可根据模型骨骼离线预生成待机、招手、点头、摇头、思考、鞠躬、开心、鼓掌、摘帽致意、天鹅舞，重载形象后从右键「播放动作」使用，结束后平滑返回待机。切换到芙宁娜时，在同一次配置保存中将 `avatar-live2d.enabled` 设为 `false`、`avatar-3d.enabled` 设为 `true`；应用自动释放旧形象并加载新形象。3D 默认开启 PMX 头发和服饰刚体物理，可通过 `avatar-3d.physicsEnabled=false` 关闭；当前不包含 VMD 动画播放或其它 3D 文件格式。
 
 芙宁娜资源包标注模型提供为 miHoYo、模型改造为观海；使用时遵守包内 `readme【一定要看】.txt`，模型资源不纳入仓库。
 

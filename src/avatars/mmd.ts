@@ -3,6 +3,7 @@ import { MMDLoader } from "three/examples/jsm/loaders/MMDLoader.js";
 import type { AvatarRenderer, RendererContext } from "./types";
 import type { MmdPhysicsController } from "./mmdPhysics";
 import { loadMmdMotions, type MmdMotionPlayer } from "./mmdMotions";
+import { mmdViewport } from "./mmdViewport";
 
 function disposeMesh(mesh: THREE.SkinnedMesh) {
   mesh.geometry.dispose();
@@ -121,14 +122,7 @@ export async function createRenderer({ mount, descriptor, signal }: RendererCont
       const width = window.innerWidth;
       const viewportHeight = window.innerHeight;
       renderer.setSize(width, viewportHeight);
-      const visibleHeight = height / (0.68 * descriptor.scale);
-      const halfWidth = visibleHeight * width / viewportHeight / 2;
-      // Reserve room above the head; positive offset moves the model down.
-      const shift = visibleHeight * (0.12 + descriptor.verticalOffset / viewportHeight);
-      camera.left = -halfWidth;
-      camera.right = halfWidth;
-      camera.top = visibleHeight / 2 + shift;
-      camera.bottom = -visibleHeight / 2 + shift;
+      Object.assign(camera, mmdViewport(height, width, viewportHeight, descriptor.scale, descriptor.verticalOffset));
       camera.updateProjectionMatrix();
     },
     setExpression(name) {

@@ -1,11 +1,11 @@
 import { MMDPhysics } from "three/examples/jsm/animation/MMDPhysics.js";
-import type { SkinnedMesh } from "three";
+import { Quaternion, Vector3, type SkinnedMesh } from "three";
 import ammoScriptUrl from "three/examples/jsm/libs/ammo.wasm.js?url";
 import ammoWasmUrl from "three/examples/jsm/libs/ammo.wasm.wasm?url";
 
 type AmmoApi = Record<string, unknown> & { destroy(value: object): void };
 type AmmoFactory = (options: { wasmBinary: Uint8Array }) => Promise<AmmoApi>;
-type RigidBodyData = { type: number; groupIndex: number; groupTarget: number };
+type RigidBodyData = { type: number; groupIndex: number; groupTarget: number; boneIndex?: number };
 type NativeJoint = { constraint: { setParam(id: number, value: number, axis: number): void } };
 const physicsStep = 1 / 130;
 const maxCatchUpSteps = 6;
@@ -134,8 +134,28 @@ export async function createMmdPhysics(mesh: SkinnedMesh, signal: AbortSignal): 
       body.type === 0 ? mask | (1 << body.groupIndex) : mask, 0);
     const rigidBodies = (data.rigidBodies as RigidBodyData[]).map(body =>
       body.type === 0 ? body : { ...body, groupTarget: body.groupTarget & bodyGroups });
+    // Furina's hat ribbons are constrained to the head in the source PMX.
+    // Give those joints a kinematic hat anchor at the same bind transform, so
+    // removing the hat carries its ribbons without pulling them toward the head.
+    const hat = mesh.skeleton?.getBoneByName("帽");
+    const hatIndex = hat ? mesh.skeleton.bones.indexOf(hat) : -1;
+    const headBody = hat ? rigidBodies.findIndex(body => body.type === 0 && mesh.skeleton.bones[body.boneIndex!]?.name === "頭") : -1;
+    const constraints = data.constraints.map((joint: { rigidBodyIndex1: number; rigidBodyIndex2: number }) => ({ ...joint }));
+    if (hatIndex >= 0 && headBody >= 0) {
+      const anchor = rigidBodies.length;
+      rigidBodies.push({ ...rigidBodies[headBody], boneIndex: hatIndex, groupTarget: 0 });
+      const onHat = (index: number) => {
+        let bone = mesh.skeleton.bones[rigidBodies[index]?.boneIndex!];
+        while (bone) { if (bone === hat) return true; bone = bone.parent as typeof bone; }
+        return false;
+      };
+      for (const joint of constraints) {
+        if (joint.rigidBodyIndex1 === headBody && onHat(joint.rigidBodyIndex2)) joint.rigidBodyIndex1 = anchor;
+        else if (joint.rigidBodyIndex2 === headBody && onHat(joint.rigidBodyIndex1)) joint.rigidBodyIndex2 = anchor;
+      }
+    }
     physics = inModelSpace(() => {
-      const instance = new MMDPhysics(mesh, rigidBodies, data.constraints, { unitStep: physicsStep, maxStepNum: maxCatchUpSteps });
+      const instance = new MMDPhysics(mesh, rigidBodies, constraints, { unitStep: physicsStep, maxStepNum: maxCatchUpSteps });
       const world = instance.world as unknown as { getSolverInfo(): { set_m_numIterations(value: number): void } };
       world.getSolverInfo().set_m_numIterations(40);
       for (const entry of instance.constraints) {
@@ -164,6 +184,64 @@ export async function createMmdPhysics(mesh: SkinnedMesh, signal: AbortSignal): 
     const api = scopedAmmo as AmmoApi & { btVector3: new (x: number, y: number, z: number) => object };
     return new api.btVector3(0, 0, 0);
   });
+  // Bound solver motion before it reaches the visible skeleton. A frame may
+  // contain several catch-up steps, so share one displacement budget among them.
+  // Kinematic bodies remain controlled by the authored animation.
+  const positions = mesh.geometry.getAttribute("position");
+  let minY = Infinity, maxY = -Infinity;
+  if (positions) for (let i = 0; i < positions.count; i++) {
+    minY = Math.min(minY, positions.getY(i)); maxY = Math.max(maxY, positions.getY(i));
+  }
+  const modelHeight = Number.isFinite(maxY - minY) && maxY > minY ? maxY - minY : 20;
+  const maxFrameDistance = modelHeight * 0.008;
+  const maxFrameAngle = Math.PI / 30;
+  let stepDistance = maxFrameDistance, stepAngle = maxFrameAngle;
+  const scratch = withAmmo(() => {
+    const api = scopedAmmo as AmmoApi & {
+      btVector3: new (x: number, y: number, z: number) => { setValue(x: number, y: number, z: number): void };
+      btQuaternion: new (x: number, y: number, z: number, w: number) => { setValue(x: number, y: number, z: number, w: number): void };
+    };
+    return { origin: new api.btVector3(0, 0, 0), rotation: new api.btQuaternion(0, 0, 0, 1) };
+  });
+  for (const entry of physics.bodies) {
+    if ((entry.params as RigidBodyData).type === 0) continue;
+    const body = entry.body as unknown as {
+      getCenterOfMassTransform(): {
+        getOrigin(): { x(): number; y(): number; z(): number };
+        getRotation(): { x(): number; y(): number; z(): number; w(): number };
+        setOrigin(value: object): void; setRotation(value: object): void;
+      };
+      setCenterOfMassTransform(value: object): void;
+      getMotionState(): { setWorldTransform(value: object): void };
+      setLinearVelocity(value: object): void; setAngularVelocity(value: object): void; clearForces(): void;
+    };
+    const previous = new Vector3(), current = new Vector3();
+    const previousRotation = new Quaternion(), rotation = new Quaternion();
+    const updateFromBone = entry.updateFromBone.bind(entry), updateBone = entry.updateBone.bind(entry);
+    entry.updateFromBone = () => {
+      const transform = body.getCenterOfMassTransform(), p = transform.getOrigin(), q = transform.getRotation();
+      previous.set(p.x(), p.y(), p.z()); previousRotation.set(q.x(), q.y(), q.z(), q.w());
+      return updateFromBone();
+    };
+    entry.updateBone = () => {
+      const transform = body.getCenterOfMassTransform(), p = transform.getOrigin(), q = transform.getRotation();
+      current.set(p.x(), p.y(), p.z()); rotation.set(q.x(), q.y(), q.z(), q.w());
+      const distance = previous.distanceTo(current), angle = previousRotation.angleTo(rotation);
+      if (distance > stepDistance || angle > stepAngle || !Number.isFinite(distance + angle)) {
+        if (!Number.isFinite(distance)) current.copy(previous);
+        else if (distance > stepDistance) current.sub(previous).multiplyScalar(stepDistance / distance).add(previous);
+        if (!Number.isFinite(angle)) rotation.copy(previousRotation);
+        else if (angle > stepAngle) rotation.slerpQuaternions(previousRotation, rotation, stepAngle / angle);
+        scratch.origin.setValue(current.x, current.y, current.z);
+        scratch.rotation.setValue(rotation.x, rotation.y, rotation.z, rotation.w);
+        transform.setOrigin(scratch.origin); transform.setRotation(scratch.rotation);
+        body.setCenterOfMassTransform(transform);
+        body.getMotionState().setWorldTransform(transform);
+        body.setLinearVelocity(zero); body.setAngularVelocity(zero); body.clearForces();
+      }
+      return updateBone();
+    };
+  }
   let disposed = false;
   let accumulated = 0;
   return {
@@ -173,6 +251,10 @@ export async function createMmdPhysics(mesh: SkinnedMesh, signal: AbortSignal): 
       // render frame. Accumulate real elapsed time and bound catch-up work.
       accumulated = Math.min(accumulated + delta, physicsStep * maxCatchUpSteps);
       if (accumulated < physicsStep) return;
+      const steps = Math.min(maxCatchUpSteps, Math.floor((accumulated + 1e-12) / physicsStep));
+      const frameBudget = Math.min(1, delta * 60);
+      stepDistance = maxFrameDistance * frameBudget / steps;
+      stepAngle = maxFrameAngle * frameBudget / steps;
       inModelSpace(() => {
         while (accumulated >= physicsStep) {
           physics.update(physicsStep);
@@ -183,6 +265,8 @@ export async function createMmdPhysics(mesh: SkinnedMesh, signal: AbortSignal): 
     reset() {
       if (disposed) return;
       accumulated = 0;
+      stepDistance = maxFrameDistance * physicsStep * 60;
+      stepAngle = maxFrameAngle * physicsStep * 60;
       inModelSpace(() => {
         // Clear momentum as well as transforms after a long pause or initial posing.
         for (const entry of physics.bodies) {
