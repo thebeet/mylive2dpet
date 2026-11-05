@@ -1,271 +1,148 @@
 import "./style.css";
-import * as PIXI from "pixi.js";
-import { Live2DModel, MotionPriority } from "pixi-live2d-display/cubism4";
 import { setupWindowDrag } from "./windowDrag";
-import { createSpeechBubble, type HeadAnchor } from "./speechBubble";
-
-const MODEL_URL =
-  "/assets/Setsuna_v081l_b/setsuna_psd2live_v001.model3.json";
-const OVERALL_SCALE = 1.5;
-const MODEL_VERTICAL_OFFSET = 50;
-
-Live2DModel.registerTicker(PIXI.Ticker);
-
-function assertCubismCore() {
-  const core = (
-    window as Window & { Live2DCubismCore?: unknown }
-  ).Live2DCubismCore;
-  if (!core) {
-    throw new Error(
-      "Live2D Cubism Core 未加载，请确认 public/live2dcubismcore.min.js 存在",
-    );
-  }
-}
-
-function layoutModel(model: Live2DModel, app: PIXI.Application) {
-  const padding = 0.04;
-  const maxW = app.screen.width * (1 - padding * 2);
-  // 上方多留气泡区（约 38% 高度）
-  const topReserve = 0.38;
-  const maxH = app.screen.height * (1 - padding - topReserve);
-  const scale =
-    Math.min(maxW / model.width, maxH / model.height) * OVERALL_SCALE;
-  model.scale.set(scale);
-  model.anchor.set(0.5, 1);
-  model.position.set(
-    app.screen.width / 2,
-    app.screen.height * 0.98 + MODEL_VERTICAL_OFFSET,
-  );
-}
-
-/** 估算头顶位置（模型包围盒顶部略下一点） */
-function getHeadAnchor(model: Live2DModel): HeadAnchor {
-  const bounds = model.getBounds();
-  return {
-    x: bounds.x + bounds.width / 2,
-    headTop: bounds.y + bounds.height * 0.08,
-  };
-}
-
-function setStatus(el: HTMLElement, text: string) {
-  el.textContent = text;
-}
-
-/** 读取模型支持的动作 / 表情并打印到 console */
-function logLive2DCapabilities(model: Live2DModel) {
-  const motionDefs =
-    model.internalModel.motionManager.definitions ?? {};
-  const motions = Object.entries(motionDefs).map(([group, list]) => ({
-    group,
-    count: Array.isArray(list) ? list.length : 0,
-    files: Array.isArray(list)
-      ? list.map((m) => (m as { File?: string })?.File ?? "(unknown)")
-      : [],
-  }));
-
-  const exprDefs = model.internalModel.motionManager.expressionManager
-    ?.definitions;
-  const expressions = Array.isArray(exprDefs)
-    ? exprDefs.map((e) => {
-        const item = e as { Name?: string; name?: string; File?: string };
-        return item.Name || item.name || item.File || String(e);
-      })
-    : [];
-
-  console.log("[Live2D] supported motions:", motions);
-  console.log(
-    "[Live2D] motion groups:",
-    motions.map((m) => `${m.group} (${m.count})`).join(", ") || "(none)",
-  );
-  console.log("[Live2D] supported expressions:", expressions);
-}
-
-function keepAnimating(app: PIXI.Application) {
-  app.ticker.autoStart = false;
-  app.ticker.stop();
-  PIXI.Ticker.shared.autoStart = false;
-  PIXI.Ticker.shared.stop();
-
-  window.setInterval(() => {
-    const now = performance.now();
-    PIXI.Ticker.shared.update(now);
-    app.render();
-  }, 1000 / 60);
-}
+import { createSpeechBubble } from "./speechBubble";
+import type { AvatarRenderer, AvatarSnapshot } from "./avatars/types";
 
 async function main() {
-  assertCubismCore();
-
   const mount = document.getElementById("app");
-  if (!mount) {
-    throw new Error("#app not found");
-  }
-
+  if (!mount) throw new Error("#app not found");
+  let active: AvatarRenderer | null = null;
+  const canRotate = (event: PointerEvent) => !!active?.rotate &&
+    active.hitTest({ x: event.clientX, y: event.clientY });
   const drag = setupWindowDrag(mount);
-
-  let modelRef: Live2DModel | null = null;
+  let controller: AbortController | null = null;
+  let revision = -1;
   let latestPointer: { x: number; y: number } | null = null;
-
-  const bubble = createSpeechBubble(mount, () =>
-    modelRef ? getHeadAnchor(modelRef) : null,
-  );
-
-  let lastAppliedExpression = "";
-  const applyExpression = (name?: string) => {
-    if (!name || !modelRef || name === lastAppliedExpression) return;
-    lastAppliedExpression = name;
-    void modelRef.expression(name);
-    console.log("[Live2D] expression:", name);
-  };
-
-  if (window.petDesktop?.onBubble) {
-    window.petDesktop.onBubble((payload) => {
-      bubble.handle(payload);
-      if (payload.type === "expression") {
-        applyExpression(payload.expression);
-      } else if (payload.type === "say" && payload.expression) {
-        applyExpression(payload.expression);
-      }
-    });
+  let tapPointer = -1;
+  let rotationDrag: {
+    pointerId: number; renderer: AvatarRenderer | null;
+    startX: number; startY: number; lastX: number; lastY: number; moved: boolean;
+  } | null = null;
+  function endRotation() {
+    const gesture = rotationDrag;
+    rotationDrag = null;
+    mount!.style.cursor = "";
+    if (gesture && mount!.hasPointerCapture(gesture.pointerId)) mount!.releasePointerCapture(gesture.pointerId);
   }
-
-  window.petDesktop?.onPlayMotion?.(({ group, index }) => {
-    if (!modelRef || typeof group !== "string" || !group ||
-        !Number.isInteger(index) || index < 0) return;
-    void modelRef.motion(group, index, MotionPriority.NORMAL);
-    console.log(`[Live2D] manual motion: ${group}[${index}]`);
-  });
-
-  window.petDesktop?.onPlayExpression?.((expression) => {
-    if (!modelRef || typeof expression !== "string" || !expression) return;
-    lastAppliedExpression = expression;
-    void modelRef.expression(expression);
-    console.log("[Live2D] manual expression:", expression);
-  });
-
+  const bubble = createSpeechBubble(mount, () => active?.getHeadAnchor() || null);
   const status = document.createElement("div");
   status.className = "status";
-  status.textContent = "正在加载模型（约 270MB，首次较慢）…";
   mount.appendChild(status);
 
-  const app = new PIXI.Application({
-    resizeTo: window,
-    backgroundAlpha: 0,
-    antialias: true,
-    autoDensity: true,
-    resolution: Math.min(window.devicePixelRatio || 1, 2),
-    autoStart: false,
-    sharedTicker: false,
-  });
-  mount.insertBefore(app.view as HTMLCanvasElement, status);
-  keepAnimating(app);
-
-  // 主进程已换算为相对窗口内容区的坐标；勿再用 screenX（Electron 无边框透明窗上常不准）
-  const updateFocus = (viewPosition: { x: number; y: number }) => {
-    const rect = (app.view as HTMLCanvasElement).getBoundingClientRect();
-    const position = {
-      x: viewPosition.x - rect.left,
-      y: viewPosition.y - rect.top,
-    };
-    latestPointer = position;
-    modelRef?.focus(position.x, position.y);
-  };
-  if (window.petDesktop?.onGlobalPointerMove) {
-    window.petDesktop.onGlobalPointerMove(updateFocus);
-  } else {
-    window.addEventListener("pointermove", (event) => {
-      updateFocus({ x: event.clientX, y: event.clientY });
-    });
-  }
-
-  try {
-    const model = await Live2DModel.from(MODEL_URL, {
-      // 视线只走全局指针 IPC，避免与库内 pointermove 抢 focus
-      autoInteract: false,
-      idleMotionGroup: "Thinking",
-    });
-
-    modelRef = model;
-    logLive2DCapabilities(model);
-    app.stage.addChild(model);
-    layoutModel(model, app);
-    if (latestPointer) updateFocus(latestPointer);
-
-    let layoutRaf = 0;
-    window.addEventListener("resize", () => {
-      cancelAnimationFrame(layoutRaf);
-      layoutRaf = requestAnimationFrame(() => {
-        layoutModel(model, app);
-        bubble.placeAboveHead();
-      });
-    });
-
-    void model.expression("neutral");
-    void model.motion("Thinking", 0, MotionPriority.IDLE);
-
-    // 该模型 model3 无 HitAreas，不能依赖 "hit"；用 pointertap 点角色触发
-    model.interactive = true;
-    model.cursor = "pointer";
-
-    // 记录按下键，避免右键 pointertap 误触聊天
-    let lastPointerButton = 0;
-    mount.addEventListener(
-      "pointerdown",
-      (e) => {
-        lastPointerButton = e.button;
-        if (e.button === 2) {
-          e.preventDefault();
-          e.stopPropagation();
-          window.petDesktop?.openContextMenu?.({
-            x: e.clientX,
-            y: e.clientY,
-          });
-        }
-      },
-      { capture: true },
-    );
-
-    model.on("pointertap", () => {
-      if (lastPointerButton !== 0) return;
-      if (drag.wasDragging()) return;
-      void model.motion("ReachStudy", 0, MotionPriority.NORMAL);
-      console.log("[chat] pet clicked, trigger chatNow");
-      void window.petDesktop?.chatNow?.().catch((err) => {
-        console.error("[chat] chatNow failed:", err);
-      });
-    });
-
-    mount.addEventListener(
-      "pointerup",
-      () => {
-        // 等 pointertap 读完 wasDragging 再清
-        requestAnimationFrame(() => drag.clearDrag());
-      },
-      { capture: true },
-    );
-
-    // 右键弹出与托盘相同的菜单（不触发聊天）
-    mount.addEventListener(
-      "contextmenu",
-      (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-      },
-      { capture: true },
-    );
-
-    status.remove();
-    window.petDesktop?.live2dReady?.();
-    requestAnimationFrame(() => {
+  async function showAvatar(snapshot: AvatarSnapshot) {
+    if (snapshot.revision <= revision) return;
+    revision = snapshot.revision;
+    endRotation();
+    tapPointer = -1;
+    drag.clearDrag();
+    controller?.abort();
+    active?.dispose();
+    active = null;
+    bubble.handle({ type: "hide" });
+    status.hidden = false;
+    if (!snapshot.avatar) { status.textContent = "未启用形象插件"; return; }
+    status.textContent = "正在加载形象…";
+    const loading = new AbortController();
+    controller = loading;
+    try {
+      const module = snapshot.avatar.renderer === "live2d"
+        ? await import("./avatars/live2d") : await import("./avatars/mmd");
+      loading.signal.throwIfAborted();
+      const instance = await module.createRenderer({ mount: mount!, descriptor: snapshot.avatar, signal: loading.signal });
+      if (loading.signal.aborted || revision !== snapshot.revision) { instance.dispose(); return; }
+      active = instance;
+      if (latestPointer) instance.focus(latestPointer);
+      status.hidden = true;
+      window.petDesktop?.avatarReady(snapshot.revision);
       window.petDesktop?.forcePaint();
-    });
-  } catch (err) {
-    console.error(err);
-    setStatus(
-      status,
-      err instanceof Error ? err.message : "Live2D 加载失败",
-    );
+    } catch (error) {
+      if (loading.signal.aborted) return;
+      console.error("[avatar] load failed:", error);
+      status.textContent = error instanceof Error ? error.message : "形象加载失败";
+    }
+  }
+  const disposeListeners = [
+    window.petDesktop?.onAvatarChanged(snapshot => { void showAvatar(snapshot); }),
+    window.petDesktop?.onAvatarCommand(command => {
+      if (command.revision !== revision) return;
+      if (command.type === "expression") active?.setExpression(command.id);
+      else if (command.type === "motion") active?.playMotion(command.id);
+      else if (command.type === "control" && command.id === "resetRotation") {
+        endRotation();
+        active?.resetRotation?.();
+      }
+    }),
+    window.petDesktop?.onBubble(payload => {
+      bubble.handle(payload);
+      if (payload.type === "expression" || payload.type === "say") {
+        if (payload.expression) active?.setExpression(payload.expression);
+      }
+    }),
+  ];
+  const focus = (position: { x: number; y: number }) => {
+    latestPointer = position;
+    active?.focus(position);
+  };
+  if (window.petDesktop) disposeListeners.push(window.petDesktop.onGlobalPointerMove(focus));
+  else window.addEventListener("pointermove", event => focus({ x: event.clientX, y: event.clientY }));
+
+  mount.addEventListener("contextmenu", event => event.preventDefault());
+  mount.addEventListener("pointerdown", event => {
+    if (event.button === 0) tapPointer = event.pointerId;
+    if (event.button !== 2) return;
+    rotationDrag = { pointerId: event.pointerId, renderer: canRotate(event) ? active : null,
+      startX: event.clientX, startY: event.clientY,
+      lastX: event.clientX, lastY: event.clientY, moved: false };
+    mount.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }, { capture: true });
+  mount.addEventListener("pointermove", event => {
+    const gesture = rotationDrag;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    if (!gesture.moved && Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) < 6) return;
+    gesture.moved = true;
+    if (gesture.renderer) mount.style.cursor = "grabbing";
+    gesture.renderer?.rotate?.(event.clientX - gesture.lastX, event.clientY - gesture.lastY);
+    gesture.lastX = event.clientX;
+    gesture.lastY = event.clientY;
+  });
+  mount.addEventListener("pointerup", event => {
+    if (event.button === 2) {
+      if (rotationDrag?.pointerId !== event.pointerId) return;
+      const clicked = !rotationDrag.moved;
+      endRotation();
+      if (clicked) window.petDesktop?.openContextMenu({ x: event.clientX, y: event.clientY });
+      return;
+    }
+    const tapped = event.button === 0 && event.pointerId === tapPointer && !drag.wasDragging() &&
+      active?.hitTest({ x: event.clientX, y: event.clientY });
+    if (tapped) {
+      active?.onTap();
+      void window.petDesktop?.chatNow().catch(error => console.error("[chat]", error));
+    }
+    tapPointer = -1;
+    drag.clearDrag();
+  });
+  const cancelGesture = () => { endRotation(); tapPointer = -1; drag.clearDrag(); };
+  mount.addEventListener("pointercancel", cancelGesture);
+  mount.addEventListener("lostpointercapture", event => {
+    if (rotationDrag?.pointerId === event.pointerId) cancelGesture();
+  });
+  window.addEventListener("blur", cancelGesture);
+  window.addEventListener("resize", () => { active?.resize(); bubble.placeAboveHead(); });
+  window.addEventListener("beforeunload", () => {
+    cancelGesture();
+    controller?.abort();
+    active?.dispose();
+    disposeListeners.forEach(dispose => dispose?.());
+    bubble.destroy();
+  }, { once: true });
+
+  if (window.petDesktop) {
+    try { await showAvatar(await window.petDesktop.getAvatarConfig()); }
+    catch (error) { status.textContent = error instanceof Error ? error.message : "无法读取形象配置"; }
+  } else {
+    status.textContent = "请通过桌面应用启动以读取形象插件配置";
   }
 }
-
 void main();

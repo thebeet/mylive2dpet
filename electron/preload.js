@@ -13,16 +13,17 @@ contextBridge.exposeInMainWorld("petDesktop", {
   openContextMenu: (pos) => {
     ipcRenderer.send("pet:context-menu", pos || {});
   },
-  live2dReady: () => ipcRenderer.send("pet:live2d-ready"),
-  onPlayMotion: (callback) => {
-    const handler = (_event, payload) => callback(payload);
-    ipcRenderer.on("pet:play-motion", handler);
-    return () => ipcRenderer.removeListener("pet:play-motion", handler);
+  getAvatarConfig: () => ipcRenderer.invoke("pet:avatar-config"),
+  avatarReady: revision => ipcRenderer.send("pet:avatar-ready", revision),
+  onAvatarChanged: callback => {
+    const handler = (_event, snapshot) => callback(snapshot);
+    ipcRenderer.on("pet:avatar-changed", handler);
+    return () => ipcRenderer.removeListener("pet:avatar-changed", handler);
   },
-  onPlayExpression: (callback) => {
-    const handler = (_event, expression) => callback(expression);
-    ipcRenderer.on("pet:play-expression", handler);
-    return () => ipcRenderer.removeListener("pet:play-expression", handler);
+  onAvatarCommand: callback => {
+    const handler = (_event, command) => callback(command);
+    ipcRenderer.on("pet:avatar-command", handler);
+    return () => ipcRenderer.removeListener("pet:avatar-command", handler);
   },
   onBubble: (callback) => {
     const handler = (_event, payload) => callback(payload);

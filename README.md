@@ -1,6 +1,6 @@
 # My Live2D Pet
 
-基于 Electron、TypeScript、PixiJS 和 Live2D Cubism 4 的桌宠。桌宠可以结合桌面画面、设备播放的语音、RSS 更新和手动输入理解当前情境，积累用户画像与项目经验，并通过表情、气泡和 TTS 展示回复；模型还可请求网页查询和创建定时通知。
+基于 Electron、TypeScript 的桌宠，支持 Live2D Cubism 4 和 PMX（MMD）形象插件。桌宠可以结合桌面画面、设备播放的语音、RSS 更新和手动输入理解当前情境，积累用户画像与项目经验，并通过表情、气泡和 TTS 展示回复；模型还可请求网页查询和创建定时通知。
 
 项目采用插件架构：核心负责窗口、消息总线、观察队列、决策调度、对话策略、模型请求、Storage 抽象和插件生命周期；感知、语音、记忆及历史对话由插件扩展。插件的配置标准化、加载规则和服务依赖集中在各自的 `definition.js`；记忆协调器统一管理后台更新、手动整理和清空，决策流程明确先记录回合再呈现回复。
 
@@ -30,6 +30,8 @@
 | 插件名 | 功能 | 启用条件与依赖 |
 | --- | --- | --- |
 | `manual-input` | 右键输入窗口；提交用户文本并主动请求决策 | 默认加载，可用 `enabled=false` 关闭 |
+| `avatar-live2d` | Live2D 形象、动作／表情菜单、视线跟随 | 默认启用，支持 Setsuna；与其它形象插件互斥 |
+| `avatar-3d` | PMX（MMD）形象、表情、待机和招手、头部跟随 | 显式启用，支持本地芙宁娜模型；与其它形象插件互斥 |
 | `screen-perception` | 定时全屏截图、画面变化检测、图片观察；手动保存截图与摘要关联 | 自动采集默认开启，`enabled=false` 只关闭自动采集，手动截图保留；依赖 Storage 和支持图片输入的模型进行理解 |
 | `audio-output-perception` | 监听设备播放的语音，分段转写；提供实时字幕，最终文字进入观察队列；TTS 播放期间抑制采集 | 需添加配置；目前采集仅支持 Linux，需要 `pactl`、`parec` 和 ASR 服务；支持 FunASR、Whisper 服务及兼容 OpenAI 的转写接口 |
 | `rss` | RSS／Atom 更新感知；每个 feed 独立代理和轮询间隔；持久化去重并记录获取内容 | 需添加配置并启用；依赖 Storage；首次成功读取默认只建立基线；[详细配置](electron/plugins/rss/README.md) |
@@ -62,9 +64,13 @@ assets/
     └── 模型引用的 moc3、纹理、动作、表情等文件
 ```
 
-`assets/` 被 Git 忽略，需要自行准备模型包。更换模型时，同时修改 [src/main.ts](src/main.ts) 的 `MODEL_URL` 和 [electron/live2dCatalog.js](electron/live2dCatalog.js) 的 `MODEL3_PATH`；检查默认动作组、点击动作和 `neutral` 表情是否存在。托盘图标路径在 [electron/main.js](electron/main.js) 中。
+`assets/` 被 Git 忽略，需要自行准备模型包。形象由 `plugins` 中的 `avatar-live2d` 和 `avatar-3d` 控制，同时只允许启用一个；模型路径、大小、偏移和图标均通过插件配置，不需要改代码。完整配置见 [config.example.json](config.example.json)，接口和模型说明见 [形象插件文档](electron/plugins/avatarShared/README.md)。
 
-Live2D Cubism Core 脚本位于 `public/live2dcubismcore.min.js`，由 `index.html` 加载。
+默认启用 `avatar-live2d`，支持 Setsuna_v081l_b，保留 Thinking 待机、ReachStudy 点击动作及模型表情。`avatar-3d` 支持本地 `assets/【芙宁娜】/【芙宁娜】.pmx`（也可使用同目录下的 `【芙宁娜_荒】.pmx`），包含 PMX 贴图、表情、自动眨眼、头部跟随、呼吸待机和招手。运行 `npm run motions:furina` 可根据模型骨骼离线预生成待机、招手、点头、摇头、思考、鞠躬、开心、鼓掌、天鹅舞，重载形象后从右键「播放动作」使用，结束后平滑返回待机。切换到芙宁娜时，在同一次配置保存中将 `avatar-live2d.enabled` 设为 `false`、`avatar-3d.enabled` 设为 `true`；应用自动释放旧形象并加载新形象。3D 默认开启 PMX 头发和服饰刚体物理，可通过 `avatar-3d.physicsEnabled=false` 关闭；当前不包含 VMD 动画播放或其它 3D 文件格式。
+
+芙宁娜资源包标注模型提供为 miHoYo、模型改造为观海；使用时遵守包内 `readme【一定要看】.txt`，模型资源不纳入仓库。
+
+Live2D Cubism Core 脚本位于 `public/live2dcubismcore.min.js`，仅在加载 Live2D 形象时按需加载。
 
 ### 2. 安装依赖与配置
 
@@ -190,7 +196,7 @@ npm start
 | 命令 | 用途 |
 | --- | --- |
 | `npm start` / `npm run desktop` | 启动桌宠开发环境 |
-| `npm run dev` | 仅启动 Vite 页面 |
+| `npm run dev` | 仅启动 Vite 页面；形象配置通过 Electron 读取，使用桌宠请运行 `npm start` |
 | `npm run typecheck` | 检查前端 TypeScript 类型 |
 | `npm run build` | 先通过类型检查，再构建前端到 `dist/` |
 | `npm run preview` | 预览前端构建结果 |
@@ -453,7 +459,7 @@ electron/
 ├── modules/              # 决策记录与呈现编排
 ├── platform/             # 系统适配能力
 └── plugins/              # 各能力的实现和专用窗口资源
-src/                      # Live2D 渲染、交互与气泡
+src/                      # 形象渲染组件、交互与气泡
 public/                   # Cubism Core
 assets/                   # 本地模型与声线资源
 ```
@@ -513,4 +519,4 @@ RSS 感知由可选 `rss` 插件提供，在 `plugins` 中配置 `feeds`（地�
 - 配置格式错误时保留上次有效配置，终端会报告错误；首次启动仍需要有效配置文件。
 - 设备音频捕获目前只实现 Linux PulseAudio/PipeWire 适配。
 - 待处理观察和失败记录目前保存在内存，尚未实现手动消息的持久化收件箱与启动恢复。
-- 默认模型路径和部分动作名称目前写在代码中；更换模型需要同步调整。
+- 形象默认模型及动作由各插件提供，可在 `plugins` 配置中覆盖；更换 Live2D 模型时需配置其实际支持的默认表情和动作。

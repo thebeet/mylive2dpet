@@ -1,5 +1,7 @@
 /** Built-in catalog; options, loading rules, and dependencies belong to each plugin. */
 module.exports = [
+  require("./avatarLive2d/definition"),
+  require("./avatar3d/definition"),
   require("./manualInput/definition"),
   require("./schedule/definition"),
   require("./webSearch/definition"),

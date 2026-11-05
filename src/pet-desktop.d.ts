@@ -1,3 +1,4 @@
+import type { AvatarSnapshot, AvatarCommand } from "./avatars/types";
 export {};
 
 type BubblePayload =
@@ -25,9 +26,10 @@ declare global {
       }>;
       chatNow: () => Promise<{ ok: boolean }>;
       openContextMenu: (pos?: { x?: number; y?: number }) => void;
-      live2dReady: () => void;
-      onPlayMotion: (callback: (payload: { group: string; index: number }) => void) => () => void;
-      onPlayExpression: (callback: (expression: string) => void) => () => void;
+      getAvatarConfig: () => Promise<AvatarSnapshot>;
+      avatarReady: (revision: number) => void;
+      onAvatarChanged: (callback: (snapshot: AvatarSnapshot) => void) => () => void;
+      onAvatarCommand: (callback: (command: AvatarCommand) => void) => () => void;
       onBubble: (callback: (payload: BubblePayload) => void) => () => void;
       onGlobalPointerMove: (
         callback: (position: { x: number; y: number }) => void,

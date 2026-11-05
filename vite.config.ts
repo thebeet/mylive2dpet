@@ -13,7 +13,7 @@ export default defineConfig({
   },
   plugins: [
     {
-      name: "serve-live2d-assets",
+      name: "serve-avatar-assets",
       configureServer(server) {
         server.middlewares.use("/assets", sirv(assetsDir, { dev: true, etag: true }));
       },

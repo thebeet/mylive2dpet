@@ -3,7 +3,7 @@
  * Plugins live under electron/plugins/* and are toggled via config.plugins[].
  *
  * Note: these are Electron main-process plugins (Node fs/net/child_process).
- * They are NOT renderer modules under src/ — the Vite app only handles Live2D UI.
+ * Avatar plugins also select a built-in renderer module under src/avatars/.
  */
 const { freeze } = require("../architecture/configValidation");
 

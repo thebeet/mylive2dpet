@@ -12,7 +12,8 @@ const {
 const path = require("path");
 const { loadConfig, startConfigWatcher, stopConfigWatcher, subscribeConfig } = require("./config");
 const { getMenuContributions, setMenuRefreshHandler } = require("./menuHooks");
-const { loadExpressionNames, loadMotionGroups } = require("./live2dCatalog");
+const { createAvatarHost } = require("./architecture/avatar");
+const avatarPluginNames = new Set(require("./plugins/manifest").filter(item => item.kind === "avatar").map(item => item.name));
 const { MessageBus } = require("./architecture/messageBus");
 const EVENTS = require("./architecture/events");
 const { createPluginHost } = require("./pluginHost");
@@ -41,7 +42,6 @@ let winSize = { ...DEFAULT_WIN };
 let tray = null;
 let trayRefreshTimer = null;
 let mainWindow = null;
-let live2dReady = false;
 let pointerTrackingTimer = null;
 let shuttingDown = false;
 let shutdownComplete = false;
@@ -140,6 +140,20 @@ function sendBubble(payload) {
   mainWindow.webContents.send("pet:bubble", payload);
 }
 
+const avatar = createAvatarHost({
+  onChange: snapshot => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send("pet:avatar-changed", snapshot);
+    }
+    refreshTrayMenu();
+    refreshTrayIcon();
+  },
+  sendCommand: command => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send("pet:avatar-command", command);
+    }
+  },
+});
 const messageBus = new MessageBus();
 const execution = createExecutionModule(messageBus, { sendBubble });
 const perception = createPerceptionService(messageBus, { getPolicy: () => loadConfig().observations || {} });
@@ -150,7 +164,7 @@ const promptExtensions = createPromptExtensions();
 const conversation = createConversation({
   storage: storage.api,
   getConfig: loadConfig, contextProviders, promptExtensions, bus: messageBus,
-  getExpressions: () => loadExpressionNames({ includeInternal: false }),
+  getExpressions: avatar.getExpressions,
   onRequest: (entry) => messageBus.notify(EVENTS.AI_REQUEST_STARTED, entry),
   onResult: (entry) => messageBus.notify(EVENTS.AI_REQUEST_FINISHED, entry),
 });
@@ -165,6 +179,7 @@ const scheduler = createDecisionScheduler({
   hasPendingUser: perception.hasPendingUser,
 });
 const pluginHost = createPluginHost({
+  avatar,
   bus: messageBus,
   getConfig: loadConfig,
   perception,
@@ -191,18 +206,12 @@ const pluginHost = createPluginHost({
     getDisplayNearestPoint: (point) => screen.getDisplayNearestPoint(point),
   },
   pet: {
-    getExpressions: () => loadExpressionNames({ includeInternal: false }),
+    getExpressions: avatar.getExpressions,
     getBounds: () => mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()
       ? mainWindow.getBounds() : null,
   },
 });
 
-messageBus.subscribe(EVENTS.PERCEPTION_OBSERVATION_QUEUED, (event) => {
-  console.log(
-    `[perception:${event.observation.source}] ${event.observation.content.map((part) => part.type).join(",")} queued`,
-    `pending=${event.pendingCount}`,
-  );
-});
 messageBus.subscribe(EVENTS.DECISION_COMPLETED, ({ observations, result }) => {
   console.log(
     `[decision] observations=${observations.length}`,
@@ -250,7 +259,7 @@ function createWindow() {
   });
 
   mainWindow = win;
-  live2dReady = false;
+  avatar.resetReady();
   placeBottomRight(win);
   win.setSkipTaskbar(true);
   pinOnTop(win);
@@ -259,7 +268,7 @@ function createWindow() {
 
   win.webContents.on("did-start-loading", () => {
     if (mainWindow !== win) return;
-    live2dReady = false;
+    avatar.resetReady();
     if (tray && !tray.isDestroyed()) tray.setContextMenu(buildAppMenu());
   });
 
@@ -307,7 +316,7 @@ function createWindow() {
       pointerTrackingTimer = null;
     }
     if (mainWindow === win) mainWindow = null;
-    live2dReady = false;
+    avatar.resetReady();
     if (tray && !tray.isDestroyed()) tray.setContextMenu(buildAppMenu());
   });
 
@@ -327,8 +336,6 @@ function showPetToBottomRight() {
 }
 
 function buildAppMenu() {
-  const motionGroups = loadMotionGroups();
-  const expressions = loadExpressionNames();
   const pluginMenuItems = getMenuContributions();
   return Menu.buildFromTemplate([
     {
@@ -336,29 +343,6 @@ function buildAppMenu() {
       click: () => showPetToBottomRight(),
     },
     ...pluginMenuItems,
-    {
-      label: "播放动作",
-      enabled: live2dReady && motionGroups.length > 0,
-      submenu: motionGroups.length > 0
-        ? motionGroups.map(({ group, motions }) => ({
-            label: group,
-            submenu: motions.map(({ index, file }) => ({
-              label: path.basename(file || `动作 ${index + 1}`, ".motion3.json"),
-              click: () => sendLive2DCommand("pet:play-motion", { group, index }),
-            })),
-          }))
-        : [{ label: "没有可用动作", enabled: false }],
-    },
-    {
-      label: "切换表情",
-      enabled: live2dReady && expressions.length > 0,
-      submenu: expressions.length > 0
-        ? expressions.map((expression) => ({
-            label: expression,
-            click: () => sendLive2DCommand("pet:play-expression", expression),
-          }))
-        : [{ label: "没有可用表情", enabled: false }],
-    },
     {
       label: "退出",
       click: () => app.quit(),
@@ -374,14 +358,6 @@ function refreshTrayMenu() {
   }, 0);
 }
 
-function sendLive2DCommand(channel, payload) {
-  if (!live2dReady || !mainWindow || mainWindow.isDestroyed() ||
-      mainWindow.webContents.isDestroyed()) {
-    return;
-  }
-  mainWindow.webContents.send(channel, payload);
-}
-
 function popupAppMenu(browserWindow, x, y) {
   const menu = buildAppMenu();
   const opts = { window: browserWindow };
@@ -392,13 +368,15 @@ function popupAppMenu(browserWindow, x, y) {
   menu.popup(opts);
 }
 
+function trayIcon() {
+  const iconPath = avatar.getIconPath();
+  return iconPath ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty();
+}
+function refreshTrayIcon() {
+  if (tray && !tray.isDestroyed()) tray.setImage(trayIcon());
+}
 function createTray() {
-  const iconPath = path.join(
-    __dirname,
-    "../assets/Setsuna_v081l_b/icon.png",
-  );
-  const icon = nativeImage.createFromPath(iconPath);
-  tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
+  tray = new Tray(trayIcon());
   tray.setToolTip("My Live2D Pet");
   tray.setContextMenu(buildAppMenu());
   tray.on("double-click", () => showPetToBottomRight());
@@ -418,12 +396,21 @@ app.whenReady().then(async () => {
   unsubscribeConfig = subscribeConfig((config, previous) => {
     const update = runtimeUpdates.then(async () => {
       if (shuttingDown) return;
-      const changed = !isDeepStrictEqual(config.conversation, previous.conversation);
+      const avatarChanged = !isDeepStrictEqual(
+        config.plugins.filter(item => avatarPluginNames.has(item.name)),
+        previous.plugins.filter(item => avatarPluginNames.has(item.name)),
+      );
+      const changed = avatarChanged || !isDeepStrictEqual(config.conversation, previous.conversation);
       const resume = scheduler.getState().running;
       if (changed) await scheduler.stop();
       if (shuttingDown) return;
+      if (avatarChanged) {
+        await conversation.stop();
+        conversation.clearHistory();
+      }
       await conversation.reconfigure(config);
       await pluginHost.reload(config);
+      if (avatarChanged && !shuttingDown) conversation.start();
       if (changed && resume && !shuttingDown) scheduler.start();
     });
     runtimeUpdates = update.catch(() => {});
@@ -523,11 +510,15 @@ ipcMain.on("pet:context-menu", (event, pos) => {
   popupAppMenu(win, pos?.x, pos?.y);
 });
 
-ipcMain.on("pet:live2d-ready", (event) => {
-  if (!mainWindow || mainWindow.isDestroyed() ||
-      event.sender !== mainWindow.webContents) return;
-  live2dReady = true;
-  if (tray && !tray.isDestroyed()) tray.setContextMenu(buildAppMenu());
+ipcMain.handle("pet:avatar-config", event => {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
+    throw new Error("只允许主窗口读取形象配置");
+  }
+  return avatar.getSnapshot();
+});
+ipcMain.on("pet:avatar-ready", (event, revision) => {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return;
+  if (avatar.setReady(revision)) refreshTrayMenu();
 });
 
 app.on("window-all-closed", () => {

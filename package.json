@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "build": "npm run typecheck && vite build",
     "preview": "vite preview",
+    "motions:furina": "node scripts/generate-furina-motions.mjs",
     "test:audio": "node --test tests/audioOutput.test.js tests/audioLiveWindow.test.js tests/funasr.test.js",
     "test": "node --test tests/*.test.js",
     "rebuild:native": "electron-rebuild -f -w better-sqlite3",
@@ -19,6 +20,7 @@
   "devDependencies": {
     "@electron/rebuild": "^4.2.1",
     "@types/node": "^22.10.0",
+    "@types/three": "^0.170.0",
     "concurrently": "^9.1.0",
     "electron": "^33.2.0",
     "sirv": "^3.0.2",
@@ -31,8 +33,10 @@
     "better-sqlite3": "^11.10.0",
     "fast-xml-parser": "^5.12.0",
     "https-proxy-agent": "^7.0.6",
+    "mmd-parser": "^1.0.4",
     "pixi-live2d-display": "^0.4.0",
     "pixi.js": "^6.5.10",
+    "three": "^0.170.0",
     "ws": "^8.22.0",
     "x11": "^4.3.1"
   },

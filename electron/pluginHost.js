@@ -10,7 +10,7 @@ const { createStorage } = require("./storage");
 const { isDeepStrictEqual } = require("node:util");
 
 /** Loads built-in plugins and supplies only the host capabilities they need. */
-function createPluginHost({ bus, getConfig, perception, model, requestDecision, screen, pet,
+function createPluginHost({ bus, getConfig, perception, model, requestDecision, screen, pet, avatar,
   paths = {}, windows = {}, dialogs = {}, ipc = {}, attention = {},
   services = createServiceRegistry(),
   storage = createStorage({ services }),
@@ -96,6 +96,11 @@ function createPluginHost({ bus, getConfig, perception, model, requestDecision, 
       bus: scopedBus,
       platform,
       paths,
+      avatar: avatar && {
+        register: descriptor => { assertAvailable(); return track(avatar.register(name, descriptor)); },
+        isReady: () => available() && avatar.isReady(name),
+        command: command => { assertAvailable(); return avatar.command(name, command); },
+      },
       storage: {
         ...Object.fromEntries(Object.entries(storage.api).map(([key, value]) => [key,
           (...args) => {

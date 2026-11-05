@@ -30,9 +30,12 @@ function normalizeConfig(input) {
   for (const definition of pluginDefinitions) {
     const plugin = plugins.get(definition.name);
     if (!plugin && !definition.defaultConfig) continue;
-    const normalized = definition.normalizeOptions?.(plugin) || plugin;
+    const normalized = definition.normalizeOptions?.(plugin, input) || plugin;
     plugins.set(definition.name, { ...plugin, ...normalized, name: definition.name });
   }
+  const avatars = pluginDefinitions.filter(definition => definition.kind === "avatar" &&
+    plugins.get(definition.name)?.enabled !== false && plugins.has(definition.name));
+  if (avatars.length > 1) throw new Error("同时只能启用一个形象插件，请关闭其它 avatar 插件");
   const decision = { ...input.decision };
   for (const key of Object.keys(decision)) {
     if (!["enabled", "interval_ms"].includes(key) && !key.startsWith("_")) {
