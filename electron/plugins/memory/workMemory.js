@@ -16,6 +16,8 @@ function createWorkMemory(context, { options, now = Date.now, isAvailable }) {
   }
   function ingestObservation(observation) {
     if (!available()) return;
+    // Subscribed publications are external information, not evidence about the user's relationships.
+    if (observation.source === "rss") return;
     const text = observation.content.filter((p) => p.type === "text").map((p) => p.text).join("\n");
     if (!text) return;
     const repo = repository();

@@ -3,6 +3,7 @@ module.exports = [
   require("./manualInput/definition"),
   require("./schedule/definition"),
   require("./webSearch/definition"),
+  require("./rss/definition"),
   require("./storageSqlite/definition"),
   require("./dialogueHistory/definition"),
   require("./rawLog/definition"),

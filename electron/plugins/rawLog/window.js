@@ -23,9 +23,112 @@ const webListEl = document.getElementById("web-search-list");
 const webDetailEl = document.getElementById("web-search-detail");
 const webErrorEl = document.getElementById("web-search-error");
 const webMoreEl = document.getElementById("web-search-more");
-const tabNames = ["requests", "screenshots", "web-search"];
+const tabNames = ["requests", "screenshots", "web-search", "rss"];
 const webStates = { queued: "排队中", running: "进行中", success: "成功", failed: "失败", rejected: "已拦截", cancelled: "已取消", skipped: "已跳过" };
 let webEntries = [], webCursor = null, webSelectedId = null, webLoading = false, webSelectionVersion = 0;
+const rssListEl = document.getElementById("rss-list");
+const rssDetailEl = document.getElementById("rss-detail");
+const rssErrorEl = document.getElementById("rss-error");
+const rssMoreEl = document.getElementById("rss-more");
+const rssStates = { running: "获取中", baseline: "已建立基线", success: "检查完成", "not-modified": "未更新（304）", failed: "失败", cancelled: "已取消" };
+const rssDeliveries = { baseline: "基线条目", unchanged: "未变化", pending: "尚未提交", queued: "已入队", failed: "入队失败" };
+const rssChanges = { new: "新增", updated: "修改", unchanged: "未变化" };
+let rssEntries = [], rssCursor = null, rssSelectedId = null, rssLoading = false, rssSelectionVersion = 0;
+
+function renderRssList() {
+  rssListEl.replaceChildren();
+  countEl.textContent = `已显示 ${rssEntries.length} 次 RSS 获取 · 每 2 秒自动更新`;
+  if (!rssEntries.length) {
+    addText(rssListEl, "div", "empty", "暂无记录。启用 RSS 订阅后，获取内容与检查结果会显示在这里。");
+    rssDetailEl.replaceChildren();
+  }
+  for (const entry of rssEntries) {
+    const button = addText(rssListEl, "button", "request", "");
+    button.setAttribute("aria-pressed", String(entry.id === rssSelectedId));
+    addText(button, "span", "", entry.feedName || entry.request.url);
+    addText(button, "time", "muted", new Date(entry.t).toLocaleString("zh-CN"));
+    addText(button, "span", "muted", `${rssStates[entry.state] || entry.state}${entry.status != null ? ` · HTTP ${entry.status}` : ""}`);
+    if (entry.itemCount != null) addText(button, "span", "muted", `获取 ${entry.itemCount} 条 · 已入队 ${entry.queuedCount || 0} 条`);
+    button.addEventListener("click", () => void selectRss(entry));
+  }
+  rssMoreEl.hidden = !rssCursor;
+}
+
+async function selectRss(entry, preserveScroll = false) {
+  const version = ++rssSelectionVersion, epoch = viewGeneration;
+  rssSelectedId = entry.id;
+  renderRssList();
+  try {
+    const record = await window.rawLog.getRss(entry.id);
+    if (version !== rssSelectionVersion || epoch !== viewGeneration || activeTab !== "rss") return;
+    rssErrorEl.textContent = "";
+    const main = document.querySelector("#rss-panel main"), scroll = main.scrollTop;
+    const expanded = preserveScroll ? new Set([...rssDetailEl.querySelectorAll("details[open][data-key]")]
+      .map(details => details.dataset.key)) : new Set();
+    rssDetailEl.replaceChildren();
+    addText(rssDetailEl, "h2", "", `${record.feedName || record.request.url} · ${rssStates[record.state] || record.state}`);
+    addText(rssDetailEl, "div", "muted", `${new Date(record.t).toLocaleString("zh-CN")}${record.elapsedMs != null ? ` · ${record.elapsedMs} ms` : ""}`);
+    if (record.baseline) addText(rssDetailEl, "p", "muted", "本次首次读取用于建立更新基线，已有条目未提交观察队列。");
+    if (record.state === "not-modified") addText(rssDetailEl, "p", "muted", "订阅源返回 304，本次没有新的响应正文。");
+    const { rawXml, items, request, response, ...metadata } = record;
+    for (const [title, value] of [["请求参数", request], ["HTTP 响应", response], ["获取与入队状态", metadata], ["失败原因", record.error]]) {
+      if (value == null || value === "") continue;
+      const card = addText(rssDetailEl, "article", "message", "");
+      addText(card, "div", "role", title);
+      addText(card, "div", "content", typeof value === "string" ? value : JSON.stringify(value, null, 2));
+    }
+    if (items) {
+      addText(rssDetailEl, "h3", "", `获取到的条目（${items.length}）`);
+      for (const item of items) {
+        const details = addText(rssDetailEl, "details", "message", "");
+        details.dataset.key = item.id;
+        addText(details, "summary", "", `${item.title || "无标题"} · ${rssChanges[item.eventType] || item.eventType} · ${rssDeliveries[item.delivery] || item.delivery}`);
+        const { content, fingerprint, ...itemMetadata } = item;
+        addText(details, "div", "content", JSON.stringify(itemMetadata, null, 2));
+        addText(details, "div", "content", content || "订阅源未提供正文或摘要。");
+      }
+    }
+    if (rawXml != null) {
+      const details = addText(rssDetailEl, "details", "message", "");
+      details.dataset.key = "raw-xml";
+      addText(details, "summary", "", "原始响应正文（访问令牌已脱敏）");
+      addText(details, "pre", "content", rawXml);
+    }
+    for (const details of rssDetailEl.querySelectorAll("details[data-key]")) {
+      if (expanded.has(details.dataset.key)) details.open = true;
+    }
+    main.scrollTop = preserveScroll ? scroll : 0;
+  } catch (error) {
+    if (version === rssSelectionVersion && epoch === viewGeneration && activeTab === "rss") {
+      rssErrorEl.textContent = `读取 RSS 获取记录失败：${error.message || error}`;
+    }
+  }
+}
+
+async function loadRss(mode = "update") {
+  if (rssLoading || clearing) return;
+  const epoch = viewGeneration;
+  rssLoading = true; rssMoreEl.disabled = true;
+  try {
+    const result = await window.rawLog.listRss({ before: mode === "more" ? rssCursor : null });
+    if (epoch !== viewGeneration || activeTab !== "rss") return;
+    const old = rssEntries.find(entry => entry.id === rssSelectedId);
+    if (mode === "reset" || !rssEntries.length) { rssEntries = result.entries; rssCursor = result.nextCursor; }
+    else {
+      const merged = new Map(rssEntries.map(entry => [entry.id, entry]));
+      for (const entry of result.entries) merged.set(entry.id, entry);
+      rssEntries = [...merged.values()].sort((a, b) => b.t - a.t || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+      if (mode === "more" || rssCursor === null) rssCursor = result.nextCursor;
+    }
+    rssErrorEl.textContent = ""; renderRssList();
+    const selected = rssEntries.find(entry => entry.id === rssSelectedId) || rssEntries[0];
+    if (selected && (!old || JSON.stringify(old) !== JSON.stringify(selected) || ["reset", "activate"].includes(mode))) {
+      await selectRss(selected, mode === "update" || mode === "activate");
+    }
+  } catch (error) {
+    if (epoch === viewGeneration && activeTab === "rss") rssErrorEl.textContent = `读取 RSS 日志失败：${error.message || error}`;
+  } finally { rssLoading = false; rssMoreEl.disabled = clearing; }
+}
 
 function renderWebList() {
   webListEl.replaceChildren();
@@ -466,6 +569,7 @@ function switchTab(tab) {
   selectionVersion++;
   screenshotSelectionVersion++;
   webSelectionVersion++;
+  rssSelectionVersion++;
   for (const name of tabNames) {
     const selected = name === tab;
     const button = document.getElementById(`${name}-tab`);
@@ -475,6 +579,7 @@ function switchTab(tab) {
   }
   if (tab === "screenshots") { renderScreenshots(); void loadScreenshots("activate"); }
   else if (tab === "web-search") { renderWebList(); void loadWeb("activate"); }
+  else if (tab === "rss") { renderRssList(); void loadRss("activate"); }
   else { renderList(); void load("activate"); }
 }
 
@@ -492,11 +597,13 @@ for (const name of tabNames) {
     document.getElementById(`${target}-tab`).focus();
   });
 }
-const refresh = mode => activeTab === "screenshots" ? loadScreenshots(mode) : activeTab === "web-search" ? loadWeb(mode) : load(mode);
+const refresh = mode => activeTab === "screenshots" ? loadScreenshots(mode) : activeTab === "web-search" ? loadWeb(mode)
+  : activeTab === "rss" ? loadRss(mode) : load(mode);
 document.getElementById("refresh").addEventListener("click", () => void refresh("reset"));
 moreEl.addEventListener("click", () => void load("more"));
 screenshotsMoreEl.addEventListener("click", () => void loadScreenshots("more"));
 webMoreEl.addEventListener("click", () => void loadWeb("more"));
+rssMoreEl.addEventListener("click", () => void loadRss("more"));
 const clearDialog = document.getElementById("clear-dialog");
 const clearStatusEl = document.getElementById("clear-status");
 const clearErrorEl = document.getElementById("clear-error");
@@ -516,23 +623,27 @@ document.getElementById("clear-form").addEventListener("submit", async event => 
   selectionVersion++;
   screenshotSelectionVersion++;
   webSelectionVersion++;
+  rssSelectionVersion++;
   clearConfirmEl.textContent = "清理并压缩中…";
   clearErrorEl.textContent = "";
-  const controls = ["clear", "clear-confirm", "clear-cancel", "refresh", "requests-tab", "screenshots-tab", "web-search-tab", "more", "screenshots-more", "web-search-more"];
+  const controls = ["clear", "clear-confirm", "clear-cancel", "refresh", "requests-tab", "screenshots-tab", "web-search-tab", "rss-tab", "more", "screenshots-more", "web-search-more", "rss-more"];
   for (const id of controls) document.getElementById(id).disabled = true;
   try {
     const result = await window.rawLog.clear();
     entries = []; nextCursor = null; selectedId = null;
     screenshots = []; screenshotsCursor = null; selectedScreenshotId = null;
     webEntries = []; webCursor = null; webSelectedId = null;
+    rssEntries = []; rssCursor = null; rssSelectedId = null;
     requestsEl.replaceChildren(); messagesEl.replaceChildren(); metaEl.replaceChildren();
     screenshotsEl.replaceChildren(); screenshotDetailEl.replaceChildren();
     webListEl.replaceChildren(); webDetailEl.replaceChildren(); webErrorEl.textContent = "";
+    rssListEl.replaceChildren(); rssDetailEl.replaceChildren(); rssErrorEl.textContent = "";
     errorEl.textContent = screenshotErrorEl.textContent = "";
-    moreEl.hidden = screenshotsMoreEl.hidden = webMoreEl.hidden = true;
-    if (activeTab === "screenshots") renderScreenshots(); else if (activeTab === "web-search") renderWebList(); else renderList();
+    moreEl.hidden = screenshotsMoreEl.hidden = webMoreEl.hidden = rssMoreEl.hidden = true;
+    if (activeTab === "screenshots") renderScreenshots(); else if (activeTab === "web-search") renderWebList();
+    else if (activeTab === "rss") renderRssList(); else renderList();
     clearStatusEl.className = result.warnings?.length ? "error" : "muted";
-    clearStatusEl.textContent = `已清理 ${result.requests} 条请求日志、${result.webSearch || 0} 条网页请求、${result.screenshots} 张截图。` +
+    clearStatusEl.textContent = `已清理 ${result.requests} 条请求日志、${result.webSearch || 0} 条网页请求、${result.rss || 0} 条 RSS 获取记录、${result.screenshots} 张截图。` +
       (result.compacted ? "数据库已压缩。" : "") +
       (result.legacyLogs || result.legacyScreenshots ? `另清理 ${result.legacyLogs + result.legacyScreenshots} 个旧文件。` : "") +
       (result.warnings?.length ? `\n${result.warnings.join("\n")}` : "");

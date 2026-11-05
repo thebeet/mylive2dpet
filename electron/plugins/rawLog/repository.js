@@ -26,8 +26,9 @@ function createRawLogRepository(storage, options) {
         const diagnostics = storage.collection("core.ai-log").list().length;
         storage.collection("core.ai-log").clear();
         const webSearch = storage.collection("web-search.history").clear();
+        const rss = storage.collection("rss.history").clear();
         storage.collection(LOG_LIFECYCLE).set("generation", generation);
-        return { requests, screenshots, requestImages, diagnostics, webSearch, generation };
+        return { requests, screenshots, requestImages, diagnostics, webSearch, rss, generation };
       });
     },
     list: options => repository.list(options),

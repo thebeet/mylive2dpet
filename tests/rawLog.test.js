@@ -16,6 +16,7 @@ const { createScreenshotReader } = require("../electron/plugins/rawLog/screensho
 const { clearRawLog } = require("../electron/plugins/rawLog/clear");
 const { getLogGeneration } = require("../electron/storage/logLifecycle");
 const { createWebHistory } = require("../electron/plugins/webSearch/history");
+const { createRssHistory } = require("../electron/plugins/rss/history");
 const { createPerceptionService } = require("../electron/architecture/perceptionService");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 
@@ -439,7 +440,7 @@ test("clearing removes raw records and image stores atomically, preserves memory
   const history = storage.repository("dialogue-history");
   // Domain tables and unrelated plugin collections are outside the cleanup scope.
   const result = repository.clear();
-  assert.deepEqual(result, { requests: 1, screenshots: 1, requestImages: 1, diagnostics: 1, webSearch: 0, generation: 1 });
+  assert.deepEqual(result, { requests: 1, screenshots: 1, requestImages: 1, diagnostics: 1, webSearch: 0, rss: 0, generation: 1 });
   assert.equal(repository.list().entries.length, 0);
   assert.equal(repository.listGroups().entries.length, 0);
   assert.equal(storage.blobs("screenshots").list().entries.length, 0);
@@ -661,7 +662,7 @@ test("log plugin validates window identity and records late cancellation while s
   assert.throws(() => handlers.get("clear")({ sender: {} }), /来源无效/);
   assert.throws(() => handlers.get("listScreenshots")({ sender: {} }), /来源无效/);
   assert.throws(() => handlers.get("getScreenshot")({ sender: {} }, "any"), /来源无效/);
-  for (const method of ["listTabs", "listWebSearch", "getWebSearch"]) assert.throws(() => handlers.get(method)({ sender: {} }), /来源无效/);
+  for (const method of ["listTabs", "listWebSearch", "getWebSearch", "listRss", "getRss"]) assert.throws(() => handlers.get(method)({ sender: {} }), /来源无效/);
   assert.equal(handlers.get("listTabs")({ sender: win.webContents }).webSearch, false);
   assert.throws(() => handlers.get("listWebSearch")({ sender: win.webContents }), /未加载/);
   const sample = { id: "search", operation: "search", request: { query: "news" }, state: "success" };
@@ -671,12 +672,18 @@ test("log plugin validates window identity and records late cancellation while s
   assert.equal(handlers.get("getWebSearch")({ sender: win.webContents }, "search").operation, "search");
   webHistory = undefined;
   assert.equal(handlers.get("listTabs")({ sender: win.webContents }).webSearch, false);
+  const rssHistory = createRssHistory(storage);
+  rssHistory.begin({ id: "rss-check", feedName: "项目动态", rawXml: "<feed/>", items: [] });
+  rssHistory.update("rss-check", { state: "baseline" });
+  assert.equal(handlers.get("listRss")({ sender: win.webContents }).entries[0].id, "rss-check");
+  assert.equal(handlers.get("getRss")({ sender: win.webContents }, "rss-check").rawXml, "<feed/>");
   assert.equal(handlers.get("list")({ sender: win.webContents }).entries.length, 1);
   assert.equal(handlers.get("listScreenshots")({ sender: win.webContents }).entries.length, 0);
   plugin.stop(); win.emit("ready-to-show");
   assert.equal(win.shows, 1);
   assert.throws(() => handlers.get("get")({ sender: win.webContents }, "pending"), /已关闭/);
   assert.throws(() => handlers.get("listScreenshots")({ sender: win.webContents }), /已关闭/);
+  assert.throws(() => handlers.get("listRss")({ sender: win.webContents }), /已关闭/);
   await bus.notify(EVENTS.AI_REQUEST_FINISHED, { id: "pending", finishedAt: 2, error: "cancelled" });
   assert.equal(db.prepare("SELECT error FROM ai_requests WHERE id = 'pending'").get().error, "cancelled");
   plugin.start(); menu()[0].click();

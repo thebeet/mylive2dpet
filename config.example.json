@@ -55,6 +55,20 @@
       "_comment": "网页搜索/读取独立 provider。启用前填所选 provider 的 key；OpenAI 搜索需指定支持 web_search 的模型，不提供独立 Fetch，可搭配 DeepSeek。"
     },
     {
+      "name": "rss",
+      "enabled": false,
+      "feeds": [
+        { "name": "示例订阅", "url": "https://example.com/feed.xml", "proxy": "", "interval_ms": 600000 }
+      ],
+      "interval_ms": 300000,
+      "timeoutMs": 20000,
+      "emitOnFirstFetch": false,
+      "observationTtlMs": 0,
+      "maxContentChars": 12000,
+      "maxResponseBytes": 2097152,
+      "_comment": "RSS/Atom 感知：启动立即检查；每个 feed 可设置 interval_ms，未设置使用插件全局间隔。首次成功读取只建立基线，之后新增和修改条目提交观察队列。每个 feed 的 proxy 为独立 HTTP(S) 代理，留空直连。"
+    },
+    {
       "name": "schedule",
       "enabled": true,
       "observationTtlMs": 0,

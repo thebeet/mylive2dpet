@@ -3,10 +3,12 @@ const EVENTS = require("../../architecture/events");
 const { createRawLogRepository } = require("./repository");
 const { createScreenshotReader } = require("./screenshots");
 const { clearRawLog } = require("./clear");
+const { createRssHistory } = require("../rss/history");
 
 function activate(context) {
   const storage = context.services.get("storage");
   const repository = { ...createRawLogRepository(storage), ...createScreenshotReader(storage) };
+  const rssHistory = createRssHistory(storage);
   function webHistory() {
     const history = context.services.get("web-search.history");
     if (!history) throw new Error("web-search 插件未加载");
@@ -16,6 +18,8 @@ function activate(context) {
     listTabs: () => ({ webSearch: Boolean(context.services.get("web-search.history")) }),
     listWebSearch: options => webHistory().list(options),
     getWebSearch: id => webHistory().get(id),
+    listRss: options => rssHistory.list(options),
+    getRss: id => rssHistory.get(id),
   };
   let win = null;
   let running = true;
@@ -53,7 +57,7 @@ function activate(context) {
     context.bus.subscribe(EVENTS.AI_REQUEST_STARTED, (entry) => repository.append(entry), { allowWhileStopped: true }),
     context.bus.subscribe(EVENTS.AI_REQUEST_FINISHED, (entry) => repository.finish(entry), { allowWhileStopped: true }),
     context.menu.register(() => [{ label: "原始日志…", enabled: running && !disposed, click: show }]),
-    ...["list", "get", "listGroups", "getGroup", "listScreenshots", "getScreenshot", "listTabs", "listWebSearch", "getWebSearch", "clear"].map((method) => context.ipc.handle(method, (event, request) => {
+    ...["list", "get", "listGroups", "getGroup", "listScreenshots", "getScreenshot", "listTabs", "listWebSearch", "getWebSearch", "listRss", "getRss", "clear"].map((method) => context.ipc.handle(method, (event, request) => {
       if (!running || disposed || !win || win.isDestroyed() || event.sender !== win.webContents) {
         throw new Error("日志窗口已关闭或请求来源无效");
       }

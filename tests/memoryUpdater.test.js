@@ -151,7 +151,54 @@ test("invalid plans and queue-consumption failures roll back edits, additions an
   assert.deepEqual(repo.history(), []);
   assert.equal(h.plugin.getState().pendingFacts.length, 20);
   const item = { type: "fact", text: "值得保存的新事实", tags: [], importance: 4, sourceTurnIds: ["turn"] };
-  assert.throws(() => validateUpdatePlan({ update: [], add: [{ ...item, importance: 3 }] }, before, [{ id: "turn" }]), /至少为4/);
+  for (const importance of [0, 6, "4", null, undefined, NaN, Infinity]) {
+    assert.throws(() => validateUpdatePlan({ update: [], add: [{ ...item, importance }] }, before, [{ id: "turn" }]), /importance 无效/);
+  }
+  assert.throws(() => validateUpdatePlan({ update: [], add: [{ ...item, importance: 3, text: "短" }] }, before, [{ id: "turn" }]), /type、text 和 tags/);
+  assert.throws(() => validateUpdatePlan({ update: [], add: [{ ...item, importance: 3, sourceTurnIds: ["foreign"] }] }, before, [{ id: "turn" }]), /本批来源/);
   assert.throws(() => validateUpdatePlan({ update: [], add: [{ ...item, sourceTurnIds: ["foreign"] }] }, before, [{ id: "turn" }]), /本批来源/);
   assert.throws(() => validateUpdatePlan({ update: [{ ...item, id: "missing" }], add: [] }, before, [{ id: "turn" }]), /未知/);
+});
+
+test("low-importance additions do not block valid updates or additions", async (t) => {
+  const { storage, repo } = database(t);
+  repo.appendBatch([{ id: "coffee", text: "用户喜欢咖啡", type: "preference", importance: 5 }]);
+  let calls = 0;
+  const h = app(t, storage, repo, async (messages) => {
+    calls++;
+    const sourceTurnIds = [JSON.parse(messages[1].content).turns[0].id];
+    const candidate = { type: "preference", tags: [], sourceTurnIds };
+    return JSON.stringify({
+      update: [{ ...candidate, id: "coffee", text: "用户现在更偏爱拿铁咖啡", importance: 2 }],
+      add: [1, 2, 3, 4, 5].map((importance) => ({ ...candidate, text: `用户明确确认的偏好${importance}`, importance })),
+    });
+  });
+  for (let i = 1; i <= 20; i++) await h.record(i);
+  await h.plugin.whenIdle();
+  assert.equal(calls, 1);
+  assert.equal(h.plugin.getState().pendingFacts.length, 0);
+  assert.equal(repo.list().length, 3);
+  const updated = repo.list().find((entry) => entry.id === "coffee");
+  assert.equal(updated.text, "用户现在更偏爱拿铁咖啡");
+  assert.equal(updated.importance, 5);
+  assert.deepEqual(repo.list().filter((entry) => entry.id !== "coffee").map((entry) => entry.importance).sort(), [4, 5]);
+  assert.equal(repo.history().length, 1);
+});
+
+test("a batch with only low-importance additions completes without storing them", async (t) => {
+  const { storage, repo } = database(t);
+  let calls = 0;
+  const h = app(t, storage, repo, async (messages) => {
+    calls++;
+    return JSON.stringify({ update: [], add: [{ type: "fact", text: "用户今天临时查阅资料", tags: [], importance: 3,
+      sourceTurnIds: [JSON.parse(messages[1].content).turns[0].id] }] });
+  });
+  for (let i = 1; i <= 20; i++) await h.record(i);
+  await h.plugin.whenIdle();
+  assert.equal(calls, 1);
+  assert.deepEqual(repo.list(), []);
+  assert.equal(h.plugin.getState().pendingFacts.length, 0);
+  h.plugin.start();
+  await h.plugin.whenIdle();
+  assert.equal(calls, 1);
 });

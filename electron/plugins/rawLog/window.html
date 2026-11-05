@@ -28,12 +28,12 @@
     .tabs button[aria-selected=true] { background: #7760bf36; border-color: #a88de8; }
     .layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 270px 1fr; }
     aside { overflow: auto; padding: 12px; border-right: 1px solid #ffffff18; }
-    #requests, #screenshots, #web-search-list { display: grid; gap: 8px; }
+    #requests, #screenshots, #web-search-list, #rss-list { display: grid; gap: 8px; }
     .request { text-align: left; width: 100%; display: grid; gap: 5px; }
     .request[aria-pressed=true] { background: #7760bf36; border-color: #a88de8; }
     .usage-summary { display: block; font-size: 12px; color: #b9c9db; line-height: 1.6; }
     .session { color: #a6a9b8; font-size: 12px; margin: 12px 0 2px; overflow-wrap: anywhere; }
-    #more, #screenshots-more, #web-search-more { width: 100%; margin-top: 12px; }
+    #more, #screenshots-more, #web-search-more, #rss-more { width: 100%; margin-top: 12px; }
     main { overflow: auto; padding: 22px; }
     #meta { margin-bottom: 18px; color: #a6a9b8; line-height: 1.7; overflow-wrap: anywhere; }
     #messages { display: flex; flex-direction: column; gap: 16px; }
@@ -70,6 +70,7 @@
     <button id="requests-tab" type="button" role="tab" aria-selected="true" aria-controls="requests-panel">请求日志</button>
     <button id="screenshots-tab" type="button" role="tab" aria-selected="false" aria-controls="screenshots-panel" tabindex="-1">截图</button>
     <button id="web-search-tab" type="button" role="tab" aria-selected="false" aria-controls="web-search-panel" tabindex="-1" hidden>web-search</button>
+    <button id="rss-tab" type="button" role="tab" aria-selected="false" aria-controls="rss-panel" tabindex="-1">RSS</button>
   </nav>
   <div id="requests-panel" class="layout" role="tabpanel" aria-labelledby="requests-tab">
     <aside aria-label="对话会话与文本请求列表"><div id="requests"></div><button id="more" type="button" hidden>加载更早的会话 / 请求</button></aside>
@@ -83,11 +84,15 @@
     <aside aria-label="Search 与 Fetch 请求列表"><div id="web-search-list"></div><button id="web-search-more" type="button" hidden>加载更早的请求</button></aside>
     <main><div id="web-search-error" class="error" role="alert"></div><section id="web-search-detail" aria-label="网页搜索与读取详情"></section></main>
   </div>
+  <div id="rss-panel" class="layout" role="tabpanel" aria-labelledby="rss-tab" hidden>
+    <aside aria-label="RSS 获取记录列表"><div id="rss-list"></div><button id="rss-more" type="button" hidden>加载更早的获取记录</button></aside>
+    <main><div id="rss-error" class="error" role="alert"></div><section id="rss-detail" aria-label="RSS 获取内容与入队详情"></section></main>
+  </div>
   <dialog id="clear-dialog" aria-labelledby="clear-title">
     <form method="dialog" id="clear-form">
       <h2 id="clear-title">清理全部日志与截图？</h2>
-      <p>将永久删除已有原始请求日志、AI 诊断日志、web-search 请求记录、截图及其摘要，以及旧版日志与截图文件。</p>
-      <p class="muted">记忆和对话历史会保留。清理后继续记录新日志和截图。</p>
+      <p>将永久删除已有原始请求日志、AI 诊断日志、web-search 请求记录、RSS 获取记录、截图及其摘要，以及旧版日志与截图文件。</p>
+      <p class="muted">记忆、对话历史和 RSS 更新检查点会保留。清理后继续记录新日志和截图。</p>
       <p class="muted">清理后自动压缩数据库以释放磁盘空间，期间应用可能暂时无响应，请等待完成。</p>
       <div id="clear-error" class="error" role="alert"></div>
       <div class="actions"><button id="clear-cancel" value="cancel" type="submit">取消</button><button id="clear-confirm" class="danger" value="confirm" type="submit">全部清理</button></div>
