@@ -119,6 +119,7 @@ manifest 使用 `provides`、`requires`、`optional` 声明服务，字段可以
 - `manual-input`：输入窗口、preload、文本验证、用户观察提交、即时决策请求与「手动对话…」菜单。IPC 使用 `manual-input:submit` 和 `manual-input:close`，仅接受自身窗口发送的请求。停止时关闭窗口并取消等待中的决策请求；卸载时清理菜单与 IPC。
 - `web-search`：显式启用的网页查询插件，提供 `web-search.client` 服务。`search` 与 `fetch` 使用独立可选 provider，DeepSeek 支持两者，OpenAI Responses web_search 仅支持搜索。插件注入 query/fetch effect Schema，决策完成订阅者只安排后台工作，不阻塞通知；成功/失败结果以 `source=web-search`、`role=context` 入队，再请求后续决策。带原问题和请求链关联，并限制并发、排队数量、结果长度与链总次数；停止取消网络、待决策请求并拒绝迟到结果。provider 契约、配置和文档核对边界见 `plugins/webSearch/README.md`。
 - `schedule`：单次定时通知与管理窗口，默认加载，`enabled=false` 时不加载。依赖 `storage`，使用 `schedule.tasks` JSON 集合并提供同名服务（`create`、`list`、`cancel`）。注册系统提示词及 `schedule.create` 的 effect Schema，在 `decision.completed` 中逐项校验和创建任务，按决策 ID 与 effect 序号持久化去重。到期仅提交 `source=schedule`、`role=context`、`trigger=scheduled` 的观察，不触发决策或执行输出。最近目标时间使用单个定时器，每次等待最多 30 秒以校准系统时间和休眠恢复；停止清理定时器、关闭窗口并等待在途提交完成，未入队任务在下次启动补发。状态为 pending/submitting/queued/failed/cancelled，queued 仅表示已入队，不跟踪队列淘汰或后续执行。IPC 校验自身窗口发送者，窗口使用 sandbox 与 contextIsolation。
+- `gitlab`：可选的 GitLab 流水线状态感知，依赖 `storage`。通过访问令牌查询项目流水线，按项目、分支与状态筛选；首次读取默认建立基线，之后新增或状态变化提交 `source=gitlab` 的 context 观察，等待正常决策。`gitlab.pipelines` 保存指纹、上一状态和查询时间，分页全部成功并处理完条目后才推进游标；停止取消请求并等待已开始的提交落盘，卸载清理未处理观察。配置与送达限制见 [插件文档](../plugins/gitlab/README.md)。
 - `screen-perception`：截图周期、变化检测状态和图片观察生成。停止时清理定时器，丢弃并清理尚未完成的旧周期截图。手动保存截图不入队。
 - `audio-output-perception`：音频采集、分段、转写、去重与观察有效期。转写使用 `content: [{ type: "text", text }]`，音频详情保存在 `metadata`。
 - `tts`：独立订阅通用语音请求并发布播放状态。实例管理运行开关、任务队列、取消信号、合成器和播放器；停止或卸载时取消全部任务并等待清理完成。

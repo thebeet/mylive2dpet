@@ -91,7 +91,7 @@ npm start
 
 ## 插件概览
 
-[插件目录](electron/plugins/manifest.js) 注册了 **14 个主进程插件**。插件条目放在 `plugins` 数组中，使用 `name` 标识插件、`enabled` 控制启用；具体加载条件、依赖、配置示例和使用说明见下表链接。
+[插件目录](electron/plugins/manifest.js) 注册了 **15 个主进程插件**。插件条目放在 `plugins` 数组中，使用 `name` 标识插件、`enabled` 控制启用；具体加载条件、依赖、配置示例和使用说明见下表链接。
 
 | 插件 | 功能 | 主要配置项 |
 | --- | --- | --- |
@@ -101,6 +101,7 @@ npm start
 | [`screen-perception`](electron/plugins/screenPerception/README.md) | 全屏截图与变化感知 | `interval_ms`、`changeDetect`、`observationTtlMs` |
 | [`audio-output-perception`](electron/plugins/audioOutputPerception/README.md) | 设备播放语音转写（Linux） | `source`、分段参数、`asr` |
 | [`rss`](electron/plugins/rss/README.md) | RSS / Atom 更新感知 | `feeds`、`interval_ms`、`emitOnFirstFetch` |
+| [`gitlab`](electron/plugins/gitlab/README.md) | GitLab 流水线状态感知 | `baseUrl`、`token` / `tokenEnv`、`projects`、`interval_ms` |
 | [`web-search`](electron/plugins/webSearch/README.md) | 网页搜索与正文读取 | `searchProvider`、`fetchProvider`、`providers` |
 | [`schedule`](electron/plugins/schedule/README.md) | 单次定时通知 | `observationTtlMs`、`maxRetries`、`retryDelayMs` |
 | [`tts`](electron/plugins/tts/README.md) | 系统语音 / GPT-SoVITS 输出 | `provider`、服务地址与声线资源 |
@@ -110,7 +111,7 @@ npm start
 | [`raw-log`](electron/plugins/rawLog/README.md) | 模型请求、截图与查询日志 | `enabled` |
 | [`storage-sqlite`](electron/plugins/storageSqlite/README.md) | SQLite 持久化后端 | `path`、`busyTimeoutMs` |
 
-截图、音频、RSS 和到期通知作为观察等待正常决策；手动输入和网页查询结果会主动请求决策。自动决策可静默处理观察。选择题提问需同时启用 `memory.work` 和 `questions`。
+截图、音频、RSS、GitLab 流水线状态和到期通知作为观察等待正常决策；手动输入和网页查询结果会主动请求决策。自动决策可静默处理观察。选择题提问需同时启用 `memory.work` 和 `questions`。
 
 ## 架构
 
@@ -120,7 +121,7 @@ npm start
 flowchart TB
     subgraph Input[1. 观察接入]
         direction RL
-        Sources["视觉 / 音频 / RSS 插件<br/>手动输入插件"]
+        Sources["视觉 / 音频 / RSS / GitLab 插件<br/>手动输入插件"]
         Queue["核心：观察入口与队列"]
         Sources -.->|"提交观察"| Queue
     end
@@ -132,7 +133,7 @@ flowchart TB
     end
     subgraph Conversation[3. 对话策略]
         direction RL
-        ContextPlugins["记忆插件：检索背景<br/>视觉 / 音频 / RSS<br/>网页查询 / 定时通知：提示词契约"]
+        ContextPlugins["记忆插件：检索背景<br/>视觉 / 音频 / RSS / GitLab<br/>网页查询 / 定时通知：提示词契约"]
         Context["核心：上下文、提示词与会话历史"]
         ContextPlugins -.->|"注册上下文与契约"| Context
     end

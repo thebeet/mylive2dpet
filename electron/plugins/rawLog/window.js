@@ -23,7 +23,7 @@ const webListEl = document.getElementById("web-search-list");
 const webDetailEl = document.getElementById("web-search-detail");
 const webErrorEl = document.getElementById("web-search-error");
 const webMoreEl = document.getElementById("web-search-more");
-const tabNames = ["requests", "screenshots", "web-search", "rss"];
+const tabNames = ["requests", "screenshots", "web-search", "rss", "gitlab"];
 const webStates = { queued: "排队中", running: "进行中", success: "成功", failed: "失败", rejected: "已拦截", cancelled: "已取消", skipped: "已跳过" };
 let webEntries = [], webCursor = null, webSelectedId = null, webLoading = false, webSelectionVersion = 0;
 const rssListEl = document.getElementById("rss-list");
@@ -128,6 +128,110 @@ async function loadRss(mode = "update") {
   } catch (error) {
     if (epoch === viewGeneration && activeTab === "rss") rssErrorEl.textContent = `读取 RSS 日志失败：${error.message || error}`;
   } finally { rssLoading = false; rssMoreEl.disabled = clearing; }
+}
+
+const gitlabListEl = document.getElementById("gitlab-list");
+const gitlabDetailEl = document.getElementById("gitlab-detail");
+const gitlabErrorEl = document.getElementById("gitlab-error");
+const gitlabMoreEl = document.getElementById("gitlab-more");
+const gitlabStates = { running: "获取中", baseline: "已建立基线", success: "检查完成", failed: "失败", cancelled: "已取消" };
+const gitlabDeliveries = { baseline: "基线条目", unchanged: "未变化", filtered: "已筛选排除", pending: "尚未提交", queued: "已入队", failed: "入队失败" };
+const gitlabChanges = { new: "新增", "status-changed": "状态 / 分支 / SHA 变化", unchanged: "未变化" };
+let gitlabEntries = [], gitlabCursor = null, gitlabSelectedId = null, gitlabLoading = false, gitlabSelectionVersion = 0;
+
+function renderGitlabList() {
+  gitlabListEl.replaceChildren();
+  countEl.textContent = `已显示 ${gitlabEntries.length} 次 GitLab 查询 · 每 2 秒自动更新`;
+  if (!gitlabEntries.length) {
+    addText(gitlabListEl, "div", "empty", "暂无记录。启用 GitLab 插件后，获取内容与检查结果会显示在这里。");
+    gitlabDetailEl.replaceChildren();
+  }
+  for (const entry of gitlabEntries) {
+    const button = addText(gitlabListEl, "button", "request", "");
+    button.setAttribute("aria-pressed", String(entry.id === gitlabSelectedId));
+    addText(button, "span", "", entry.projectName || entry.request.projectId);
+    addText(button, "time", "muted", new Date(entry.t).toLocaleString("zh-CN"));
+    addText(button, "span", "muted", `${gitlabStates[entry.state] || entry.state}${entry.status != null ? ` · HTTP ${entry.status}` : ""}`);
+    if (entry.itemCount != null) addText(button, "span", "muted", `获取 ${entry.itemCount} 条 · 已入队 ${entry.queuedCount || 0} 条`);
+    button.addEventListener("click", () => void selectGitlab(entry));
+  }
+  gitlabMoreEl.hidden = !gitlabCursor;
+}
+
+async function selectGitlab(entry, preserveScroll = false) {
+  const version = ++gitlabSelectionVersion, epoch = viewGeneration;
+  gitlabSelectedId = entry.id;
+  renderGitlabList();
+  try {
+    const record = await window.rawLog.getGitlab(entry.id);
+    if (version !== gitlabSelectionVersion || epoch !== viewGeneration || activeTab !== "gitlab") return;
+    gitlabErrorEl.textContent = "";
+    const main = document.querySelector("#gitlab-panel main"), scroll = main.scrollTop;
+    const expanded = preserveScroll ? new Set([...gitlabDetailEl.querySelectorAll("details[open][data-key]")]
+      .map(details => details.dataset.key)) : new Set();
+    gitlabDetailEl.replaceChildren();
+    addText(gitlabDetailEl, "h2", "", `${record.projectName || record.request.projectId} · ${gitlabStates[record.state] || record.state}`);
+    addText(gitlabDetailEl, "div", "muted", `${new Date(record.t).toLocaleString("zh-CN")}${record.elapsedMs != null ? ` · ${record.elapsedMs} ms` : ""}`);
+    if (record.state === "baseline") addText(gitlabDetailEl, "p", "muted", "本次首次读取用于建立更新基线，已有流水线未提交观察队列。");
+    const { pages, items, request, ...metadata } = record;
+    for (const [title, value] of [["请求参数", request], ["获取与入队状态", metadata], ["失败原因", record.error]]) {
+      if (value == null || value === "") continue;
+      const card = addText(gitlabDetailEl, "article", "message", "");
+      addText(card, "div", "role", title);
+      addText(card, "div", "content", typeof value === "string" ? value : JSON.stringify(value, null, 2));
+    }
+    if (items) {
+      addText(gitlabDetailEl, "h3", "", `获取到的条目（${items.length}）`);
+      for (const item of items) {
+        const details = addText(gitlabDetailEl, "details", "message", "");
+        details.dataset.key = `pipeline-${item.id}`;
+        addText(details, "summary", "", `#${item.id} · ${item.ref} · ${item.status} · ${gitlabChanges[item.eventType] || item.eventType} · ${gitlabDeliveries[item.delivery] || item.delivery}`);
+        const itemMetadata = item;
+        addText(details, "div", "content", JSON.stringify(itemMetadata, null, 2));
+      }
+    }
+    for (const page of pages || []) {
+      const details = addText(gitlabDetailEl, "details", "message", "");
+      details.dataset.key = `page-${page.page}`;
+      addText(details, "summary", "", `第 ${page.page} 页 · ${page.response ? `HTTP ${page.response.status}` : "未收到响应"} · 原始响应正文（访问令牌已脱敏）`);
+      const { rawBody, ...pageMetadata } = page;
+      addText(details, "div", "content", JSON.stringify(pageMetadata, null, 2));
+      if (rawBody != null) addText(details, "pre", "content", rawBody);
+    }
+    for (const details of gitlabDetailEl.querySelectorAll("details[data-key]")) {
+      if (expanded.has(details.dataset.key)) details.open = true;
+    }
+    main.scrollTop = preserveScroll ? scroll : 0;
+  } catch (error) {
+    if (version === gitlabSelectionVersion && epoch === viewGeneration && activeTab === "gitlab") {
+      gitlabErrorEl.textContent = `读取 GitLab 查询记录失败：${error.message || error}`;
+    }
+  }
+}
+
+async function loadGitlab(mode = "update") {
+  if (gitlabLoading || clearing) return;
+  const epoch = viewGeneration;
+  gitlabLoading = true; gitlabMoreEl.disabled = true;
+  try {
+    const result = await window.rawLog.listGitlab({ before: mode === "more" ? gitlabCursor : null });
+    if (epoch !== viewGeneration || activeTab !== "gitlab") return;
+    const old = gitlabEntries.find(entry => entry.id === gitlabSelectedId);
+    if (mode === "reset" || !gitlabEntries.length) { gitlabEntries = result.entries; gitlabCursor = result.nextCursor; }
+    else {
+      const merged = new Map(gitlabEntries.map(entry => [entry.id, entry]));
+      for (const entry of result.entries) merged.set(entry.id, entry);
+      gitlabEntries = [...merged.values()].sort((a, b) => b.t - a.t || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+      if (mode === "more" || gitlabCursor === null) gitlabCursor = result.nextCursor;
+    }
+    gitlabErrorEl.textContent = ""; renderGitlabList();
+    const selected = gitlabEntries.find(entry => entry.id === gitlabSelectedId) || gitlabEntries[0];
+    if (selected && (!old || JSON.stringify(old) !== JSON.stringify(selected) || ["reset", "activate"].includes(mode))) {
+      await selectGitlab(selected, mode === "update" || mode === "activate");
+    }
+  } catch (error) {
+    if (epoch === viewGeneration && activeTab === "gitlab") gitlabErrorEl.textContent = `读取 GitLab 日志失败：${error.message || error}`;
+  } finally { gitlabLoading = false; gitlabMoreEl.disabled = clearing; }
 }
 
 function renderWebList() {
@@ -570,6 +674,7 @@ function switchTab(tab) {
   screenshotSelectionVersion++;
   webSelectionVersion++;
   rssSelectionVersion++;
+  gitlabSelectionVersion++;
   for (const name of tabNames) {
     const selected = name === tab;
     const button = document.getElementById(`${name}-tab`);
@@ -580,6 +685,7 @@ function switchTab(tab) {
   if (tab === "screenshots") { renderScreenshots(); void loadScreenshots("activate"); }
   else if (tab === "web-search") { renderWebList(); void loadWeb("activate"); }
   else if (tab === "rss") { renderRssList(); void loadRss("activate"); }
+  else if (tab === "gitlab") { renderGitlabList(); void loadGitlab("activate"); }
   else { renderList(); void load("activate"); }
 }
 
@@ -598,12 +704,13 @@ for (const name of tabNames) {
   });
 }
 const refresh = mode => activeTab === "screenshots" ? loadScreenshots(mode) : activeTab === "web-search" ? loadWeb(mode)
-  : activeTab === "rss" ? loadRss(mode) : load(mode);
+  : activeTab === "rss" ? loadRss(mode) : activeTab === "gitlab" ? loadGitlab(mode) : load(mode);
 document.getElementById("refresh").addEventListener("click", () => void refresh("reset"));
 moreEl.addEventListener("click", () => void load("more"));
 screenshotsMoreEl.addEventListener("click", () => void loadScreenshots("more"));
 webMoreEl.addEventListener("click", () => void loadWeb("more"));
 rssMoreEl.addEventListener("click", () => void loadRss("more"));
+gitlabMoreEl.addEventListener("click", () => void loadGitlab("more"));
 const clearDialog = document.getElementById("clear-dialog");
 const clearStatusEl = document.getElementById("clear-status");
 const clearErrorEl = document.getElementById("clear-error");
@@ -624,9 +731,10 @@ document.getElementById("clear-form").addEventListener("submit", async event => 
   screenshotSelectionVersion++;
   webSelectionVersion++;
   rssSelectionVersion++;
+  gitlabSelectionVersion++;
   clearConfirmEl.textContent = "清理并压缩中…";
   clearErrorEl.textContent = "";
-  const controls = ["clear", "clear-confirm", "clear-cancel", "refresh", "requests-tab", "screenshots-tab", "web-search-tab", "rss-tab", "more", "screenshots-more", "web-search-more", "rss-more"];
+  const controls = ["clear", "clear-confirm", "clear-cancel", "refresh", "requests-tab", "screenshots-tab", "web-search-tab", "rss-tab", "gitlab-tab", "more", "screenshots-more", "web-search-more", "rss-more", "gitlab-more"];
   for (const id of controls) document.getElementById(id).disabled = true;
   try {
     const result = await window.rawLog.clear();
@@ -634,16 +742,18 @@ document.getElementById("clear-form").addEventListener("submit", async event => 
     screenshots = []; screenshotsCursor = null; selectedScreenshotId = null;
     webEntries = []; webCursor = null; webSelectedId = null;
     rssEntries = []; rssCursor = null; rssSelectedId = null;
+    gitlabEntries = []; gitlabCursor = null; gitlabSelectedId = null;
     requestsEl.replaceChildren(); messagesEl.replaceChildren(); metaEl.replaceChildren();
     screenshotsEl.replaceChildren(); screenshotDetailEl.replaceChildren();
     webListEl.replaceChildren(); webDetailEl.replaceChildren(); webErrorEl.textContent = "";
     rssListEl.replaceChildren(); rssDetailEl.replaceChildren(); rssErrorEl.textContent = "";
+    gitlabListEl.replaceChildren(); gitlabDetailEl.replaceChildren(); gitlabErrorEl.textContent = "";
     errorEl.textContent = screenshotErrorEl.textContent = "";
-    moreEl.hidden = screenshotsMoreEl.hidden = webMoreEl.hidden = rssMoreEl.hidden = true;
+    moreEl.hidden = screenshotsMoreEl.hidden = webMoreEl.hidden = rssMoreEl.hidden = gitlabMoreEl.hidden = true;
     if (activeTab === "screenshots") renderScreenshots(); else if (activeTab === "web-search") renderWebList();
-    else if (activeTab === "rss") renderRssList(); else renderList();
+    else if (activeTab === "rss") renderRssList(); else if (activeTab === "gitlab") renderGitlabList(); else renderList();
     clearStatusEl.className = result.warnings?.length ? "error" : "muted";
-    clearStatusEl.textContent = `已清理 ${result.requests} 条请求日志、${result.webSearch || 0} 条网页请求、${result.rss || 0} 条 RSS 获取记录、${result.screenshots} 张截图。` +
+    clearStatusEl.textContent = `已清理 ${result.requests} 条请求日志、${result.webSearch || 0} 条网页请求、${result.rss || 0} 条 RSS 获取记录、${result.gitlab || 0} 条 GitLab 查询记录、${result.screenshots} 张截图。` +
       (result.compacted ? "数据库已压缩。" : "") +
       (result.legacyLogs || result.legacyScreenshots ? `另清理 ${result.legacyLogs + result.legacyScreenshots} 个旧文件。` : "") +
       (result.warnings?.length ? `\n${result.warnings.join("\n")}` : "");

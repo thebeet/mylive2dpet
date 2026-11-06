@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld("rawLog", {
   getWebSearch: (id) => ipcRenderer.invoke("raw-log:getWebSearch", id),
   listRss: (options = {}) => ipcRenderer.invoke("raw-log:listRss", options),
   getRss: (id) => ipcRenderer.invoke("raw-log:getRss", id),
+  listGitlab: (options = {}) => ipcRenderer.invoke("raw-log:listGitlab", options),
+  getGitlab: (id) => ipcRenderer.invoke("raw-log:getGitlab", id),
   list: (options = {}) => ipcRenderer.invoke("raw-log:list", options),
   get: (id) => ipcRenderer.invoke("raw-log:get", id),
   listGroups: (options = {}) => ipcRenderer.invoke("raw-log:listGroups", options),

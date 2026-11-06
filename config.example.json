@@ -95,6 +95,25 @@
       "_comment": "RSS/Atom 感知：启动立即检查；每个 feed 可设置 interval_ms，未设置使用插件全局间隔。首次成功读取只建立基线，之后新增和修改条目提交观察队列。每个 feed 的 proxy 为独立 HTTP(S) 代理，留空直连。"
     },
     {
+      "name": "gitlab",
+      "enabled": false,
+      "baseUrl": "https://gitlab.com",
+      "token": "",
+      "tokenEnv": "GITLAB_TOKEN",
+      "proxy": "",
+      "projects": [
+        { "id": "group/project", "name": "示例项目", "ref": "main", "statuses": ["failed", "success"] }
+      ],
+      "interval_ms": 60000,
+      "timeoutMs": 20000,
+      "emitOnFirstFetch": false,
+      "observationTtlMs": 0,
+      "lookbackMs": 604800000,
+      "maxPages": 20,
+      "maxResponseBytes": 2097152,
+      "_comment": "GitLab 流水线感知：填写实例地址和项目 ID/路径，配置 token 或启动进程环境变量 tokenEnv 后启用。statuses 留空关注全部状态，ref 留空关注全部分支。首次读取建立基线，后续新增或状态变化只提交观察队列。"
+    },
+    {
       "name": "schedule",
       "enabled": true,
       "observationTtlMs": 0,

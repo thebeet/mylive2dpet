@@ -6,6 +6,7 @@ module.exports = [
   require("./schedule/definition"),
   require("./webSearch/definition"),
   require("./rss/definition"),
+  require("./gitlab/definition"),
   require("./storageSqlite/definition"),
   require("./dialogueHistory/definition"),
   require("./rawLog/definition"),
