@@ -1,125 +1,42 @@
 # My Live2D Pet
 
-基于 Electron、TypeScript 的桌宠，支持 Live2D Cubism 4 和 PMX（MMD）形象插件。桌宠可以结合桌面画面、设备播放的语音、RSS 更新和手动输入理解当前情境，积累用户画像与项目经验，并通过表情、气泡和 TTS 展示回复；模型还可请求网页查询和创建定时通知。
-
-项目采用插件架构：核心负责窗口、消息总线、观察队列、决策调度、对话策略、模型请求、Storage 抽象和插件生命周期；感知、语音、记忆及历史对话由插件扩展。插件的配置标准化、加载规则和服务依赖集中在各自的 `definition.js`；记忆协调器统一管理后台更新、手动整理和清空，决策流程明确先记录回合再呈现回复。
+基于 Electron、TypeScript 的桌宠，支持 Live2D Cubism 4（`.model3.json`）和 PMX（MMD）格式的 3D 模型。核心负责窗口、观察队列、决策调度、对话策略、模型请求、Storage 抽象和插件生命周期，感知、记忆与输出能力通过插件扩展。
 
 ## 功能
 
-- 透明置顶窗口、拖动定位和鼠标视线跟随。
-- 定时全屏截图与画面变化检测。
-- 设备音频输出采集、语音分段和 ASR 转写，目前支持 Linux。
-- 右键手动对话，支持纯文本输入。
-- 手动播放模型支持的动作和表情。
-- 系统 TTS 与 GPT-SoVITS，支持开关、串行播放和取消。
-- 近期记忆、长期记忆，以及清空记忆菜单。
-- 从飞书聊天、文档和会议转写积累人物画像，支持合理猜测、来源查看和手动修正。
-- 项目状态与经验记忆，记录目标、进展、阻塞和处理方法，区分尝试、验证成功与失败。
-- 选择题提问浮窗，支持补充、跳过、延后和今天暂停；支持查看提问与回答记录。
-- SQLite 历史对话、分页与文字搜索。
-- RSS／Atom 订阅轮询，新增与修改条目进入观察队列，支持独立代理与重启去重。
-- 网页搜索与正文读取，支持 DeepSeek 和 OpenAI 搜索 provider。
-- 单次定时通知，支持菜单创建、模型创建、取消与恢复运行后补发。
-- 原始日志窗口，查看模型请求、token 用量、截图、网页查询与 RSS 获取内容。
-- 插件菜单挂载、服务依赖排序和自动清理。
-
-## 内置插件总览
-
-当前 [插件目录](electron/plugins/manifest.js) 注册了 **12 个主进程插件**。下表说明代码支持的功能和启用条件；实际配置参考 [config.example.json](config.example.json)，本机的订阅地址、代理和密钥放在被 Git 忽略的 `config.json` 中。
-
-| 插件名 | 功能 | 启用条件与依赖 |
-| --- | --- | --- |
-| `manual-input` | 右键输入窗口；提交用户文本并主动请求决策 | 默认加载，可用 `enabled=false` 关闭 |
-| `avatar-live2d` | Live2D 形象、动作／表情菜单、视线跟随 | 默认启用，支持 Setsuna；与其它形象插件互斥 |
-| `avatar-3d` | PMX（MMD）形象、表情、待机和招手、头部跟随 | 显式启用，支持本地芙宁娜模型；与其它形象插件互斥 |
-| `screen-perception` | 定时全屏截图、画面变化检测、图片观察；手动保存截图与摘要关联 | 自动采集默认开启，`enabled=false` 只关闭自动采集，手动截图保留；依赖 Storage 和支持图片输入的模型进行理解 |
-| `audio-output-perception` | 监听设备播放的语音，分段转写；提供实时字幕，最终文字进入观察队列；TTS 播放期间抑制采集 | 需添加配置；目前采集仅支持 Linux，需要 `pactl`、`parec` 和 ASR 服务；支持 FunASR、Whisper 服务及兼容 OpenAI 的转写接口 |
-| `rss` | RSS／Atom 更新感知；每个 feed 独立代理和轮询间隔；持久化去重并记录获取内容 | 需添加配置并启用；依赖 Storage；首次成功读取默认只建立基线；[详细配置](electron/plugins/rss/README.md) |
-| `web-search` | 模型通过 effects 请求网页搜索／读取，结果入队并请求后续决策；也提供插件服务接口 | 需显式 `enabled=true` 并配置独立 API key；DeepSeek 支持搜索和读取，OpenAI 提供搜索；[详细配置](electron/plugins/webSearch/README.md) |
-| `schedule` | 单次定时通知；菜单或模型 effect 创建，菜单查看与取消；到期提交观察，恢复运行后补发未提交任务 | 默认加载，依赖 Storage；暂不支持周期通知 |
-| `tts` | 将桌宠回复合成语音，串行播放、取消和运行期开关 | 需添加配置并启用；支持系统语音工具或 GPT-SoVITS 服务及声线资源 |
-| `memory` | 近期对话、长期事实、人物画像、项目状态与经验；检索注入上下文、查看来源、修正、整理和清空 | 需添加配置；持久记忆依赖 Storage，自动提取与整理使用核心模型；`shortTerm`、`longTerm`、`work`、`practice` 可分别启停 |
-| `questions` | 根据画像缺口展示选择题，支持自由补充、跳过、延后、暂停与删除；回答回写画像 | 需添加配置并启用，同时启用 `memory.work`；自动提问受闲置、决策、语音与会议线索限制 |
-| `dialogue-history` | 保存已完成决策中的用户文字、桌宠回复和观察摘要；提供分页与搜索窗口 | 默认加载，依赖 Storage |
-| `raw-log` | 查看模型原始请求／返回、重试、token 与缓存用量，以及截图、网页查询和 RSS 日志；支持清理 | 默认加载，依赖 Storage；网页查询页需加载 `web-search`，RSS 历史可在 RSS 停用后查看 |
-| `storage-sqlite` | 为核心 Storage 提供 SQLite 后端，管理结构化记录、图片、事务与迁移 | 默认加载；当前持久化插件共用此后端 |
-
-截图、音频、RSS 和到期通知作为外部观察进入队列，等待正常决策；入队不等于桌宠已经发言。手动输入会主动请求决策，网页查询的 effect 结果也会请求后续决策。自动决策可静默处理观察，同时积累记忆。
-
-`memory.work` 保存人物画像，`memory.practice` 保存项目状态与经验；两者未配置时默认关闭，完整示例已开启。RSS 内容不会直接进入这两类记忆的来源队列。飞书内容目前通过截图和音频转写感知，尚无独立飞书事件、浏览器语义或无障碍树插件。
+- 透明置顶窗口、拖动定位、视线跟随，以及模型动作和表情。
+- 手动文字对话，结合桌面截图、设备播放语音和 RSS 更新理解当前情境。
+- 近期与长期记忆、人物画像、项目状态与经验，以及画像补充提问。
+- 气泡与 TTS 回复、网页查询、单次定时通知。
+- 历史对话搜索、模型请求与截图日志查看。
 
 ## 快速开始
 
-### 1. 准备环境与模型
-
-需要 Node.js **22.12 或更高版本**、npm 和可运行 Electron 的桌面环境。构建 SQLite 原生模块时可能需要 Python 和本机 C/C++ 编译工具。
-
-模型资源放在 `assets/`。当前默认路径为：
-
-```text
-assets/
-└── Setsuna_v081l_b/
-    ├── setsuna_psd2live_v001.model3.json
-    ├── icon.png
-    └── 模型引用的 moc3、纹理、动作、表情等文件
-```
-
-`assets/` 被 Git 忽略，需要自行准备模型包。形象由 `plugins` 中的 `avatar-live2d` 和 `avatar-3d` 控制，同时只允许启用一个；模型路径、大小、偏移和图标均通过插件配置，不需要改代码。完整配置见 [config.example.json](config.example.json)，接口和模型说明见 [形象插件文档](electron/plugins/avatarShared/README.md)。
-
-默认启用 `avatar-live2d`，支持 Setsuna_v081l_b，保留 Thinking 待机、ReachStudy 点击动作及模型表情。`avatar-3d` 支持本地 `assets/【芙宁娜】/【芙宁娜】.pmx`（也可使用同目录下的 `【芙宁娜_荒】.pmx`），包含 PMX 贴图、表情、自动眨眼、头部跟随、呼吸待机和招手。运行 `npm run motions:furina` 可根据模型骨骼离线预生成待机、招手、点头、摇头、思考、鞠躬、开心、鼓掌、摘帽致意、天鹅舞，重载形象后从右键「播放动作」使用，结束后平滑返回待机。切换到芙宁娜时，在同一次配置保存中将 `avatar-live2d.enabled` 设为 `false`、`avatar-3d.enabled` 设为 `true`；应用自动释放旧形象并加载新形象。3D 默认开启 PMX 头发和服饰刚体物理，可通过 `avatar-3d.physicsEnabled=false` 关闭；当前不包含 VMD 动画播放或其它 3D 文件格式。
-
-芙宁娜资源包标注模型提供为 miHoYo、模型改造为观海；使用时遵守包内 `readme【一定要看】.txt`，模型资源不纳入仓库。
-
-Live2D Cubism Core 脚本位于 `public/live2dcubismcore.min.js`，仅在加载 Live2D 形象时按需加载。
-
-### 2. 安装依赖与配置
-
-在项目根目录执行：
+需要 Node.js **22.12 或更高版本**、npm 和可运行 Electron 的桌面环境。构建 SQLite 原生模块可能需要 Python 和本机 C/C++ 编译工具。
 
 ```bash
 npm install
+cp config.example.json config.json
 ```
 
-安装会自动重建 `better-sqlite3` 的 Electron 原生模块。首次配置时，将 [config.example.json](config.example.json) 复制为 `config.json`，修改模型接口和角色设定。模型和角色参数放在根节点 `conversation` 中，决策调度放在 `decision` 中，感知、记忆和输出等扩展参数放在 `plugins` 中。
+编辑 `config.json`，填写模型接口、API key 和角色设定，并将自行准备的形象资源放入 `assets/`。Live2D 和 3D 的资源路径、大小及动作配置分别见 [Live2D 插件](electron/plugins/avatarLive2d/README.md) 和 [3D 插件](electron/plugins/avatar3d/README.md)；同时只启用一个形象插件。
 
-`config.json` 被 Git 忽略。示例默认关闭 TTS、开启设备语音监听。启用 TTS 时，将 `plugins` 中 `name=tts` 的 `enabled` 设为 `true`，并替换示例中的 GPT-SoVITS 路径。
-
-应用启动后通过 `fs.watch` 监听 `config.json` 的变化，兼容编辑器替换文件的保存方式，连续变化合并后自动校验并加载新配置，控制台会记录更新结果。JSON 格式错误、配置无效或文件暂时被删除时，继续使用上次有效配置；修复后自动恢复。`plugins` 中某个插件的配置变化后，会自动停止、卸载并重新加载该插件，按加载规则处理新增、移除和启停变化；依赖它的必需服务的插件也会按依赖顺序重载，无关插件继续运行。重载会关闭该插件的窗口、取消正在进行的任务，并重置内存中的临时状态。窗口尺寸等主窗口启动时设置仍需重启应用。**配置重载不重新加载主进程源码**：修改 `electron/` 中的插件实现后，需要完全退出桌宠再执行 `npm start`，刷新窗口或 Vite 热更新不会使这些修改生效。
-
-下面是一份可作为起点的配置，替换接口地址、模型和 API key 后使用：
+下面是仅使用手动文字对话的起点配置。模型路径和默认表情需按实际资源修改；完整示例见 [config.example.json](config.example.json)。
 
 ```json
 {
   "conversation": {
     "enabled": true,
-    "history": {
-      "maxTurns": 32,
-      "keepTurns": 4,
-      "maxInputTokens": 50000,
-      "hardInputTokens": 100000,
-      "summaryMaxTokens": 4096,
-      "summaryMaxChars": 6000
-    },
     "ai": {
       "endpoint": "https://your-api.example.com/v1",
       "apiKey": "your-api-key",
-      "model": "your-model",
-      "outputFormat": "auto",
-      "max_tokens": 1024,
-      "timeoutMs": 120000,
-      "retryBudgetMs": 360000
+      "model": "your-model"
     },
     "character": {
-      "name": "Setsuna",
+      "name": "桌宠",
       "description": "你是陪伴用户的桌宠。",
-      "personality": "温柔，表达自然简洁。",
-      "rules": "根据用户输入和观察内容回复，通常只说一到两句话。",
       "language": "中文"
     }
-  },
-  "ui": {
-    "windowWidth": 380,
-    "windowHeight": 560
   },
   "decision": {
     "enabled": true,
@@ -127,396 +44,172 @@ npm install
   },
   "plugins": [
     {
+      "name": "avatar-live2d",
+      "enabled": true,
+      "modelPath": "assets/live2d/model.model3.json",
+      "iconPath": "",
+      "defaultExpression": "neutral",
+      "idleMotion": null,
+      "clickMotion": null
+    },
+    {
       "name": "manual-input",
       "enabled": true
     },
     {
-      "name": "storage-sqlite",
-      "enabled": true
-    },
-    {
-      "name": "dialogue-history",
-      "enabled": true
-    },
-    {
       "name": "screen-perception",
-      "enabled": true,
-      "interval_ms": 5000,
-      "observationTtlMs": 60000,
-      "changeDetect": {
-        "enabled": true,
-        "hashSize": 8,
-        "threshold": 4
-      }
-    },
-    {
-      "name": "memory",
-      "enabled": true,
-      "work": {
-        "enabled": true
-      }
-    },
-    {
-      "name": "questions",
-      "enabled": true
+      "enabled": false
     }
   ]
 }
 ```
 
-核心模型客户端对接兼容 Chat Completions 的接口。启用视觉感知时，所选模型需要支持图片输入；只使用文字时，可以关闭视觉插件的自动采集。核心的 `conversation.ai.proxy` 可配置独立的模型请求代理。
-
-主对话 JSON 采用生成约束和本地严格校验。`conversation.ai.outputFormat` 默认 `auto`：优先发送 `response_format=json_schema`（strict），只有接口明确返回不支持该格式的400/422错误时，才依次尝试 `json_object` 和不带 `response_format` 的提示词模式；本次模型会话记住已协商的模式，避免每轮重复探测。可显式设置 `json_schema`、`json_object` 或 `prompt`，显式模式不自动切换。所有模式始终使用相同的严格本地校验，认证错误、非法 schema 等其它错误不会触发格式降级。后台记忆更新和会话汇总保持各自的 JSON 任务约定。
-
-主回复必须是一个完整 JSON 对象，仅含 `shouldSpeak`、`expression`、`response`、`summaries`、`effects` 五个字段；`shouldSpeak` 为布尔值，`summaries` 为值是字符串的对象，`effects` 为对象数组，表情与台词为字符串。摘要字段和规则由插件根据本轮观察声明：有图片时提供 `summaries.screen` 和 `summaries.work`，有音频时提供 `summaries.audio`；没有对应观察时省略字段，两者都没有时返回 `summaries: {}`，不返回空字符串或 null 占位。旧的平铺摘要字段不再接受。没有副作用时 `effects=[]`，静默回合也可以返回副作用。摘要是本轮观察数据，保留到会话历史和 `decision.completed` 的 `result.summaries`；effects 是交给插件处理的副作用请求，保留到同一通知的 `result.effects`。核心负责通用结构及声明字段校验，插件通过 `systemPrompt.register()` 注入摘要/副作用规则、Schema 和摘要业务校验。副作用失败不回滚成功回合、不影响其他插件，不代表任务已执行成功。缺字段、额外字段、错误类型、大小写不匹配或未知表情、代码块、正文前后附加说明均拒绝。发言时 `response` 不得为空，静默时必须是空字符串；用户直接输入必须发言。格式错误最多重试3次，仍失败则拒绝该批次，不显示回复、不写入对话/记忆，也不进入观察回队的额外重试周期。模型拒绝、内容过滤和输出截断直接失败；截断提示增大 `conversation.ai.max_tokens`。这些检查保证应用只接受符合结构和业务约定的 JSON，不能保证回复内容事实正确。
-
-本轮有截图、没有音频时，主模型输出示例：
-
-```json
-{
-  "shouldSpeak": false,
-  "expression": "neutral",
-  "response": "",
-  "summaries": {
-    "screen": "编辑器仍停留在同一段代码。",
-    "work": "没有可见的新工作信息。"
-  },
-  "effects": []
-}
-```
-
-### 3. 启动桌宠
-
 ```bash
 npm start
 ```
 
-此命令启动 Vite，并在 `127.0.0.1:5173` 就绪后启动 Electron。启动前会检查 SQLite 原生模块。
+`npm start` 启动 Vite 与 Electron，并检查 SQLite 原生模块。右键桌宠或打开托盘菜单可手动对话、控制形象及使用已加载插件。点击桌宠会请求处理已有观察，队列为空时跳过。
+
+`config.json` 与 `assets/` 被 Git 忽略。示例配置中的外部服务和声线资源需按本机环境调整；音频、TTS 等插件的部署步骤见各插件文档。
+
+## 配置项
+
+| 配置节点 | 用途 |
+| --- | --- |
+| `conversation.enabled` | 控制核心对话和共享文本生成 |
+| `conversation.ai` | 模型接口、API key、模型名、代理、输出格式、请求预算 |
+| `conversation.character` | 桌宠名称、角色描述、性格、规则和语言 |
+| `conversation.history` | 会话轮数、输入预算、保留轮数与摘要预算 |
+| `decision.enabled` / `interval_ms` | 自动决策开关与间隔；关闭后仍可手动触发 |
+| `observations` | 观察队列容量、每批数量、重试次数与来源配额 |
+| `ui` | 窗口宽度与高度 |
+| `plugins` | 插件名称、启用状态及专属配置 |
+
+核心模型对接兼容 Chat Completions 的接口；启用视觉感知时需支持图片输入。接口与回复校验见 [核心对话文档](electron/conversation/README.md)。
+
+应用监听 `config.json`，校验通过后自动应用配置，并按依赖关系重载变化的插件；配置无效时继续使用上次有效配置。修改主进程源码后需要完全退出并重新启动应用。配置语义和开发接口见 [架构文档](electron/architecture/README.md)。
+
+## 插件概览
+
+[插件目录](electron/plugins/manifest.js) 注册了 **14 个主进程插件**。插件条目放在 `plugins` 数组中，使用 `name` 标识插件、`enabled` 控制启用；具体加载条件、依赖、配置示例和使用说明见下表链接。
+
+| 插件 | 功能 | 主要配置项 |
+| --- | --- | --- |
+| [`manual-input`](electron/plugins/manualInput/README.md) | 手动文字对话 | `enabled` |
+| [`avatar-live2d`](electron/plugins/avatarLive2d/README.md) | Live2D Cubism 4 形象 | `modelPath`、`scale`、动作与表情 |
+| [`avatar-3d`](electron/plugins/avatar3d/README.md) | PMX 格式 3D 形象 | `modelPath`、`rotationY`、`physicsEnabled` |
+| [`screen-perception`](electron/plugins/screenPerception/README.md) | 全屏截图与变化感知 | `interval_ms`、`changeDetect`、`observationTtlMs` |
+| [`audio-output-perception`](electron/plugins/audioOutputPerception/README.md) | 设备播放语音转写（Linux） | `source`、分段参数、`asr` |
+| [`rss`](electron/plugins/rss/README.md) | RSS / Atom 更新感知 | `feeds`、`interval_ms`、`emitOnFirstFetch` |
+| [`web-search`](electron/plugins/webSearch/README.md) | 网页搜索与正文读取 | `searchProvider`、`fetchProvider`、`providers` |
+| [`schedule`](electron/plugins/schedule/README.md) | 单次定时通知 | `observationTtlMs`、`maxRetries`、`retryDelayMs` |
+| [`tts`](electron/plugins/tts/README.md) | 系统语音 / GPT-SoVITS 输出 | `provider`、服务地址与声线资源 |
+| [`memory`](electron/plugins/memory/README.md) | 近期对话、长期事实、人物画像与项目经验 | `shortTerm`、`longTerm`、`work`、`practice` |
+| [`questions`](electron/plugins/questions/README.md) | 画像补充提问与回答 | `auto`、`dailyLimit`、`cooldownMs` |
+| [`dialogue-history`](electron/plugins/dialogueHistory/README.md) | 历史对话分页与搜索 | `enabled`、`storageService` |
+| [`raw-log`](electron/plugins/rawLog/README.md) | 模型请求、截图与查询日志 | `enabled` |
+| [`storage-sqlite`](electron/plugins/storageSqlite/README.md) | SQLite 持久化后端 | `path`、`busyTimeoutMs` |
+
+截图、音频、RSS 和到期通知作为观察等待正常决策；手动输入和网页查询结果会主动请求决策。自动决策可静默处理观察。选择题提问需同时启用 `memory.work` 和 `questions`。
+
+## 架构
+
+以核心流程为主线，插件位于对应的接入阶段。蓝色表示核心，橙色表示插件；实线表示核心处理顺序，虚线表示插件接口或事件接入。同一插件可在多个阶段出现。
+
+```mermaid
+flowchart TB
+    subgraph Input[1. 观察接入]
+        Queue[核心：观察入口与队列]
+        Sources[视觉 / 设备音频与 ASR / RSS 插件]
+        Manual[手动输入插件]
+        Sources -. perception.submit .-> Queue
+        Manual -. perception.submit .-> Queue
+    end
+
+    subgraph Decision[2. 决策调度]
+        Scheduler[核心：串行调度、取批与过期过滤]
+        Triggers[定时 / 点击触发]
+        Triggers --> Scheduler
+    end
+
+    subgraph Conversation[3. 核心对话策略]
+        Context[核心：收集上下文、组装提示词与会话历史]
+        MemoryContext[记忆插件：检索上下文]
+        PromptPlugins[视觉 / 音频 / RSS / 网页查询 / 定时通知插件<br/>提示词、摘要与 effect 契约扩展]
+        MemoryContext -. decisionContext.register .-> Context
+        PromptPlugins -. systemPrompt.register .-> Context
+    end
+
+    subgraph Request[4. 模型请求与校验]
+        Model[核心：共享模型客户端]
+        Validate[核心：回复结构与插件声明字段校验]
+        RawLog[原始日志插件]
+        Model --> Validate
+        Model -. 请求开始 / 结束事件 .-> RawLog
+    end
+
+    subgraph Completion[5. 决策完成通知]
+        Result[核心：发布并等待 decision.completed]
+        Records[记忆 / 历史对话插件：记录回合<br/>视觉插件：关联截图摘要]
+        Web[网页查询插件：处理查询 effects]
+        Schedule[定时通知插件：处理创建 effects 与到期任务]
+        Questions[提问插件：订阅决策状态、画像与语音事件<br/>选择题回答回写人物画像]
+        Result -. 记录与摘要 .-> Records
+        Result -. effects .-> Web
+        Result -. effects .-> Schedule
+        Result -. 决策状态 .-> Questions
+    end
+
+    subgraph Output[6. 回复呈现]
+        Present[核心：完成通知后显式呈现回复]
+        Bubble[核心：气泡与形象桥接]
+        Avatar[Live2D / PMX 形象插件：注册形象与渲染]
+        TTS[TTS 插件：合成与播放]
+        Present --> Bubble
+        Avatar -. avatar.register .-> Bubble
+        Bubble -. 表情指令 .-> Avatar
+        Present -. execution.speech.requested .-> TTS
+    end
+
+    subgraph Persistence[各阶段共享的存储能力]
+        Storage[核心：Storage 抽象]
+        SQLite[storage-sqlite 插件：SQLite 后端]
+        SQLite -. storage.registerBackend .-> Storage
+        RawLog -. 读写请求日志 .-> Storage
+    end
+
+    Queue --> Scheduler --> Context --> Model
+    Validate --> Result --> Present
+    Manual -. decisions.request .-> Scheduler
+    Web -. 查询结果入队 .-> Queue
+    Web -. 请求后续决策 .-> Scheduler
+    Schedule -. 到期观察入队 .-> Queue
+
+    classDef core fill:#e8f1ff,stroke:#4775b5,color:#172b4d;
+    classDef plugin fill:#fff2df,stroke:#c58a36,color:#604015;
+    class Queue,Scheduler,Context,Model,Validate,Result,Present,Bubble,Storage core;
+    class Sources,Manual,MemoryContext,PromptPlugins,RawLog,Records,Web,Schedule,Questions,Avatar,TTS,SQLite plugin;
+```
+
+插件宿主管理加载、依赖排序、重载与清理；持久化消费者通过核心 Storage 访问后端。详细契约见 [架构文档](electron/architecture/README.md) 和 [Storage 文档](electron/storage/README.md)。
+
+## 开发命令
 
 | 命令 | 用途 |
 | --- | --- |
 | `npm start` / `npm run desktop` | 启动桌宠开发环境 |
-| `npm run dev` | 仅启动 Vite 页面；形象配置通过 Electron 读取，使用桌宠请运行 `npm start` |
+| `npm run dev` | 仅启动 Vite 页面 |
 | `npm run typecheck` | 检查前端 TypeScript 类型 |
-| `npm run build` | 先通过类型检查，再构建前端到 `dist/` |
+| `npm run build` | 类型检查并构建前端到 `dist/` |
 | `npm run preview` | 预览前端构建结果 |
-| `npm run rebuild:native` | 强制重建 SQLite 原生模块 |
+| `npm run rebuild:native` | 重建 SQLite 原生模块 |
 | `npm test` | 运行现有测试 |
 | `npm run test:audio` | 运行音频相关测试 |
 
-`build` 目前只构建前端，项目尚未配置 Electron 安装包或发布包生成流程。
+当前构建只生成前端，尚未配置 Electron 安装包。前端使用 PixiJS 6.5 和 `pixi-live2d-display@0.4`，升级时需同步确认兼容性。
 
-当前使用 PixiJS 6.5，与 `pixi-live2d-display@0.4` 的 PixiJS 6 依赖保持一致。升级 PixiJS 主版本时，需要同时选择兼容的 Live2D 库，并通过类型检查及实际渲染验证。
+## 数据与资源
 
-## 使用方式
+配置放在项目根目录 `config.json`，形象和声线资源放在 `assets/`。持久化记忆、对话、通知与日志默认由 SQLite 后端保存到 Electron `userData/pet.sqlite3`，数据位置和备份方式见 [存储插件](electron/plugins/storageSqlite/README.md)。
 
-右键桌宠或打开托盘菜单：
-
-| 操作 | 说明 |
-| --- | --- |
-| 显示到右下角 | 恢复桌宠并重新定位 |
-| 手动对话… | 输入消息，Ctrl/Cmd+Enter 发送，Esc 关闭；最多 4000 个字符 |
-| 定时通知… | 创建单次通知、查看任务并取消尚未提交的任务 |
-| 历史对话 | 浏览并搜索已经完成的对话 |
-| 原始日志… | 查看模型请求、截图、网页查询及 RSS 获取记录，并清理日志与截图 |
-| 感知设备播放的语音 → 开启/关闭 | 控制本次运行的音频采集，插件配置存在时显示 |
-| 感知设备播放的语音 → 实时显示内容 → 开启/关闭 | 在屏幕右上角显示监听状态和最近识别的语音文字 |
-| 语音 TTS → 开启/关闭 | 控制本次运行的语音输出，TTS 插件启用时显示 |
-| 记忆 → 查看当前记忆… | 查看近期对话、长期记忆、项目状态、经验记忆和人物画像；可追溯来源并修正画像，待提问统一放在提问记录页 |
-| 记忆 → 查看提问记录… | 查看问过的问题、选项、每次提问时间、回答、跳过和延后；支持搜索及状态筛选 |
-| 记忆 → 整理 | 手动通过 AI 整理长期事实、人物画像、项目状态与经验，合并重复信息并归档无价值内容；原始记录保留 |
-| 记忆 → 清空全部记忆 | 二次确认后清除近期记忆、长期事实、人物画像、项目与经验、来源和提问记录；保留历史对话 |
-| 桌宠提问 → 回答一个问题… | 主动打开一个尚未处理且未延后的选择题 |
-| 桌宠提问 → 今天暂停自动提问 | 暂停至当天结束，重启保留，可随时恢复 |
-| 播放动作 / 切换表情 | 按模型定义手动播放动作或表情 |
-
-点击桌宠会请求处理已有观察；队列为空时跳过。手动输入会主动请求决策，当前决策忙碌时等待下一轮。
-
-`decision.interval_ms` 控制自动决策间隔：负数或 `decision.enabled=false` 关闭自动决策，仍可手动触发；设为 `0` 时至少间隔 1 秒。视觉截图周期由插件的 `interval_ms` 独立控制，关闭自动截图后仍可手动保存截图。
-
-画面不变不会阻止已有音频文字或手动消息参与决策。设备音频属于外部观察，手动输入属于用户直接说的话。
-
-## 设备音频与本地 FunASR
-
-音频插件采集设备**播放的声音**，使用 PulseAudio 或 PipeWire 的 PulseAudio 兼容输出监视源。Linux 需要 `pactl` 和 `parec`，通常由 `pulseaudio-utils` 提供：
-
-```bash
-sudo apt install pulseaudio-utils
-```
-
-### 启动 ASR 容器
-
-[compose.asr.yaml](compose.asr.yaml) 使用 FunASR 官方 CPU 在线服务镜像，运行 Paraformer 的 **2-pass** 模式：在线模型边听边出字，离线模型在语音结束后修正文字并补标点。
-
-```bash
-docker compose -f compose.asr.yaml up -d
-docker compose -f compose.asr.yaml logs -f
-docker compose -f compose.asr.yaml ps
-```
-
-服务地址为 `ws://127.0.0.1:10096`，仅绑定本机。首次启动需要下载镜像以及中文在线、离线、VAD、标点、语言模型和 ITN 模型；模型缓存保存在 `mylive2dpet-funasr-models` 卷。等待日志显示模型加载完成、容器变为 healthy 后再开启监听。CPU 性能决定实际识别延迟；默认使用 4 个解码线程。
-
-### 配置音频插件
-
-在 `plugins` 数组中加入：
-
-```json
-{
-  "name": "audio-output-perception",
-  "enabled": true,
-  "source": "default",
-  "speechThresholdDb": -40,
-  "minSpeechMs": 400,
-  "silenceMs": 800,
-  "maxSegmentMs": 15000,
-  "ttsCooldownMs": 600,
-  "asr": {
-    "provider": "funasr",
-    "endpoint": "ws://127.0.0.1:10096",
-    "language": "zh",
-    "chunkSize": [5, 10, 5],
-    "chunkInterval": 10,
-    "timeoutMs": 60000
-  }
-}
-```
-
-确认累计 400ms 语音后，插件开始通过 WebSocket 发送 16kHz 单声道 PCM16，保留开头的预录音；后续每 60ms 发送一块，不等整段结束。`chunkSize=[5,10,5]` 对应 600ms 在线解码窗口，每块大小由 `60 × chunkSize[1] / chunkInterval` 毫秒计算。静音 800ms 或达到 15 秒后发送结束标记，等待最终结果。`timeoutMs` 控制连接和段尾最终识别等待时间。
-
-菜单「感知设备播放的语音 → 实时显示内容 → 开启」打开字幕窗口。流式文字标记为“识别中”，后续离线修正替换同一条字幕；只有段尾最终修正文本进入观察队列，按决策周期供桌宠理解和回应。中间字幕不会触发模型调用。默认不保存原始音频，桌宠播放 TTS 时会取消尚未完成的识别并暂时抑制采集。
-
-`source=default` 使用默认输出设备的 `.monitor` 源，可用 `pactl list short sources` 查看其它监视源并指定名称。这是设备播放音频监听；采集器不会退回麦克风。当前容器模型主要面向中文，`language` 仅标记结果语言，切换识别语言需要更换服务端模型。`apiKey` 可用于需要 Bearer 验证的 WebSocket 网关；`proxy` 可填写 HTTP(S) 代理 URL，留空直连本地服务。
-
-### 使用原有 Whisper 或其他转写服务
-
-原有 Whisper 部署保存在 [compose.whisper.yaml](compose.whisper.yaml)，可运行 `docker compose -f compose.whisper.yaml up -d`，将 `asr.provider` 改回 `whisper-asr-webservice`、`endpoint` 改为 `http://127.0.0.1:9000`。该方式在分段完成后通过 HTTP `/asr` 转写，不提供流式字幕。
-
-也支持兼容 `/audio/transcriptions` 的服务，配置 `provider=openai` 和 `model`，详见 [架构文档](electron/architecture/README.md)。修改配置后自动重载音频插件。
-
-## TTS
-
-### 系统语音
-
-在 `plugins` 中配置：
-
-```json
-{ "name": "tts", "enabled": true, "provider": "system", "interruptOnNewChat": true }
-```
-
-系统合成使用 Windows 的 `System.Speech`、macOS 的 `say`，或 Linux 的 `espeak-ng` / `espeak`。播放使用 Windows PowerShell、macOS `afplay` 或 Linux `aplay`。
-
-Linux 示例依赖：
-
-```bash
-sudo apt install espeak-ng alsa-utils
-```
-
-### GPT-SoVITS
-
-先在 GPT-SoVITS 项目中启动 API 服务，例如 `api_v2.py`，再配置插件：
-
-```json
-{
-  "name": "tts",
-  "enabled": true,
-  "provider": "gpt-sovits",
-  "apiBase": "http://127.0.0.1:9880",
-  "apiVersion": "v2",
-  "gptWeights": "assets/voice/model.ckpt",
-  "sovitsWeights": "assets/voice/model.pth",
-  "refAudio": "assets/voice/reference.wav",
-  "promptText": "参考音频对应的台词。",
-  "textLang": "zh",
-  "promptLang": "zh",
-  "interruptOnNewChat": true
-}
-```
-
-模型和参考音频需自行准备。相对路径以本项目根目录为基准；本机 `refAudio` 必须存在。容器或远程服务看到的参考音频路径不同，可用 `refAudioApiPath` 指定服务端路径。服务已预加载权重时，可设 `weightsPreloaded=true`，跳过权重切换。
-
-新语音默认取消旧任务。关闭 TTS 会取消待处理合成和播放；重新开启不会恢复已取消的语音。
-
-## 记忆、历史与数据位置
-
-记忆包括近期对话、长期事实、人物画像、项目状态与经验。近期对话保存在进程内；待更新完整对话、长期记忆、人物画像、项目与经验及其来源、历史对话由插件写入共享 SQLite。整理通过核心模型客户端后台执行；格式错误保留待处理内容供后续重试。
-
-「记忆 → 整理」手动整理已保存的长期事实和当前人物画像，并更新项目状态与经验，合并重复或互补内容，归档明显一次性或明确失效的临时事项。稳定身份、偏好与重要事实保留，矛盾信息没有明确变化依据时分别保留。画像合并限同一对象、同一字段，等价项目范围可以合并，不混合全局与项目画像；用户确认的内容和范围不能改写或归档，猜测不能升级为已观察内容。整理与后台更新／画像提取串行执行；请求失败、格式错误或事实／画像发生变化时都不写入结果，可再次点击重试。完成后分别显示长期事实和画像的整理前后条数、合并组数和归档条数；「查看当前记忆」的长期记忆页和人物画像页可展开整理记录，查看原始内容、原因和时间，来源证据与历史版本保留，记录重启保留，清空全部记忆时一并删除。启用长期记忆、人物画像或项目经验任一类别均可使用该手动入口，需配置并启用 `conversation.ai` 对应的核心模型。
-
-手动整理一次提交全部已启用的长期事实及当前人物画像，不分批，也不按条数或字符预算拆分。发送事实内容、标签、重要性和时间，以及画像对象、字段、范围、内容、确认依据和时间，来源元数据留在本地。输出预算 `max_tokens=16384`，单次请求超时 5 分钟、含重试总预算 605 秒，最多重试一次；手动整理使用固定预算；自动长期记忆更新的输出预算由 `memory.longTerm.maxTokens` 配置，超时与重试预算相同。事实和画像在同一数据库事务中统一保存，失败保留原始记忆。
-
-手动整理完成后通过桌宠聊天气泡显示长期事实和人物画像的整理前后条数、合并与归档数量；没有记忆或整理失败也使用气泡提示。通知不需要点击确认，只展示文字，不触发语音和新的记忆提取；停止插件或清空后的迟到结果不会再显示通知。
-
-长期事实整理以明确的项目、功能模块或人物为单位归组，允许同一对象的多个相关子主题一次归并为分段记忆，每组不限来源条数。优先形成项目整体记忆，将功能、业务规则、技术约束、职责分工、决策和进展组织在一起；关键事实无法在1600字内保留时再按模块拆分。同一人物的身份、职责、偏好与互动关系也可归成一条长期记忆；人物画像仍遵守原有字段、范围与用户确认约束。正文明确对象名称，按子主题分段，保留关键术语与检索标签。删除重复表述和被最终结论覆盖的中间过程，保留关键约束、未解决事项与有依据的状态变化；不同对象、无关模块和无法解释的冲突分别保留，不强求固定压缩比例。合并正文上限为1600字，来源记忆、决策、会话、观察证据及画像标识随多次合并累计保留，原始记录仍可在整理历史中查看。
-
-长期记忆自动更新采用较高添加门槛：默认每完成20次非静默对话，将这批完整对话、暂存的原始来源和全部现有长期记忆一起交给模型，优先保留原ID修改、补充对应条目；没有合适旧条目时，只有明确且跨会话仍有价值的信息才新增，新增重要性至少为4。普通聊天、临时进度、画面描述、细碎技术过程、猜测和宠物自己的说法不新增。无需修改时返回 `{"update":[],"add":[]}`，按正常完成处理；自动更新不删除或归档旧记忆。
-
-旧记忆插件的 `memory.summary` 配置不再接受，旧数据库摘要仍在启动迁移时清理；新的会话压缩由对话核心的 `conversation.history` 管理，与长期事实更新分开。待更新对话与来源独立存入 SQLite，不受近期对话容量、过期时间影响，重启后继续累积。更新及本批队列消费在同一事务中提交，失败保留旧记忆和全部待处理内容；请求期间新到的对话留到下一批。每批成功后重新累积20次对话；失败时，下个对话或恢复时重新评估保留的内容。`memory.longTerm.extractEveryNTurns` 表示更新间隔。查看窗口显示更新间隔、待更新轮数与已有条目的更新时间，更新前内容保存在整理历史中。
-
-主对话请求按固定系统提示词、当前对话段的记忆快照与此前会话摘要、逐轮追加的 user/assistant 文字历史、本轮输入的顺序发送。固定的观察角色说明、缺失图片/音频处理规则和 JSON 输出要求统一放在系统提示词；本轮消息只携带时间、输入数量及实际观察，不重复这些规则。同一段内不改写已发送的历史文本和时间，记忆只在每段开头检索和注入一次，段内不再检索或追加人物画像、长期事实、项目与经验等背景，汇总切段后再刷新快照。用户在直接对话中的最新明确纠正优先于旧快照；后台记忆变化在下一段进入上下文。核心已有多轮历史时，记忆插件不重复注入近期对话文本。截图采集、队列容量与批量发送保持原有配置，本轮全部选中的图片仍发送，下一轮历史只保留文字和主模型返回的观察摘要，不重传旧图片；图片替换位置之后的缓存需要重新建立，此前稳定的文字前缀仍可复用。实际缓存命中与费用以接口返回的 usage 为准。
-
-`conversation.history` 默认 `maxTurns=32`、`keepTurns=4`、`maxInputTokens=50000`、`hardInputTokens=100000`、`summaryMaxTokens=4096`、`summaryMaxChars=6000`，已有配置未填写时自动使用这些值。每次成功决策（含静默观察）计一轮；下一轮发送前，若已有32轮或输入预算达到软上限，使用一次独立文本请求合并此前摘要与较早对话，保留最近4轮完整文字历史，并刷新新段的记忆快照。摘要保留当前话题、指代、约束、决定和未完成事项；它不承担长期事实提取。摘要预算包含正文与模型推理 token，提示词会按预算设置更精简的目标长度。接口返回 `finish_reason=length` 时，本轮最多增加预算重试两次，每次至少提高到4096、通常翻倍，最高16384；成功后当前会话沿用有效预算，重置会话后恢复配置值。格式错误、空正文和其他失败不触发预算递增。输出必须是完整有效 JSON，超长或重试后仍失败均保留原历史，下次请求重试。达到硬预算或累计到 `maxTurns` 的两倍仍无法汇总时，不再发送更长的主对话请求，提示重试或清空记忆。
-
-输入预算采用保守的文字字节估算，并在接口提供时参考上一轮实际输入 token 数；不是模型专用 tokenizer，也不能精确预判本轮新增图片的视觉 token。请按所用模型窗口留出视觉输入和输出余量。会话摘要会增加一次模型调用并等待其完成；当前会话快照、摘要和多轮历史保存在进程内，重启、模型/角色配置变化、上下文提供者注册变化或清空记忆时重置，长期记忆与历史对话数据库保留。近期记忆查看窗口仍显示插件自身的近期记录，完整请求结构可在「原始日志」查看。
-
-长期记忆更新默认16384 token（`memory.longTerm.maxTokens`），预算也可能包含模型推理所用的 token。长期更新单次超时5分钟、含重试总预算605秒，最多重试一次。文本接口若返回空正文或 `finish_reason=length`，拒绝保存不完整结果，保留待处理内容；错误日志包含模型、结束原因和 token 使用量。
-
-项目状态与经验记忆由 `memory.practice.enabled` 控制，示例配置默认开启，已有配置可显式添加该开关。菜单「记忆 → 查看当前记忆」新增「项目状态」和「经验记忆」两页。项目记录明确名称与范围、目标、已完成事项、待验证／未完成事项、阻塞、下一步及最后来源时间；默认 7 天没有新来源时标注“久未更新”，供模型先确认当前进展，不自动宣称项目已完成或失效。
-
-经验记录适用条件、处理方法、结果与验证状态，区分“尝试过，未验证”“已有验证来源”和“失败记录”。验证与失败必须引用本批来源的逐字摘录；没有结果证据时只能保留为尝试，宠物自己的回答不能作为成功证据。信息来源来自直接用户输入、设备音频原文和有截图关联的画面观察摘要，画面摘要仍标注为观察内容。来源是否足以支持结论由模型判断，逐字引用与来源校验不能替代实际运行验证。
-
-项目与经验在共享 SQLite 中单独保存，不混入人物画像或稳定长期事实。默认累计 3 条来源或最早来源等待 2 分钟后，在串行后台维护任务中更新，即使桌宠静默也可触发；每 30 秒检查一次等待时间。`extractEveryNObservations`、`flushAfterMs`、`maxTokens`、`maxInject`、`staleAfterMs` 均可在 `memory.practice` 配置。提取只使用本批原始来源与现有项目／经验；来源、未处理队列及更新前历史重启后保留。失败或格式错误保留队列，请求期间的新来源留到下一次。项目与经验根据当前问题及近期对话检索，每类最多注入 `maxInject` 条；未验证经验与久未更新的项目在模型上下文中明确标记。
-
-手动「整理」仍一次提交所有启用类别的当前记忆，以及项目／经验待处理来源，不拆分请求；旧事实／画像整理和新项目／经验计划在同一事务中提交，任一类别验证失败都不保存本次整理结果。新页可展开来源原文和之前的状态，清空全部记忆时一并清除项目、经验、来源及历史。关闭 `practice.enabled` 停止采集、自动更新与上下文注入，已保存记录仍可查看。
-
-人物画像主要保存用户的身份、稳定职责、习惯、兴趣、偏好、沟通方式，以及亲友、同事、常联系的人与用户的关系和相处方式。项目和团队归属作为人物信息保存，具体任务、进展、技术细节、会议结论与待办通过近期对话和待更新来源保留，达到20轮对话门槛后统一评估是否更新长期记忆。观察整理返回人物关系，并在事务中写入；原始来源先暂存到长期记忆更新队列，每20次对话统一评估，不即时新增长期条目。无效来源或保存失败保留待处理观察。关系按人物、字段和范围更新，旧版本保留；区分「暂时猜测」「观察记录」和「用户回答」。用户回答或手动修正直接更新画像，自动猜测不能覆盖。别名作为关联线索保存，不仅凭同名自动合并人物。
-
-人物画像页只展示人物信息、修正入口、可展开的信息来源及整理历史，不再单列最近观察或待提问。信息来源显示对应用户对话、提问回答、手动修正以及画面／音频内容与时间；后台原始线索保留用于提取与追溯。提问记录页同时展示未问过的待提问和已有记录，待提问优先显示，支持统一搜索、状态筛选和删除。
-
-旧画像中的 task、项目／团队对象，以及明确的一次性技术讨论会迁入长期记忆，当前画像中的原记录归档；内容、用户确认依据和来源证据保留。启用人物画像和长期记忆后，启动会执行这项清理，迁移可重复执行。人物画像使用 `memory.work` 配置，已有数据库记录继续保留。
-
-提问优先补全用户本人的长期画像，包括职责、团队角色、工作习惯、兴趣与工具偏好、沟通方式。生成问题时优先提供用户画像上下文；待提问队列先选择用户的稳定画像问题，再选择与用户有关的人际关系和同事问题，同类仍按原有优先级排序。仅根据观察线索和未确认的画像缺口提问；已确认的字段不重复询问，没有合适问题时不强行生成。延后、闲置和语音等时机限制继续生效。
-
-会议／播放转写在进入观察队列时保存原文、时间和转写元数据；截图通过模型的 `summaries.work` 保留聊天作者、文档分工、项目和任务线索，携带对应观察 ID。宠物台词不作为人物画像证据。每 3 条观察或最早待处理观察达到 2 分钟时开始整理，单批最多 16 条。待整理内容和问题队列重启后继续保留。模型可以在纯观察回合返回 `shouldSpeak=false`，安静记录画面内容并更新画像；直接用户输入仍需回应。
-
-提问插件需同时启用 `memory.work.enabled` 与 `questions.enabled`。问题来自工作记忆整理，单次只展示一个，提供 2～4 个选项、自由补充、不清楚、跳过和稍后再问。自动浮窗使用 `showInactive`，不抢输入焦点；当前默认不设每日次数上限或两次提问间隔（`dailyLimit=0`、`cooldownMs=0`），仍仅在用户闲置 8～300 秒、没有决策或 TTS、近期无系统语音和会议线索时弹出。会议线索与静默窗口是启发式判断，不是精确的会议状态识别。自动浮窗仅在 90 秒内未操作时延后；窗口获得焦点、点击或输入后取消超时，手动打开不设超时。已显示的问题不会因后台决策、语音或新消息关闭。重复跳过 3 次停止询问该问题；单个问题的「稍后再问」默认延后 30 分钟。手动入口可以绕过自动时机，但仍尊重问题的延后时间。需要恢复频率控制时，可将 `dailyLimit`、`cooldownMs` 设置为正数。
-
-提问窗口的「移除该问题」会关闭窗口，删除当前问题及其已有提问记录；不保存答案或草稿，不更新画像。删除后该问题不再出现在待提问和提问记录中，重启后也不会恢复。
-
-「记忆 → 查看提问记录…」直接打开记忆窗口的「提问记录」页。页面显示问过的问题、当时的选项、每次展示及回答／跳过／延后时间；可以按问题、人物、项目或回答搜索，并按当前状态筛选。已保存的旧回答也可查看；旧版本未保存的逐次展示时间无法补回，只显示原有的最后提问时间。记录重启保留，清空全部记忆时一并删除。
-
-提问记录中的「删除答案」移除单条答案记录，「删除问题及记录」移除整个问题及其展示、回答、跳过和延后记录。删除成功后刷新列表；已确认的人物画像保留，历史删除不会撤销画像。
-
-完整示例配置已启用人物画像、项目经验记忆和提问。参数见 [config.example.json](config.example.json) 的 `memory.work`、`memory.practice` 和 `questions`。已有配置未设置 `work.enabled=true` 或 `practice.enabled=true` 时，对应能力保持关闭；修改插件启用状态后自动重载相关插件。
-
-| 数据 | 默认位置 |
-| --- | --- |
-| 配置 | 项目根目录 `config.json` |
-| 长期记忆、人物画像、项目与经验、来源、提问记录和历史对话 | Electron `userData/pet.sqlite3` |
-| 定时通知任务 | 同一数据库的 Storage `schedule.tasks` 集合 |
-| RSS 更新检查点与获取日志 | 同一数据库的 Storage `rss.feeds`、`rss.history` 集合；获取日志保留最近200次 |
-| 自动截图 | 变化超过 changeDetect.threshold 后存入 Storage 的 `screenshots` 命名空间，保存 JPEG 原图及采集信息；首帧保存 |
-| 手动保存截图 | 同样存入 Storage 的 `screenshots` 命名空间 |
-| AI 响应诊断日志 | 核心 Storage 的 `core.ai-log` 命名空间，正文总量限制为 5 MiB |
-
-Linux 默认数据库通常位于 `~/.config/mylive2dpet/pet.sqlite3`，实际位置以启动日志中的 `database opened` 为准。数据库文件名可通过存储插件的 `path` 配置。
-
-记忆和历史对话统一写入 SQLite。备份数据库时关闭应用，或使用 SQLite 备份机制，以包含 WAL 中的最新记录。
-
-记忆和历史保存在本地。截图与转写文本会按配置发送给 AI 模型接口；使用本地 FunASR 或 Whisper 只决定语音转写在哪里执行。
-
-## 插件与架构
-
-应用和插件通过核心 Storage 的 JSON 集合与业务仓库存储结构化数据；`storage-sqlite` 提供当前后端实现。SQL 和迁移集中在后端，消费者依赖 `storage` 服务，旧的 SQLite 服务名配置自动兼容。后端切换会按依赖关系重载消费者。接口和扩展约定见 [Storage 文档](electron/storage/README.md)。配置文件、模型资源和语音临时文件通过文件系统管理。截图直接通过 Storage 二进制接口保存，不再生成临时 JPG。
-
-```mermaid
-flowchart LR
-    Screen[视觉感知] --> Queue[观察队列]
-    Audio[设备音频与 ASR] --> Queue
-    Manual[手动输入] --> Queue
-    RSS[RSS 更新] --> Queue
-    Tasks[到期通知] --> Queue
-    Queue --> Scheduler[串行决策调度]
-    Scheduler --> AI[核心对话策略]
-    Context[上下文插件] --> AI
-    AI --> Model[共享模型客户端]
-    Model --> AI
-    AI --> Result[决策完成记录]
-    Result --> Memory[记忆插件]
-    Result --> History[历史插件]
-    Result --> Web[网页查询插件]
-    Web --> Queue
-    Result --> Schedule[定时通知插件]
-    Schedule --> Tasks
-    Result --> Present[核心呈现流程]
-    Present --> Bubble[气泡与表情]
-    Present --> TTS[语音插件]
-    Memory --> Model
-    Memory --> Storage[核心 Storage]
-    History --> Storage
-    RSS --> Storage
-    Schedule --> Storage
-    Model --> Storage
-    Storage --> SQLite[SQLite 后端插件]
-```
-
-各插件的功能与启用条件见前文「内置插件总览」。
-
-右键菜单的「原始日志…」可查看每次发送给 OpenAI 兼容聊天接口的完整消息：系统提示词、用户/感知输入、对应的图片，以及返回内容或失败原因。主对话按上下文段合并为「对话会话」：同段内按轮次展示新增输入与回复，系统提示词、固定记忆和初始历史只展示一次。达到轮次或输入预算后汇总成功才开启新会话；汇总失败沿用原会话，清空记忆、模型／角色配置或上下文提供者变化会开启新会话。重试归入对应轮次，汇总请求归入旧会话，独立文本／记忆整理请求单独列出。完整的逐次请求与原始返回仍可展开查看，图片按需加载。窗口每 2 秒更新；列表展示会话累计用量，详情保留每次请求用量，缺失计数显示未提供。展示接口实际返回的输入、输出、总 token、输入缓存命中及未命中数量；未命中默认由输入总量减缓存命中计算，兼容接口直接上报的命中／未命中字段。接口提供时另显示缓存写入及输出中的推理 token，它们不会额外计入总量。未上报字段显示“未提供”，不估算为0；已有原始响应中的 usage 也可直接展示，无需重新发送请求。记录写入现有 `pet.sqlite3` 的 `ai_requests` 表，重启后保留；不记录请求头或 API key。关闭窗口不会停止记录，设置插件 `raw-log.enabled=false` 可关闭功能。旧响应日志没有原始请求；已有数据库请求缺少上下文段标识，继续作为独立请求展示，不推测合并。
-
-原始日志窗口新增「截图」Tab，按保存顺序倒序分页展示自动采集和手动保存的截图，包括未送入模型的截图。选中后显示原图、截图时间、宽高、大小和关联的画面／工作摘要；多图分析注明整批摘要范围，列表每2秒更新。
-
-窗口右上角的「清理日志与截图」先展示删除范围，确认后删除全部原始请求日志、AI 诊断日志、网页查询记录、RSS 获取记录、持久截图及其摘要、日志关联图片与去重索引，并删除旧版 logs/openai.jsonl 及数字备份、logs/screenshots 下由旧截图程序生成的 JPG。记忆、对话历史和 RSS 更新检查点保留；清理后继续记录新数据。清理前已经开始的请求及其重试、迟到截图不会重新保存旧日志或图片，待处理队列中已删除的截图会移除。清理后自动执行 SQLite VACUUM 并合并、截断 WAL，收缩数据库文件并释放磁盘空间；期间应用可能暂时无响应。压缩失败会单独提示，已清理的数据不会恢复，可再次清理重试。
-
-图片在请求日志中保存 Storage 引用，不重复保存截图 Base64；查看日志时按需读取图片。新截图日志展示保存的原图并注明发送前会缩放、压缩。首次启用时，已有数据库请求日志里的内联图片会转为二进制并按内容去重，保留原有图片；旧 JSONL 文件不自动修改。SQLite 释放的空间用于后续写入，数据库文件大小不会立即缩小。
-
-```text
-electron/
-├── main.js               # Electron 宿主与应用组装
-├── pluginHost.js         # 插件生命周期与受控扩展接口
-├── architecture/         # 契约、总线、观察队列、调度和服务注册
-├── conversation/         # 核心对话策略、上下文收集与请求生命周期
-├── llm/                  # 共享模型请求、超时、重试与日志
-├── modules/              # 决策记录与呈现编排
-├── platform/             # 系统适配能力
-└── plugins/              # 各能力的实现和专用窗口资源
-src/                      # 形象渲染组件、交互与气泡
-public/                   # Cubism Core
-assets/                   # 本地模型与声线资源
-```
-
-插件通过静态 [manifest](electron/plugins/manifest.js) 注册，导出 `activate(context)` 并返回 `start`、`stop`、`dispose`。宿主提供菜单、IPC、窗口、感知入口、决策请求、上下文、核心模型和通用服务接口；插件声明必需与可选服务，宿主按依赖排序加载。
-
-详细契约、配置语义、生命周期和开发接口见 [electron/architecture/README.md](electron/architecture/README.md)。
-
-网页查询由可选 `web-search` 插件提供，支持 DeepSeek Search/Fetch 和 OpenAI Responses web_search，可分别选择搜索与读取 provider。插件默认关闭，需配置独立 API key；搜索 effect 后台执行，结果作为观察入队并触发后续决策。统一接口、配置和验证边界见 [Web Search 文档](electron/plugins/webSearch/README.md)。
-
-RSS 感知由可选 `rss` 插件提供，在 `plugins` 中配置 `feeds`（地址字符串或 `{url, name, proxy, interval_ms}`）后开启。启动立即检查，每个 feed 可设置 `interval_ms`，未设置时使用插件全局间隔（默认5分钟）；首次成功读取只建立基线，之后新条目及正文修改提交为外部资料观察，等待正常决策。每个 feed 可配置独立 `proxy`，省略或留空直连；支持 HTTP 条件请求和重启去重。需在首次读取时提交已有条目可设 `emitOnFirstFetch=true`。完整配置、观察格式与送达边界见 [RSS 文档](electron/plugins/rss/README.md)。
-
-兼容 GitLab Atom 正文中未自闭合的 `br`、`hr`、`img`、`wbr` 标签；其它 XML 格式错误仍拒绝读取。私有项目可在 feed URL 中携带访问令牌，对应令牌会在观察和获取日志中脱敏。要只接收关注项目的动态，应分别订阅项目自身的 Atom 地址。
-
-「原始日志…」新增 RSS 页，保存最近200次获取的 HTTP 结果、脱敏后的原始 XML、完整解析条目与入队状态，包含首次基线、未更新及失败记录。重启或禁用 RSS 后仍可查看已有记录；清理日志同时删除 RSS 获取记录，保留订阅更新检查点。
-
-## 定时通知
-
-`schedule` 插件默认启用，依赖核心 Storage。通过桌宠右键菜单「定时通知…」选择本机时区的未来时间、填写内容，可查看记录和取消待提交通知。第一版支持单次通知，任务写入 `schedule.tasks` 集合，关闭窗口不影响计时；停止、禁用或重载插件保留任务。应用关闭或休眠期间无法准时提交，尚未入队的过期通知在恢复运行后补发，休眠恢复或系统时钟变化最多约 30 秒内校准。
-
-到期只调用 `perception.submit()`，生成 `source=schedule`、`role=context`、`trigger=scheduled` 的文字观察，包含任务 ID、原定时间、通知内容和延迟信息。不主动请求决策，不直接显示气泡或播放语音。通知等待下一次正常决策；关闭自动决策时不会因通知入队而主动处理。记录中的「已提交」仅表示观察已经入队，后续遵循共享队列的容量与淘汰规则，不代表桌宠已回复。
-
-可在 `plugins` 中配置：
-
-```json
-{
-  "name": "schedule",
-  "enabled": true,
-  "observationTtlMs": 0,
-  "maxRetries": 2,
-  "retryDelayMs": 30000
-}
-```
-
-`observationTtlMs=0` 不设置观察过期时间；正数从实际入队时计算。提交失败默认每 30 秒重试，首次提交之外最多重试 2 次，耗尽后记录失败原因；可重新创建通知。已提交记录不会在重启后重放，共享观察队列仍是进程内队列。若进程在提交与状态保存之间崩溃，中断的任务会在启动后重试，可能重复，不能保证跨崩溃恰好一次。
-
-其他插件可声明依赖 `schedule.tasks` 并读取 `context.services.get("schedule.tasks")`，调用 `create({ text, scheduledAt })`、`list()` 和 `cancel(id)`。`scheduledAt` 接受毫秒时间戳或带时区的 ISO 时间。
-
-`schedule` 在加载时注册系统提示词和 effect Schema，模型可在决策结果中返回以下副作用以新增通知：
-
-```json
-"effects": [
-  {
-    "type": "schedule.create",
-    "text": "提醒我开会",
-    "scheduledAt": "2026-11-05T09:00:00+08:00"
-  }
-]
-```
-
-示例时间仅用于说明格式。模型根据本轮当前时间解析明确的未来通知请求；插件订阅 `decision.completed`，只处理 `schedule.create`，校验未来时间、时区和文字长度后保存，决策 ID 与 effect 序号用于持久化去重。未知 effect 忽略，非法定时 effect 逐项记录错误并继续处理后续项。静默回合也会处理 effects，提示词明确禁止重放历史 effect 或因到期通知再次创建同一任务。暂不支持周期通知或通过 effect 修改、取消通知。
-
-## 配置生效与当前边界
-
-- 对话配置变化时暂停决策、取消旧模型请求，切换完成后恢复调度；仅修改模型或角色不会重建记忆与历史插件。插件配置变化会重载该插件及其必需依赖消费者，主窗口尺寸在重新创建窗口时生效。
-- 配置只使用当前格式：模型与角色放在 `conversation`；`ai-conversation` 插件、`decision.provider`、`memory.textService`、`memory.summary`、`memory.longTerm.legacyPath` 和历史插件的 `legacyPath` 已移除，使用旧字段会报错。
-- 配置格式错误时保留上次有效配置，终端会报告错误；首次启动仍需要有效配置文件。
-- 设备音频捕获目前只实现 Linux PulseAudio/PipeWire 适配。
-- 待处理观察和失败记录目前保存在内存，尚未实现手动消息的持久化收件箱与启动恢复。
-- 形象默认模型及动作由各插件提供，可在 `plugins` 配置中覆盖；更换 Live2D 模型时需配置其实际支持的默认表情和动作。
+截图和转写文本会按配置发送给模型接口；本地 ASR 只决定语音转写在哪里执行。待处理观察和核心会话历史目前保存在进程内。
