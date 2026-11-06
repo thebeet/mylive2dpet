@@ -122,8 +122,8 @@ flowchart TB
         Queue[核心：观察入口与队列]
         Sources[视觉 / 设备音频与 ASR / RSS 插件]
         Manual[手动输入插件]
-        Sources -. perception.submit .-> Queue
-        Manual -. perception.submit .-> Queue
+        Sources -.->|"perception.submit"| Queue
+        Manual -.->|"perception.submit"| Queue
     end
 
     subgraph Decision[2. 决策调度]
@@ -136,8 +136,8 @@ flowchart TB
         Context[核心：收集上下文、组装提示词与会话历史]
         MemoryContext[记忆插件：检索上下文]
         PromptPlugins[视觉 / 音频 / RSS / 网页查询 / 定时通知插件<br/>提示词、摘要与 effect 契约扩展]
-        MemoryContext -. decisionContext.register .-> Context
-        PromptPlugins -. systemPrompt.register .-> Context
+        MemoryContext -.->|"decisionContext.register"| Context
+        PromptPlugins -.->|"systemPrompt.register"| Context
     end
 
     subgraph Request[4. 模型请求与校验]
@@ -145,7 +145,7 @@ flowchart TB
         Validate[核心：回复结构与插件声明字段校验]
         RawLog[原始日志插件]
         Model --> Validate
-        Model -. 请求开始 / 结束事件 .-> RawLog
+        Model -.->|"请求开始 / 结束事件"| RawLog
     end
 
     subgraph Completion[5. 决策完成通知]
@@ -154,10 +154,10 @@ flowchart TB
         Web[网页查询插件：处理查询 effects]
         Schedule[定时通知插件：处理创建 effects 与到期任务]
         Questions[提问插件：订阅决策状态、画像与语音事件<br/>选择题回答回写人物画像]
-        Result -. 记录与摘要 .-> Records
-        Result -. effects .-> Web
-        Result -. effects .-> Schedule
-        Result -. 决策状态 .-> Questions
+        Result -.->|"记录与摘要"| Records
+        Result -.->|"effects"| Web
+        Result -.->|"effects"| Schedule
+        Result -.->|"决策状态"| Questions
     end
 
     subgraph Output[6. 回复呈现]
@@ -166,24 +166,24 @@ flowchart TB
         Avatar[Live2D / PMX 形象插件：注册形象与渲染]
         TTS[TTS 插件：合成与播放]
         Present --> Bubble
-        Avatar -. avatar.register .-> Bubble
-        Bubble -. 表情指令 .-> Avatar
-        Present -. execution.speech.requested .-> TTS
+        Avatar -.->|"avatar.register"| Bubble
+        Bubble -.->|"表情指令"| Avatar
+        Present -.->|"execution.speech.requested"| TTS
     end
 
     subgraph Persistence[各阶段共享的存储能力]
         Storage[核心：Storage 抽象]
         SQLite[storage-sqlite 插件：SQLite 后端]
-        SQLite -. storage.registerBackend .-> Storage
-        RawLog -. 读写请求日志 .-> Storage
+        SQLite -.->|"storage.registerBackend"| Storage
+        RawLog -.->|"读写请求日志"| Storage
     end
 
     Queue --> Scheduler --> Context --> Model
     Validate --> Result --> Present
-    Manual -. decisions.request .-> Scheduler
-    Web -. 查询结果入队 .-> Queue
-    Web -. 请求后续决策 .-> Scheduler
-    Schedule -. 到期观察入队 .-> Queue
+    Manual -.->|"decisions.request"| Scheduler
+    Web -.->|"查询结果入队"| Queue
+    Web -.->|"请求后续决策"| Scheduler
+    Schedule -.->|"到期观察入队"| Queue
 
     classDef core fill:#e8f1ff,stroke:#4775b5,color:#172b4d;
     classDef plugin fill:#fff2df,stroke:#c58a36,color:#604015;
