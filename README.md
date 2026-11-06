@@ -114,81 +114,66 @@ npm start
 
 ## 架构
 
-以核心流程为主线，插件位于对应的接入阶段。蓝色表示核心，橙色表示插件；实线表示核心处理顺序，虚线表示插件接口或事件接入。同一插件可在多个阶段出现。
+核心阶段从上到下排列，各阶段的核心模块在左，插件与触发来源在右，共享存储位于底部。蓝色表示核心，橙色表示插件；实线连接处理阶段，虚线表示插件接口或事件接入。网页查询结果和到期通知回到观察入口，网页查询结果还会请求后续决策。
 
 ```mermaid
 flowchart TB
     subgraph Input[1. 观察接入]
-        Queue[核心：观察入口与队列]
-        Sources[视觉 / 设备音频与 ASR / RSS 插件]
-        Manual[手动输入插件]
-        Sources -.->|"perception.submit"| Queue
-        Manual -.->|"perception.submit"| Queue
+        direction RL
+        Sources["视觉 / 音频 / RSS 插件<br/>手动输入插件"]
+        Queue["核心：观察入口与队列"]
+        Sources -.->|"提交观察"| Queue
     end
-
     subgraph Decision[2. 决策调度]
-        Scheduler[核心：串行调度、取批与过期过滤]
-        Triggers[定时 / 点击触发]
-        Triggers --> Scheduler
+        direction RL
+        Triggers["定时 / 点击 / 手动输入<br/>网页查询结果"]
+        Scheduler["核心：串行调度与取批"]
+        Triggers -.->|"请求决策"| Scheduler
     end
-
-    subgraph Conversation[3. 核心对话策略]
-        Context[核心：收集上下文、组装提示词与会话历史]
-        MemoryContext[记忆插件：检索上下文]
-        PromptPlugins[视觉 / 音频 / RSS / 网页查询 / 定时通知插件<br/>提示词、摘要与 effect 契约扩展]
-        MemoryContext -.->|"decisionContext.register"| Context
-        PromptPlugins -.->|"systemPrompt.register"| Context
+    subgraph Conversation[3. 对话策略]
+        direction RL
+        ContextPlugins["记忆插件：检索背景<br/>视觉 / 音频 / RSS<br/>网页查询 / 定时通知：提示词契约"]
+        Context["核心：上下文、提示词与会话历史"]
+        ContextPlugins -.->|"注册上下文与契约"| Context
     end
-
-    subgraph Request[4. 模型请求与校验]
-        Model[核心：共享模型客户端]
-        Validate[核心：回复结构与插件声明字段校验]
-        RawLog[原始日志插件]
-        Model --> Validate
-        Model -.->|"请求开始 / 结束事件"| RawLog
+    subgraph Request[4. 模型请求]
+        direction LR
+        Model["核心：模型请求与回复校验"]
+        RawLog["原始日志插件<br/>请求与返回记录"]
+        Model -.->|"请求事件"| RawLog
     end
-
-    subgraph Completion[5. 决策完成通知]
-        Result[核心：发布并等待 decision.completed]
-        Records[记忆 / 历史对话插件：记录回合<br/>视觉插件：关联截图摘要]
-        Web[网页查询插件：处理查询 effects]
-        Schedule[定时通知插件：处理创建 effects 与到期任务]
-        Questions[提问插件：订阅决策状态、画像与语音事件<br/>选择题回答回写人物画像]
-        Result -.->|"记录与摘要"| Records
-        Result -.->|"effects"| Web
-        Result -.->|"effects"| Schedule
-        Result -.->|"决策状态"| Questions
+    subgraph Completion[5. 完成记录与副作用]
+        direction LR
+        Result["核心：发布并等待<br/>decision.completed"]
+        Records["记忆 / 历史对话 / 视觉插件<br/>记录回合与关联截图摘要"]
+        Effects["网页查询 / 定时通知插件<br/>处理 effects；结果或到期观察回流"]
+        Questions["提问插件<br/>订阅决策、画像与语音状态"]
+        Result -.->|"记录"| Records
+        Result -.->|"effects"| Effects
+        Result -.->|"状态"| Questions
     end
-
     subgraph Output[6. 回复呈现]
-        Present[核心：完成通知后显式呈现回复]
-        Bubble[核心：气泡与形象桥接]
-        Avatar[Live2D / PMX 形象插件：注册形象与渲染]
-        TTS[TTS 插件：合成与播放]
-        Present --> Bubble
-        Avatar -.->|"avatar.register"| Bubble
-        Bubble -.->|"表情指令"| Avatar
-        Present -.->|"execution.speech.requested"| TTS
+        direction LR
+        Present["核心：气泡、表情与语音编排"]
+        Avatar["Live2D / PMX 形象插件<br/>形象与表情渲染"]
+        TTS["TTS 插件<br/>语音合成与播放"]
+        Present -.->|"形象桥接"| Avatar
+        Present -.->|"语音请求"| TTS
+    end
+    subgraph Persistence[各阶段共享的持久化能力]
+        direction RL
+        SQLite["storage-sqlite 插件<br/>SQLite 后端"]
+        Storage["核心：Storage 抽象"]
+        SQLite -.->|"注册后端"| Storage
     end
 
-    subgraph Persistence[各阶段共享的存储能力]
-        Storage[核心：Storage 抽象]
-        SQLite[storage-sqlite 插件：SQLite 后端]
-        SQLite -.->|"storage.registerBackend"| Storage
-        RawLog -.->|"读写请求日志"| Storage
-    end
-
-    Queue --> Scheduler --> Context --> Model
-    Validate --> Result --> Present
-    Manual -.->|"decisions.request"| Scheduler
-    Web -.->|"查询结果入队"| Queue
-    Web -.->|"请求后续决策"| Scheduler
-    Schedule -.->|"到期观察入队"| Queue
+    Input --> Decision --> Conversation --> Request --> Completion --> Output
+    Output ~~~ Persistence
 
     classDef core fill:#e8f1ff,stroke:#4775b5,color:#172b4d;
     classDef plugin fill:#fff2df,stroke:#c58a36,color:#604015;
-    class Queue,Scheduler,Context,Model,Validate,Result,Present,Bubble,Storage core;
-    class Sources,Manual,MemoryContext,PromptPlugins,RawLog,Records,Web,Schedule,Questions,Avatar,TTS,SQLite plugin;
+    class Queue,Scheduler,Context,Model,Result,Present,Storage core;
+    class Sources,ContextPlugins,RawLog,Records,Effects,Questions,Avatar,TTS,SQLite plugin;
 ```
 
 插件宿主管理加载、依赖排序、重载与清理；持久化消费者通过核心 Storage 访问后端。详细契约见 [架构文档](electron/architecture/README.md) 和 [Storage 文档](electron/storage/README.md)。
