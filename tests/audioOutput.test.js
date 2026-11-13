@@ -4,7 +4,7 @@ const { MessageBus } = require("../electron/architecture/messageBus");
 const EVENTS = require("../electron/architecture/events");
 const { getAudioOutputOptions } = require("../electron/plugins/audioOutputPerception/options");
 const { AudioSegmenter, pcmToWav } = require("../electron/plugins/audioOutputPerception/segmenter");
-const { resolveMonitorSource } = require("../electron/plugins/audioOutputPerception/capture/linux");
+const { resolveMonitorSource, resolveAudioSource, listAudioSources } = require("../electron/plugins/audioOutputPerception/capture/linux");
 const { transcribeAudio, transcriptionEndpoint, validateAsrOptions } = require("../electron/plugins/audioOutputPerception/transcribe");
 const { registerAudioOutputPerceptionPlugin } = require("../electron/plugins/audioOutputPerception");
 const { registerDecisionModule } = require("../electron/modules/decision");
@@ -39,9 +39,10 @@ function harness(overrides = {}, configOverrides = {}) {
   }] };
   const controller = registerAudioOutputPerceptionPlugin(bus, {
     platform: "linux", loadConfig: () => config,
-    resolveSource: async () => "output.monitor",
-    capture: (_source, _options, handlers) => {
-      const handle = { ...handlers, stopped: false, stop() { this.stopped = true; } };
+    listSources: async () => [{ type: "output", source: "output.monitor", label: "扬声器", isDefault: true }],
+    resolveSource: async source => source,
+    capture: (source, options, handlers) => {
+      const handle = { ...handlers, source, options, stopped: false, stop() { this.stopped = true; } };
       captures.push(handle);
       return handle;
     },
@@ -361,4 +362,180 @@ test("request content supports both audio-only and mixed observations; audio sum
   const shortTerm = createShortTermStore();
   shortTerm.append({ reply: parsed.response, summaries: parsed.summaries });
   assert.match(formatRecentDialogue(shortTerm.list()), /设备音频：外部视频/);
+});
+
+const audioDevices = [
+  { type: "output", source: "output.monitor", label: "扬声器", isDefault: true },
+  { type: "microphone", source: "usb-mic", label: "USB 麦克风", isDefault: true },
+  { type: "microphone", source: "internal-mic", label: "内置麦克风", isDefault: false },
+];
+const multipleSources = [
+  { type: "output", source: "default", label: "电脑声音" },
+  { type: "microphone", source: "usb-mic", label: "桌面麦克风" },
+];
+const quietLogger = { info() {}, warn() {}, error() {} };
+function multiHarness(overrides = {}, config = {}) {
+  return harness({ logger: quietLogger, listSources: async () => audioDevices, ...overrides },
+    { sources: multipleSources, ...config });
+}
+
+test("source configuration validates kinds and duplicate selectors while preserving legacy output", () => {
+  assert.deepEqual(getAudioOutputOptions({ plugins: [{ name: "audio-output-perception", source: "old.monitor" }] }).sources,
+    [{ type: "output", source: "old.monitor", label: "", enabled: true }]);
+  const options = getAudioOutputOptions({ plugins: [{ name: "audio-output-perception", sources: multipleSources }] });
+  assert.equal(options.sources.length, 2);
+  const normalized = require("../electron/plugins/audioOutputPerception/options").normalizeOptions;
+  assert.deepEqual(normalized(normalized({ sources: [{ type: "microphone" }] })), normalized({ sources: [{ type: "microphone" }] }));
+  for (const sources of [false, [null], [{ type: "unknown" }], [{ source: 1 }], [{ source: " " }],
+    [{ label: " " }], [{ enabled: "true" }], [{ type: "microphone" }, { type: "microphone", source: "default" }]]) {
+    assert.throws(() => getAudioOutputOptions({ plugins: [{ name: "audio-output-perception", sources }] }), /audio.sources/);
+  }
+});
+
+test("enumeration distinguishes monitors and inputs and typed resolution cannot cross device kinds", async () => {
+  const devices = [
+    { name: "output.monitor", description: "Speaker", properties: { "device.class": "monitor" } },
+    { name: "usb-mic", description: "USB Mic", monitor_of_sink: 4294967295 },
+    { name: "internal-mic", monitor_of_sink: "n/a" },
+  ];
+  const run = async (_command, args) => ({ stdout: args.includes("sources") ? JSON.stringify(devices)
+    : args.includes("get-default-sink") ? "output\n" : "usb-mic\n" });
+  const listed = await listAudioSources({ run });
+  assert.deepEqual(listed.map(item => [item.type, item.isDefault]), [["output", true], ["microphone", true], ["microphone", false]]);
+  assert.equal(listed[1].label, "USB Mic");
+  assert.equal(await resolveAudioSource("default", { type: "microphone", run }), "usb-mic");
+  assert.equal(await resolveAudioSource("internal-mic", { type: "microphone", run }), "internal-mic");
+  await assert.rejects(resolveAudioSource("output.monitor", { type: "microphone", run }), /未找到麦克风输入源/);
+  await assert.rejects(resolveAudioSource("usb-mic", { type: "output", run }), /未找到音频输出监视源/);
+  await assert.rejects(resolveAudioSource("missing", { type: "microphone", run }), /未找到麦克风输入源/);
+});
+
+test("multiple sources transcribe independently and disabling one retains other observations and capture", async t => {
+  const h = multiHarness();
+  t.after(() => h.controller.dispose());
+  await h.controller.start();
+  assert.deepEqual(h.captures.map(item => item.source), ["output.monitor", "usb-mic"]);
+  for (const capture of h.captures) capture.onData(utterance());
+  await settle();
+  const items = h.bus.peek(EVENTS.PERCEPTION_OBSERVATION);
+  assert.equal(items.length, 2); // Same words from two devices are not deduplicated across sources.
+  assert.deepEqual(items.map(item => item.metadata.sourceType), ["output", "microphone"]);
+  assert.deepEqual(items.map(item => item.metadata.label), ["电脑声音", "桌面麦克风"]);
+  await h.controller.disableSource("output:output.monitor");
+  assert.equal(h.captures[0].stopped, true);
+  assert.equal(h.captures[1].stopped, false);
+  assert.equal(h.controller.getState().enabled, true);
+  assert.deepEqual(h.bus.takeAll(EVENTS.PERCEPTION_OBSERVATION).map(item => item.metadata.device), ["usb-mic"]);
+  h.captures[0].onData(utterance());
+  await h.controller.enableSource("microphone:internal-mic");
+  h.captures[2].onData(utterance());
+  await settle();
+  assert.equal(h.bus.takeAll(EVENTS.PERCEPTION_OBSERVATION)[0].metadata.device, "internal-mic");
+});
+
+test("camera-style audio menu lists devices, marks enabled sources, and closes all", async t => {
+  let provide;
+  const h = multiHarness({ menu: { register(fn) { provide = fn; return () => { provide = null; }; }, refresh() {} } },
+    { enabled: false, sources: [{ type: "microphone", source: "default", label: "语音输入" }] });
+  t.after(() => h.controller.dispose());
+  await h.controller.start();
+  assert.equal(h.captures.length, 0);
+  assert.equal(provide()[0].label, "声音感知");
+  const submenu = () => provide()[0].submenu;
+  await submenu().find(item => item.label === "麦克风：语音输入").submenu[0].click();
+  assert.equal(h.captures[0].source, "usb-mic");
+  assert.match(submenu()[0].label, /^● 麦克风/);
+  assert.equal(submenu()[0].submenu[0].checked, true);
+  await submenu().find(item => item.label === "电脑播放：扬声器").submenu[0].click();
+  assert.equal(h.captures.length, 2);
+  await submenu().find(item => item.label === "关闭所有").click();
+  assert.ok(h.captures.every(capture => capture.stopped));
+  assert.equal(h.controller.getState().enabled, false);
+  assert.equal(submenu().some(item => item.label === "关闭所有"), false);
+});
+
+test("failure of a microphone does not prevent output perception and keeps a device-specific error", async t => {
+  const h = multiHarness({ resolveSource: async (source, { type }) => {
+    if (type === "microphone") throw new Error("麦克风不可用");
+    return source;
+  } });
+  t.after(() => h.controller.dispose());
+  await h.controller.start();
+  assert.equal(h.captures.length, 1);
+  assert.equal(h.controller.getState().sources.find(item => item.type === "microphone").error, "麦克风不可用");
+  h.captures[0].onData(utterance());
+  await settle();
+  assert.equal(h.bus.queueSize(EVENTS.PERCEPTION_OBSERVATION), 1);
+});
+
+test("refresh releases a disconnected input, preserves output, and does not enable new devices automatically", async t => {
+  let devices = audioDevices;
+  const h = multiHarness({ listSources: async () => devices });
+  t.after(() => h.controller.dispose());
+  await h.controller.start();
+  devices = [audioDevices[0], { type: "microphone", source: "new-mic", label: "新麦克风", isDefault: true }];
+  await h.controller.refreshSources();
+  assert.equal(h.captures[0].stopped, false);
+  assert.equal(h.captures[1].stopped, true);
+  assert.equal(h.captures.length, 2);
+  assert.equal(h.controller.getState().sources.find(item => item.source === "usb-mic").unavailable, true);
+  await h.controller.enableSource("microphone:new-mic");
+  assert.equal(h.captures[2].source, "new-mic");
+});
+
+test("late transcription from a disabled source cannot affect other active inputs", async t => {
+  const old = deferred();
+  let calls = 0, signal;
+  const h = multiHarness({ transcribe: async (_segment, _options, request) => {
+    if (++calls === 1) { signal = request.signal; return old.promise; }
+    return { text: "当前麦克风" };
+  } });
+  t.after(() => h.controller.dispose());
+  await h.controller.start();
+  h.captures[0].onData(utterance());
+  const disabling = h.controller.disableSource("output:output.monitor");
+  assert.equal(signal.aborted, true);
+  h.captures[1].onData(utterance());
+  old.resolve({ text: "旧播放内容" });
+  await disabling;
+  await settle();
+  assert.deepEqual(h.bus.takeAll(EVENTS.PERCEPTION_OBSERVATION).map(item => item.content[0].text), ["当前麦克风"]);
+});
+
+test("TTS cancels HTTP recognition for all inputs and suppresses a source enabled during playback", async t => {
+  const old = deferred();
+  const signals = [];
+  const h = multiHarness({ transcribe: async (_segment, _options, { signal }) => {
+    signals.push(signal);
+    return signals.length <= 2 ? old.promise : { text: "恢复后的语音" };
+  } });
+  t.after(() => h.controller.dispose());
+  await h.controller.start();
+  for (const capture of h.captures) capture.onData(utterance());
+  await h.bus.publish(EVENTS.SPEECH_OUTPUT_STATE, { playbackId: 1, state: "start" });
+  assert.ok(signals.every(signal => signal.aborted));
+  await h.controller.enableSource("microphone:internal-mic");
+  h.captures[2].onData(utterance());
+  assert.equal(signals.length, 2);
+  await h.bus.publish(EVENTS.SPEECH_OUTPUT_STATE, { playbackId: 1, state: "end" });
+  await wait(120);
+  old.resolve({ text: "应丢弃的旧识别" });
+  await settle();
+  assert.equal(h.bus.queueSize(EVENTS.PERCEPTION_OBSERVATION), 0);
+  h.captures[2].onData(utterance());
+  await settle();
+  assert.equal(h.bus.takeAll(EVENTS.PERCEPTION_OBSERVATION)[0].content[0].text, "恢复后的语音");
+});
+
+test("stopping during device enumeration never starts any source", async t => {
+  const discovery = deferred();
+  const h = multiHarness({ listSources: () => discovery.promise });
+  t.after(() => h.controller.dispose());
+  const starting = h.controller.start();
+  await settle();
+  await h.controller.stop();
+  discovery.resolve(audioDevices);
+  await starting;
+  assert.equal(h.captures.length, 0);
+  assert.equal(h.controller.getState().enabled, false);
 });

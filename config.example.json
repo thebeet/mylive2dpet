@@ -155,15 +155,30 @@
       "observationTtlMs": 60000
     },
     {
+      "name": "camera-perception",
+      "enabled": false,
+      "deviceId": "",
+      "changeDetect": { "enabled": true, "hashSize": 8, "threshold": 4 },
+      "interval_ms": 5000,
+      "width": 640,
+      "height": 480,
+      "observationTtlMs": 60000,
+      "maxPendingObservations": 6,
+      "_comment": "摄像头画面定时入队；菜单枚举设备，点击预览可切换感知，关闭预览不影响后台采集。默认关闭。"
+    },
+    {
       "name": "audio-output-perception",
       "enabled": true,
-      "source": "default",
+      "sources": [
+        { "type": "output", "source": "default", "label": "电脑播放", "enabled": true },
+        { "type": "microphone", "source": "default", "label": "麦克风", "enabled": false }
+      ],
       "speechThresholdDb": -40,
       "minSpeechMs": 400,
       "silenceMs": 800,
       "maxSegmentMs": 15000,
       "ttsCooldownMs": 600,
-      "_comment": "Linux PipeWire/PulseAudio 输出监视源；source 可填具体 .monitor 名称；默认不保存原始音频。",
+      "_comment": "Linux PipeWire/PulseAudio 多声音源；output 监听播放声音，microphone 监听输入；source 可填 default 或 pactl 源名称。每项 enabled 控制自动采集，菜单可独立开启；不保存原始音频。",
       "asr": {
         "provider": "funasr",
         "endpoint": "ws://127.0.0.1:10096",

@@ -568,11 +568,19 @@ function screenshotSize(size) {
   return size >= 1024 * 1024 ? `${(size / (1024 * 1024)).toFixed(2)} MB` : `${(size / 1024).toFixed(1)} KB`;
 }
 
+function screenshotLabel(entry) {
+  return entry.metadata.label || (entry.metadata.source === "camera" ? "摄像头画面" : "桌面截图");
+}
+
+function screenshotCaptureKind(entry) {
+  return entry.metadata.manual ? "手动保存" : entry.metadata.trigger === "manual-camera" ? "手动采集" : "自动采集";
+}
+
 function renderScreenshots() {
   screenshotsEl.replaceChildren();
   countEl.textContent = `已显示 ${screenshots.length} 张截图 · 每 2 秒自动更新`;
   if (!screenshots.length) {
-    addText(screenshotsEl, "div", "empty", "暂无保存的截图。自动采集和手动保存的截图会显示在这里。");
+    addText(screenshotsEl, "div", "empty", "暂无保存的截图。桌面截图、摄像头画面和手机屏幕截图会显示在这里。");
     screenshotDetailEl.replaceChildren();
     addText(screenshotDetailEl, "div", "empty", "选择左侧截图，查看原图与分析摘要。");
   }
@@ -580,8 +588,9 @@ function renderScreenshots() {
     const button = document.createElement("button");
     button.className = "request";
     button.setAttribute("aria-pressed", String(entry.id === selectedScreenshotId));
+    addText(button, "span", "", screenshotLabel(entry));
     addText(button, "time", "", screenshotTime(entry));
-    addText(button, "span", "muted", `${entry.metadata.manual ? "手动保存" : "自动采集"} · ${screenshotSize(entry.size)}`);
+    addText(button, "span", "muted", `${screenshotCaptureKind(entry)} · ${screenshotSize(entry.size)}`);
     addText(button, "span", "muted", entry.metadata.analyses?.length ? `已分析 ${entry.metadata.analyses.length} 次` : "尚无分析摘要");
     button.addEventListener("click", () => void selectScreenshot(entry));
     screenshotsEl.appendChild(button);
@@ -599,10 +608,12 @@ async function selectScreenshot(entry, preserveScroll = false) {
     screenshotErrorEl.textContent = "";
     screenshotDetailEl.replaceChildren();
     const metadata = result.metadata;
-    addText(screenshotDetailEl, "div", "muted", `${screenshotTime(result)} · ${metadata.manual ? "手动保存" : "自动采集"} · ${metadata.width || "?"} × ${metadata.height || "?"} · ${screenshotSize(result.size)}`);
+    addText(screenshotDetailEl, "div", "role", screenshotLabel(result));
+    addText(screenshotDetailEl, "div", "muted", `${screenshotTime(result)} · ${screenshotCaptureKind(result)} · ${metadata.width || "?"} × ${metadata.height || "?"} · ${screenshotSize(result.size)}`);
+    if (metadata.device || metadata.devicePath) addText(screenshotDetailEl, "div", "muted", `设备：${[metadata.device, metadata.devicePath].filter(Boolean).join(" · ")}`);
     const image = document.createElement("img");
     image.src = result.imageUrl;
-    image.alt = `截图：${screenshotTime(result)}`;
+    image.alt = `${screenshotLabel(result)}：${screenshotTime(result)}`;
     screenshotDetailEl.appendChild(image);
     for (const analysis of metadata.analyses || []) {
       const card = document.createElement("article");

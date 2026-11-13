@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; media-src 'self' blob:; connect-src 'none'">
+  <title>摄像头感知</title>
+  <style>
+    body { margin: 16px; background: #11131a; color: #eee; font: 14px system-ui; }
+    video { width: 100%; max-height: 270px; object-fit: contain; background: #000; border-radius: 10px; }
+    p { line-height: 1.5; } #status { color: #a9c9ff; }
+  </style>
+</head>
+<body>
+  <h3 id="label">摄像头感知</h3>
+  <video autoplay muted playsinline></video>
+  <button id="toggle" type="button" hidden aria-pressed="false">开启感知</button>
+  <p id="status">正在连接摄像头…</p>
+  <p>开启后在后台感知画面。关闭预览窗口不影响感知开关。</p>
+  <script src="renderer.js"></script>
+</body>
+</html>

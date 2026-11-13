@@ -1,346 +1,182 @@
 const EVENTS = require("../../architecture/events");
 const { createPerceptionService } = require("../../architecture/perceptionService");
 const { getAudioOutputOptions } = require("./options");
-const { AudioSegmenter } = require("./segmenter");
-const { resolveMonitorSource, startLinuxCapture } = require("./capture/linux");
-const { transcribeAudio, validateAsrOptions } = require("./transcribe");
+const { listAudioSources } = require("./capture/linux");
+const { createAudioSourceSession } = require("./sourceSession");
 const { createLiveWindow } = require("./liveWindow");
-const { createFunAsrStream } = require("./funasr");
 
-const isAudio = (observation) => observation.source === "audio-output";
-
-/** Audio source plugin; publishes observations to the shared perception queue. */
 function registerAudioOutputPerceptionPlugin(bus, dependencies = {}) {
   const readConfig = dependencies.loadConfig || (() => ({}));
   const platform = dependencies.platform || process.platform;
   const logger = dependencies.logger || console;
-  const resolveSource = dependencies.resolveSource || resolveMonitorSource;
-  const capture = dependencies.capture || startLinuxCapture;
-  const transcribe = dependencies.transcribe || transcribeAudio;
   const perception = dependencies.perception || createPerceptionService(bus);
-  let disposed = false;
-  const tasks = new Set();
-  function track(task) {
-    const pending = Promise.resolve(task).catch((error) => {
-      if (!disposed) logger.warn("audio task failed:", error);
-    }).finally(() => tasks.delete(pending));
-    tasks.add(pending);
-    return pending;
-  }
+  const enumerate = dependencies.listSources || listAudioSources;
+  const live = createLiveWindow({ ...dependencies, logger });
+  const sessions = new Map();
+  const speechState = { playbacks: new Set(), suppressedUntil: 0 };
   let options = getAudioOutputOptions(readConfig());
-  let state = { enabled: false, status: "disabled", source: "", error: "" };
-  const liveWindow = createLiveWindow({ ...dependencies, logger });
-  let captureHandle = null;
-  let segmenter = null;
-  let retryTimer = null;
-  let generation = 0;
-  let abortController = null;
-  let processingGeneration = null;
-  let pendingSegments = [];
-  let suppressedUntil = 0;
-  let activeStream = null;
-  const streams = new Set();
-  const streamFactory = dependencies.createFunAsrStream || createFunAsrStream;
-  const playbacks = new Set();
-  const recentTranscripts = new Map();
+  let devices = [], running = false, disposed = false, lifecycle = 0, startup = null, error = "";
+  const idFor = device => `${device.type}:${device.source}`;
 
-  function setState(update) {
-    const next = { ...state, ...update };
-    if (JSON.stringify(next) === JSON.stringify(state)) return;
-    state = next;
-    liveWindow.setState(state);
+  function getState() {
+    const sources = devices.map(device => {
+      const state = sessions.get(idFor(device))?.getState() || { enabled: false, status: "disabled", error: "" };
+      return { ...device, ...state, source: device.source, resolvedSource: state.source || "", sourceId: idFor(device) };
+    });
+    const active = sources.filter(source => source.enabled);
+    const failure = sources.find(source => source.status === "error");
+    const status = error || failure ? "error" : active.some(source => source.status === "listening") ? "listening"
+      : active.some(source => source.status === "starting") || startup ? "starting"
+      : active.length ? "suppressed" : "disabled";
+    return { enabled: active.length > 0, status, error: error || failure?.error || "",
+      source: active.length === 1 ? active[0].resolvedSource : "", sources };
+  }
+
+  function refresh() {
+    live.setState(getState());
     dependencies.menu?.refresh?.();
-    logger.info(
-      "audio state:",
-      state.status,
-      state.source || "",
-      state.error || "",
-    );
   }
 
-  function suppressed() {
-    return playbacks.size > 0 || Date.now() < suppressedUntil;
+  function report(cause) {
+    error = cause.message || String(cause);
+    refresh();
+    void bus.notify(EVENTS.PIPELINE_FAILED, { stage: "audio-perception", trigger: "audio-output", error: cause });
   }
 
-  function reportError(error, stage) {
-    setState({ status: "error", error: error.message || String(error) });
-    void bus.notify(EVENTS.PIPELINE_FAILED, {
-      stage, trigger: "audio-output", error,
-    });
+  function configurationFor(device) {
+    return options.sources.find(item => item.type === device.type && item.source === device.source)
+      || options.sources.find(item => item.type === device.type && item.source === "default" && device.isDefault);
   }
 
-  async function acceptResult(segment, result, sessionGeneration, transcriptId, isCurrent = () => true) {
-    const valid = () => state.enabled && generation === sessionGeneration && isCurrent();
-    if (!valid()) return;
-    if (!result.text || Date.now() - Date.parse(segment.endedAt) > options.observationTtlMs) {
-      if (transcriptId) liveWindow.removeTranscript(transcriptId);
-      return;
-    }
-    liveWindow.addTranscript({ id: transcriptId, text: result.text, capturedAt: segment.endedAt, final: true });
-    const normalized = result.text.replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
-    const now = Date.now();
-    for (const [text, at] of recentTranscripts) {
-      if (now - at > options.duplicateWindowMs) recentTranscripts.delete(text);
-    }
-    if (!normalized || recentTranscripts.has(normalized)) return;
-    const observation = {
-      source: "audio-output", trigger: "audio-output",
-      capturedAt: segment.capturedAt,
-      expiresAt: Date.parse(segment.endedAt) + options.observationTtlMs,
-      content: [{ type: "text", text: result.text }],
-      metadata: {
-        modality: "audio", label: "设备音频输出转写",
-        endedAt: segment.endedAt, durationMs: segment.durationMs,
-        language: result.language, confidence: result.confidence,
-        device: state.source,
-      },
-    };
-    await perception.discard((item) => isAudio(item) && item.expiresAt <= now, "expired");
-    if (!valid()) return;
-    recentTranscripts.set(normalized, now);
-    await perception.submit(observation, {
-      maxMatching: options.maxPendingObservations, matches: isAudio,
-    });
-    logger.info("transcript:", result.text);
-    if (captureHandle) setState({ status: suppressed() ? "suppressed" : "listening", error: "" });
-  }
-
-  function cancelStreams() {
-    for (const stream of streams) {
-      liveWindow.removeTranscript(stream.id);
-      stream.cancel();
-    }
-    streams.clear();
-    activeStream = null;
-  }
-
-  function startStream(segment, sessionGeneration) {
-    // Retain bounded concurrent finalization; never queue an unbounded live feed.
-    while (streams.size >= options.maxPendingSegments) {
-      const oldest = streams.values().next().value;
-      streams.delete(oldest);
-      liveWindow.removeTranscript(oldest.id);
-      oldest.cancel();
-    }
-    const stream = streamFactory(options.asr, {
-      socketFactory: dependencies.socketFactory,
-      maxAudioBytes: (options.maxSegmentMs + options.preRollMs + options.frameMs) * 32,
-      onPartial(result) {
-        if (streams.has(stream) && generation === sessionGeneration && state.enabled && !suppressed()) {
-          liveWindow.addTranscript({ id: stream.id, text: result.text, capturedAt: segment.capturedAt, final: false });
-        }
+  function sessionFor(device) {
+    const sourceId = idFor(device);
+    if (sessions.has(sourceId)) return sessions.get(sourceId);
+    const configured = configurationFor(device);
+    const label = configured?.label || device.label;
+    const session = createAudioSourceSession(bus, { ...options, ...device, label, sourceId }, {
+      ...dependencies, perception, speechState, onState: refresh,
+      liveWindow: {
+        setState() {}, stop() { live.removeSource(sourceId); }, dispose() {},
+        addTranscript(entry) { live.addTranscript({ ...entry, sourceId, label }); },
+        removeTranscript(id) { live.removeTranscript(id); },
       },
     });
-    activeStream = stream;
-    streams.add(stream);
-    void track(stream.result.catch((error) => {
-      if (error.name !== "AbortError" && state.enabled && generation === sessionGeneration) {
-        liveWindow.removeTranscript(stream.id);
-        reportError(error, "audio-transcription");
+    sessions.set(sourceId, session);
+    return session;
+  }
+
+  async function enableSource(sourceId) {
+    if (!running || disposed) return;
+    const device = devices.find(item => idFor(item) === sourceId);
+    if (device) await sessionFor(device).start({ enabled: true });
+    refresh();
+  }
+
+  function disableSource(sourceId) {
+    const done = sessions.get(sourceId)?.stop();
+    refresh();
+    return done;
+  }
+
+  function closeAll() {
+    const pending = [...sessions.values()].map(session => session.stop());
+    // Includes observations from the previous single-source implementation.
+    pending.push(perception.discard(item => item.source === "audio-output", "source-stopped"));
+    live.stop();
+    refresh();
+    return Promise.allSettled(pending);
+  }
+
+  async function discover(token) {
+    const next = [...await enumerate()];
+    if (!running || disposed || lifecycle !== token) return;
+    // Keep missing configured sources visible so their error can be inspected and retried.
+    for (const configured of options.sources) {
+      if (!next.some(device => device.type === configured.type &&
+        (configured.source === "default" ? device.isDefault : device.source === configured.source))) {
+        next.push({ ...configured, label: configured.label || configured.source, unavailable: true });
       }
-    }));
-  }
-
-  async function processSegments(sessionGeneration) {
-    if (processingGeneration === sessionGeneration) return;
-    processingGeneration = sessionGeneration;
-    try {
-      while (state.enabled && generation === sessionGeneration && pendingSegments.length) {
-        const segment = pendingSegments.shift();
-        if (Date.now() - Date.parse(segment.endedAt) > options.observationTtlMs) continue;
-        abortController = new AbortController();
-        try {
-          const result = await transcribe(segment, options.asr, {
-            signal: abortController.signal,
-            fetchImpl: dependencies.fetchImpl || (async (url, init) => {
-              // An isolated session prevents ASR proxy changes from racing with chat.
-              const { session } = require("electron");
-              const audioSession = session.fromPartition("audio-asr");
-              await audioSession.setProxy(options.asr.proxy
-                ? { proxyRules: options.asr.proxy, proxyBypassRules: "<local>" }
-                : { mode: "direct" });
-              return audioSession.fetch(url, init);
-            }),
-          });
-          await acceptResult(segment, result, sessionGeneration);
-        } catch (error) {
-          if (state.enabled && generation === sessionGeneration) reportError(error, "audio-transcription");
-        } finally {
-          if (generation === sessionGeneration) abortController = null;
-        }
-      }
-    } finally {
-      if (processingGeneration === sessionGeneration) processingGeneration = null;
     }
-  }
-
-  function onSegment(segment) {
-    if (!state.enabled || suppressed()) return;
-    if (options.asr.provider === "funasr") {
-      const stream = activeStream;
-      activeStream = null;
-      if (!stream) return;
-      const sessionGeneration = generation;
-      void track(stream.finish().then(async (result) => {
-        if (streams.has(stream)) {
-          if (!result.text) liveWindow.removeTranscript(stream.id);
-          await acceptResult(segment, result, sessionGeneration, stream.id,
-            () => streams.has(stream) && !suppressed());
-        }
-      }, () => {}).catch((error) => {
-        if (state.enabled && generation === sessionGeneration) reportError(error, "audio-transcription");
-      }).finally(() => streams.delete(stream)));
-      return;
+    const present = new Set(next.filter(device => !device.unavailable).map(idFor));
+    for (const [id, session] of sessions) if (!present.has(id)) {
+      sessions.delete(id);
+      void session.dispose();
     }
-    pendingSegments.push(segment);
-    if (pendingSegments.length > options.maxPendingSegments) pendingSegments.shift();
-    void track(processSegments(generation));
+    devices = next;
+    error = "";
+    refresh();
   }
 
-  async function connect(sessionGeneration) {
-    if (!state.enabled || generation !== sessionGeneration) return;
-    try {
-      const source = await resolveSource(options.source);
-      if (!state.enabled || generation !== sessionGeneration) return;
-      segmenter = new AudioSegmenter(options, onSegment, options.asr.provider === "funasr" ? {
-        onStart: (segment) => {
-          try { startStream(segment, sessionGeneration); }
-          catch (error) { activeStream = null; reportError(error, "audio-transcription"); }
-        },
-        onAudio: (chunk) => activeStream?.push(chunk),
-        onCancel: cancelStreams,
-      } : {});
-      captureHandle = capture(source, options, {
-        onData(chunk) {
-          if (generation !== sessionGeneration || !state.enabled) return;
-          if (suppressed()) {
-            segmenter.reset();
-            return;
-          }
-          if (state.status === "suppressed") setState({ status: "listening", error: "" });
-          segmenter.push(chunk);
-        },
-        onError(error) {
-          if (generation !== sessionGeneration || !state.enabled) return;
-          if (captureHandle) void track(captureHandle.stop());
-          captureHandle = null;
-          segmenter?.reset();
-          cancelStreams();
-          reportError(error, "audio-capture");
-          scheduleReconnect(sessionGeneration);
-        },
-      });
-      setState({ source, status: suppressed() ? "suppressed" : "listening", error: "" });
-    } catch (error) {
-      if (generation !== sessionGeneration || !state.enabled) return;
-      reportError(error, "audio-capture");
-      scheduleReconnect(sessionGeneration);
-    }
-  }
-
-  function scheduleReconnect(sessionGeneration) {
-    clearTimeout(retryTimer);
-    retryTimer = setTimeout(() => void track(connect(sessionGeneration)), 5000);
-  }
-
-  function stop() {
-    generation += 1;
-    liveWindow.stop();
-    clearTimeout(retryTimer);
-    retryTimer = null;
-    const captureStopped = captureHandle?.stop();
-    if (captureStopped) void track(captureStopped);
-    captureHandle = null;
-    segmenter?.reset();
-    segmenter = null;
-    cancelStreams();
-    abortController?.abort();
-    abortController = null;
-    pendingSegments = [];
-    recentTranscripts.clear();
-    void track(perception.discard(isAudio, "source-stopped"));
-    setState({ enabled: false, status: "disabled", source: "", error: "" });
-    return Promise.allSettled([...tasks]);
-  }
-
-  async function start({ enabled } = {}) {
-    if (disposed || state.enabled) return;
-    try {
-      options = getAudioOutputOptions(readConfig());
-      if (!(enabled ?? options.enabled)) return;
-      if (platform !== "linux") throw new Error("设备音频感知目前支持 Linux PipeWire/PulseAudio");
-      validateAsrOptions(options.asr);
-      generation += 1;
-      setState({ enabled: true, status: "starting", error: "" });
-      await track(connect(generation));
-    } catch (error) {
-      reportError(error, "audio-perception");
-    }
-  }
-
-  const unsubscribeTts = bus.subscribe(EVENTS.SPEECH_OUTPUT_STATE, ({ playbackId, state: playbackState }) => {
-    if (playbackState === "start") playbacks.add(playbackId);
-    else if (!playbacks.delete(playbackId)) return;
-    suppressedUntil = Date.now() + options.ttsCooldownMs;
-    segmenter?.reset();
-    cancelStreams();
-    if (state.enabled && captureHandle && state.status !== "error") setState({ status: "suppressed" });
+  const unsubscribeTts = bus.subscribe(EVENTS.SPEECH_OUTPUT_STATE, ({ playbackId, state }) => {
+    if (state === "start") speechState.playbacks.add(playbackId);
+    else if (!speechState.playbacks.delete(playbackId)) return;
+    speechState.suppressedUntil = Date.now() + options.ttsCooldownMs;
+    for (const session of sessions.values()) session.suppress();
   }, { allowWhileStopped: true });
 
   const plugin = {
-    start, stop,
-    getState: () => ({ ...state }),
-    dispose() {
+    start({ enabled } = {}) {
+      if (disposed || running) return startup;
+      running = true;
+      const token = ++lifecycle;
+      startup = Promise.resolve().then(async () => {
+        if (!running || disposed || lifecycle !== token) return;
+        options = getAudioOutputOptions(readConfig());
+        if (platform !== "linux") throw new Error("声音感知目前支持 Linux PipeWire/PulseAudio");
+        await discover(token);
+        if (!running || disposed || lifecycle !== token || !(enabled ?? options.enabled)) return;
+        await Promise.all(devices.filter(device => configurationFor(device)?.enabled)
+          .map(device => enableSource(idFor(device))));
+      }).catch(cause => { if (running && !disposed && lifecycle === token) report(cause); }).finally(() => {
+        if (lifecycle === token) { startup = null; refresh(); }
+      });
+      refresh();
+      return startup;
+    },
+    stop() { running = false; lifecycle++; startup = null; error = ""; return closeAll(); },
+    getState, enableSource, disableSource, closeAll,
+    async refreshSources() {
+      if (!running || disposed || platform !== "linux") return;
+      const token = lifecycle;
+      try { await discover(token); }
+      catch (cause) { if (running && lifecycle === token) report(cause); }
+    },
+    async dispose() {
+      if (disposed) return;
       disposed = true;
-      const done = stop();
-      unsubscribeTts();
-      unregisterMenuContribution();
-      liveWindow.dispose();
-      playbacks.clear();
-      return done;
+      const done = plugin.stop();
+      unsubscribeTts(); unregisterMenu(); live.dispose();
+      const disposing = [...sessions.values()].map(session => session.dispose());
+      sessions.clear(); speechState.playbacks.clear();
+      await Promise.allSettled([done, ...disposing]);
     },
   };
 
-  let unregisterMenuContribution = () => {};
-  if (typeof dependencies.menu?.register === "function") {
-    unregisterMenuContribution = dependencies.menu.register(() => {
-      const audioState = plugin.getState();
-      return [
-        {
-          label: "感知设备播放的语音",
-          enabled: platform === "linux",
-          submenu: [
-            {
-              label: "开启",
-              type: "radio",
-              checked: audioState.enabled,
-              click: () => { void plugin.start({ enabled: true }); },
-            },
-            {
-              label: "关闭",
-              type: "radio",
-              checked: !audioState.enabled,
-              click: () => plugin.stop(),
-            },
-            {
-              label: "实时显示内容",
-              submenu: [
-                { label: "开启", type: "radio", checked: liveWindow.isEnabled(),
-                  click: () => liveWindow.setEnabled(true) },
-                { label: "关闭", type: "radio", checked: !liveWindow.isEnabled(),
-                  click: () => liveWindow.setEnabled(false) },
-              ],
-            },
-            { type: "separator" },
-            {
-              label: `设备音频：${audioStatusLabel(audioState, platform)}`,
-              enabled: false,
-            },
-          ],
-        },
-      ];
+  const unregisterMenu = dependencies.menu?.register?.(() => {
+    const sorted = [...devices].sort((a, b) => Number(Boolean(sessions.get(idFor(b))?.getState().enabled))
+      - Number(Boolean(sessions.get(idFor(a))?.getState().enabled)));
+    const submenu = sorted.map(device => {
+      const sourceId = idFor(device);
+      const state = sessions.get(sourceId)?.getState() || { enabled: false, status: "disabled" };
+      const label = configurationFor(device)?.label || device.label;
+      return { label: `${state.enabled ? "● " : ""}${device.type === "output" ? "电脑播放" : "麦克风"}：${label}`,
+        enabled: running && !disposed,
+        submenu: [
+          { label: "开启", type: "radio", checked: state.enabled, click: () => enableSource(sourceId) },
+          { label: "关闭", type: "radio", checked: !state.enabled, click: () => disableSource(sourceId) },
+          { type: "separator" }, { label: device.unavailable && state.status !== "error" ? "设备不可用" : audioStatusLabel(state), enabled: false },
+        ] };
     });
-  }
+    if (!submenu.length || error) submenu.push({ label: error || (startup ? "正在枚举声音源…" : "未发现声音源"), enabled: false });
+    submenu.push({ type: "separator" },
+      { label: "刷新声音源", enabled: running && platform === "linux", click: plugin.refreshSources },
+      { label: "实时显示内容", submenu: [
+        { label: "开启", type: "radio", checked: live.isEnabled(), click: () => live.setEnabled(true) },
+        { label: "关闭", type: "radio", checked: !live.isEnabled(), click: () => live.setEnabled(false) },
+      ] });
+    if (getState().enabled) submenu.push({ type: "separator" }, { label: "关闭所有", click: closeAll });
+    return [{ label: "声音感知", enabled: platform === "linux", submenu }];
+  }) || (() => {});
 
   return plugin;
 }
@@ -348,28 +184,15 @@ function registerAudioOutputPerceptionPlugin(bus, dependencies = {}) {
 function activate(context) {
   const unregisterPrompt = context.systemPrompt.register(require("./prompt").promptExtension);
   const plugin = registerAudioOutputPerceptionPlugin(context.bus, {
-    loadConfig: () => context.config.get(),
-    platform: context.platform,
-    menu: context.menu,
-    logger: context.logger,
-    perception: context.perception,
-    windows: context.windows,
-    screen: context.screen,
-    ipc: context.ipc,
+    loadConfig: () => context.config.get(), platform: context.platform, menu: context.menu,
+    logger: context.logger, perception: context.perception, windows: context.windows, screen: context.screen, ipc: context.ipc,
   });
   return { ...plugin, dispose() { unregisterPrompt(); return plugin.dispose(); } };
 }
 
-function audioStatusLabel(state, platform) {
-  if (platform !== "linux") return "当前系统暂不支持";
+function audioStatusLabel(state) {
   if (state.status === "error") return state.error || "采集异常";
-  return {
-    disabled: "未开启", starting: "启动中", listening: "监听中",
-    suppressed: "等待桌宠语音结束",
-  }[state.status] || state.status;
+  return { disabled: "未开启", starting: "启动中", listening: "监听中", suppressed: "等待桌宠语音结束" }[state.status] || state.status;
 }
 
-module.exports = {
-  activate,
-  registerAudioOutputPerceptionPlugin,
-};
+module.exports = { activate, registerAudioOutputPerceptionPlugin };

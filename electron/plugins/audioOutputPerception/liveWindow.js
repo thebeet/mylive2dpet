@@ -72,6 +72,12 @@ function createLiveWindow({ windows, screen, ipc, menu, logger }) {
       const index = entries.findIndex((entry) => entry.id === id);
       if (index >= 0) { entries.splice(index, 1); update(); }
     },
+    removeSource(sourceId) {
+      for (let i = entries.length - 1; i >= 0; i--) {
+        if (entries[i].sourceId === sourceId) entries.splice(i, 1);
+      }
+      update();
+    },
     stop,
     dispose() { if (disposed) return; stop(); disposed = true; unregisterIpc(); },
   };

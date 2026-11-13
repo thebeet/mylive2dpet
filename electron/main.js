@@ -259,6 +259,8 @@ function createWindow() {
     maximizable: false,
     fullscreenable: false,
     skipTaskbar: true,
+    // Linux 下 skipTaskbar 不生效，使用工具窗口避免出现在 GNOME 任务栏。
+    ...(process.platform === "linux" ? { type: "utility" } : {}),
     show: false,
     backgroundColor: "#00000000",
     webPreferences: {

@@ -17,6 +17,7 @@ const unsubscribe = window.liveAudio.onContent(({ state, entries: transcripts })
     const card = document.createElement("article");
     const time = document.createElement("time");
     time.textContent = new Date(transcript.capturedAt).toLocaleTimeString("zh-CN");
+    if (transcript.label) time.textContent += ` · ${transcript.label}`;
     if (transcript.final === false) time.textContent += " · 识别中…";
     const text = document.createElement("p");
     text.className = "text";

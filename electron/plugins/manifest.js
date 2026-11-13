@@ -11,6 +11,7 @@ module.exports = [
   require("./dialogueHistory/definition"),
   require("./rawLog/definition"),
   require("./screenPerception/definition"),
+  require("./cameraPerception/definition"),
   require("./audioOutputPerception/definition"),
   require("./tts/definition"),
   require("./memory/definition"),

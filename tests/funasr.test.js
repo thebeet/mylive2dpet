@@ -131,6 +131,7 @@ function pluginHarness(overrides = {}) {
     loadConfig: () => ({ plugins: [{ name: 'audio-output-perception', enabled: true,
       ttsCooldownMs: 100, asr: options() }] }),
     logger: { info() {}, warn() {}, error() {} }, platform: 'linux',
+    listSources: async () => [{ type: "output", source: "output.monitor", label: "扬声器", isDefault: true }],
     resolveSource: async () => 'output.monitor',
     capture: (_source, _options, handlers) => { captures.push(handlers); return { stop() {} }; },
     socketFactory: () => { const socket = new Socket(); sockets.push(socket); return socket; },
@@ -242,4 +243,32 @@ test('connection refusal explains service readiness for direct and aggregate soc
     await assert.rejects(h.stream.result, /服务未启动或尚未就绪/);
     assert.equal(h.socket.closed, true);
   }
+});
+
+test('parallel sources keep separate FunASR streams and closing one cannot cancel the other', async t => {
+  const h = pluginHarness({
+    loadConfig: () => ({ plugins: [{ name: 'audio-output-perception', enabled: true,
+      sources: [{ type: 'output', source: 'output.monitor' }, { type: 'microphone', source: 'usb-mic' }],
+      asr: options() }] }),
+    listSources: async () => [
+      { type: 'output', source: 'output.monitor', label: 'Speaker' },
+      { type: 'microphone', source: 'usb-mic', label: 'USB Mic' },
+    ], resolveSource: async source => source,
+  });
+  t.after(() => h.plugin.dispose());
+  await h.plugin.start();
+  for (const capture of h.captures) capture.onData(pcm(600));
+  assert.equal(h.sockets.length, 2);
+  for (const socket of h.sockets) socket.emit('open');
+  await h.plugin.disableSource('output:output.monitor');
+  assert.equal(h.sockets[0].closed, true);
+  assert.equal(h.sockets[1].closed, false);
+  h.sockets[0].message({ mode: '2pass-offline', text: '旧播放内容', is_final: true });
+  h.captures[1].onData(pcm(800, 0));
+  h.sockets[1].message({ mode: '2pass-offline', text: '麦克风仍在监听', is_final: true });
+  await settle();
+  const observations = h.bus.takeAll(EVENTS.PERCEPTION_OBSERVATION);
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].metadata.sourceType, 'microphone');
+  assert.equal(observations[0].content[0].text, '麦克风仍在监听');
 });

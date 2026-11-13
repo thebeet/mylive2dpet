@@ -88,6 +88,7 @@ test("audio menu streams ASR results immediately even when repeated observations
   const plugin = registerAudioOutputPerceptionPlugin(bus, {
     ...h.dependencies, platform: "linux", loadConfig: () => ({ plugins: [{ name: "audio-output-perception",
       enabled: true, asr: { endpoint: "https://asr.example/v1", model: "test" } }] }),
+    listSources: async () => [{ type: "output", source: "output.monitor", label: "扬声器", isDefault: true }],
     resolveSource: async () => "output.monitor",
     capture: (_source, _options, handlers) => { captureHandlers = handlers; return { stop() {} }; },
     transcribe: async () => ({ text: "正在讨论实时语音显示", language: "zh" }),
@@ -130,4 +131,37 @@ test('2-pass interim text updates one subtitle, final correction replaces it, an
   live.addTranscript({ id: 'interrupted', text: '尚未完成', final: false });
   live.removeTranscript('interrupted');
   assert.equal(win.webContents.messages.at(-1).entries.length, 1);
+});
+
+test("subtitles identify each source and disabling one retains the other source and window", async t => {
+  const h = windowServices();
+  const captures = [];
+  const bus = new MessageBus();
+  const plugin = registerAudioOutputPerceptionPlugin(bus, {
+    ...h.dependencies, platform: "linux",
+    loadConfig: () => ({ plugins: [{ name: "audio-output-perception", enabled: true,
+      sources: [
+        { type: "output", source: "output.monitor", label: "电脑播放" },
+        { type: "microphone", source: "usb-mic", label: "桌面麦克风" },
+      ], asr: { endpoint: "https://asr.example/v1", model: "test" } }] }),
+    listSources: async () => [
+      { type: "output", source: "output.monitor", label: "扬声器" },
+      { type: "microphone", source: "usb-mic", label: "USB Mic" },
+    ], resolveSource: async source => source,
+    capture: (_source, _options, handlers) => { captures.push(handlers); return { stop() {} }; },
+    transcribe: async () => ({ text: "各自的识别结果" }),
+  });
+  t.after(() => plugin.dispose());
+  await plugin.start();
+  h.menu().find(item => item.label === "实时显示内容").submenu[0].click();
+  const win = h.windows[0];
+  const utterance = Buffer.alloc(1600 * 32);
+  for (let offset = 0; offset < 600 * 32; offset += 2) utterance.writeInt16LE(4000, offset);
+  for (const capture of captures) capture.onData(utterance);
+  await settle();
+  assert.deepEqual(win.webContents.messages.at(-1).entries.map(entry => entry.label), ["电脑播放", "桌面麦克风"]);
+  await plugin.disableSource("output:output.monitor");
+  assert.equal(win.destroyed, false);
+  assert.deepEqual(win.webContents.messages.at(-1).entries.map(entry => entry.label), ["桌面麦克风"]);
+  assert.equal(win.webContents.messages.at(-1).state.status, "listening");
 });

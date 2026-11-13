@@ -1,5 +1,7 @@
 # My Live2D Pet
 
+**This project is 100% AI-made.** 本代码库使用 Codex 与 GPT-6.1 Sol 模型开发。
+
 基于 Electron、TypeScript 的桌宠，支持 Live2D Cubism 4（`.model3.json`）和 PMX（MMD）格式的 3D 模型。核心负责窗口、观察队列、决策调度、对话策略、模型请求、Storage 抽象和插件生命周期，感知、记忆与输出能力通过插件扩展。
 
 ## 功能
@@ -70,6 +72,8 @@ npm start
 
 `npm start` 启动 Vite 与 Electron，并检查 SQLite 原生模块。右键桌宠或打开托盘菜单可手动对话、控制形象及使用已加载插件。点击桌宠会请求处理已有观察，队列为空时跳过。
 
+桌宠主窗口不显示在任务栏中；Linux 下使用工具窗口类型。可通过托盘菜单将桌宠显示到右下角或退出程序。
+
 `config.json` 与 `assets/` 被 Git 忽略。示例配置中的外部服务和声线资源需按本机环境调整；音频、TTS 等插件的部署步骤见各插件文档。
 
 ## 配置项
@@ -91,7 +95,7 @@ npm start
 
 ## 插件概览
 
-[插件目录](electron/plugins/manifest.js) 注册了 **15 个主进程插件**。插件条目放在 `plugins` 数组中，使用 `name` 标识插件、`enabled` 控制启用；具体加载条件、依赖、配置示例和使用说明见下表链接。
+[插件目录](electron/plugins/manifest.js) 注册了 **16 个主进程插件**。插件条目放在 `plugins` 数组中，使用 `name` 标识插件、`enabled` 控制启用；具体加载条件、依赖、配置示例和使用说明见下表链接。
 
 | 插件 | 功能 | 主要配置项 |
 | --- | --- | --- |
@@ -99,7 +103,8 @@ npm start
 | [`avatar-live2d`](electron/plugins/avatarLive2d/README.md) | Live2D Cubism 4 形象 | `modelPath`、`scale`、动作与表情 |
 | [`avatar-3d`](electron/plugins/avatar3d/README.md) | PMX 格式 3D 形象 | `modelPath`、`rotationY`、`physicsEnabled` |
 | [`screen-perception`](electron/plugins/screenPerception/README.md) | 全屏截图与变化感知 | `interval_ms`、`changeDetect`、`observationTtlMs` |
-| [`audio-output-perception`](electron/plugins/audioOutputPerception/README.md) | 设备播放语音转写（Linux） | `source`、分段参数、`asr` |
+| [`camera-perception`](electron/plugins/cameraPerception/README.md) | 摄像头画面采集并加入观察队列 | `deviceId`、`interval_ms`、`width` / `height`、`observationTtlMs` |
+| [`audio-output-perception`](electron/plugins/audioOutputPerception/README.md) | 多声音源语音转写：电脑播放 / 麦克风（Linux） | `sources`、分段参数、`asr` |
 | [`rss`](electron/plugins/rss/README.md) | RSS / Atom 更新感知 | `feeds`、`interval_ms`、`emitOnFirstFetch` |
 | [`gitlab`](electron/plugins/gitlab/README.md) | GitLab 流水线状态感知 | `baseUrl`、`token` / `tokenEnv`、`projects`、`interval_ms` |
 | [`web-search`](electron/plugins/webSearch/README.md) | 网页搜索与正文读取 | `searchProvider`、`fetchProvider`、`providers` |
