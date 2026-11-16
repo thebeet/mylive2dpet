@@ -1,5 +1,6 @@
 import * as PIXI from "pixi.js";
 import type { AvatarRenderer, RendererContext } from "./types";
+import { createAlphaHitTest } from "./alphaHitTest";
 
 let coreLoading: Promise<void> | undefined;
 async function loadCore() {
@@ -16,7 +17,7 @@ async function loadCore() {
   return coreLoading;
 }
 
-export async function createRenderer({ mount, descriptor, signal }: RendererContext): Promise<AvatarRenderer> {
+export async function createRenderer({ mount, descriptor, signal, onRendered }: RendererContext): Promise<AvatarRenderer> {
   await loadCore();
   signal.throwIfAborted();
   const { Live2DModel, MotionPriority } = await import("pixi-live2d-display/cubism4");
@@ -45,10 +46,13 @@ export async function createRenderer({ mount, descriptor, signal }: RendererCont
   app.ticker.stop();
   PIXI.Ticker.shared.autoStart = false;
   PIXI.Ticker.shared.stop();
+  const hits = createAlphaHitTest(canvas, (app.renderer as PIXI.Renderer).gl, () => app.render());
   // A timer preserves animation while the transparent desktop window is unfocused.
   const timer = window.setInterval(() => {
     PIXI.Ticker.shared.update(performance.now());
     app.render();
+    hits.afterRender();
+    onRendered?.();
   }, 1000 / 60);
   let disposed = false;
   let lastExpression = "";
@@ -76,6 +80,7 @@ export async function createRenderer({ mount, descriptor, signal }: RendererCont
       if (descriptor.clickMotion) api.playMotion(`${descriptor.clickMotion.group}:${descriptor.clickMotion.index}`);
     },
     focus(position) {
+      hits.setPointer(position);
       const rect = canvas.getBoundingClientRect();
       model.focus(position.x - rect.left, position.y - rect.top);
     },
@@ -83,7 +88,7 @@ export async function createRenderer({ mount, descriptor, signal }: RendererCont
       const bounds = model.getBounds();
       return { x: bounds.x + bounds.width / 2, headTop: bounds.y + bounds.height * 0.08 };
     },
-    hitTest(position) { return model.getBounds().contains(position.x, position.y); },
+    hitTest: hits.hitTest,
     dispose() {
       if (disposed) return;
       disposed = true;

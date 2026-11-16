@@ -14,6 +14,7 @@ declare global {
       isElectron: true;
       moveWindow: (dx: number, dy: number) => void;
       forcePaint: () => void;
+      setIgnoreMouseEvents: (ignore: boolean) => void;
       captureScreenshot: () => Promise<{
         id: string;
         uri: string;

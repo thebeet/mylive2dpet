@@ -37,4 +37,6 @@ export type RendererContext = {
   mount: HTMLElement;
   descriptor: AvatarDescriptor;
   signal: AbortSignal;
+  /** Called while the just-rendered framebuffer is still available. */
+  onRendered?: () => void;
 };

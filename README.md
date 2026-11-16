@@ -104,6 +104,7 @@ npm start
 | [`avatar-3d`](electron/plugins/avatar3d/README.md) | PMX 格式 3D 形象 | `modelPath`、`rotationY`、`physicsEnabled` |
 | [`screen-perception`](electron/plugins/screenPerception/README.md) | 全屏截图与变化感知 | `interval_ms`、`changeDetect`、`observationTtlMs` |
 | [`camera-perception`](electron/plugins/cameraPerception/README.md) | 摄像头画面采集并加入观察队列 | `deviceId`、`interval_ms`、`width` / `height`、`observationTtlMs` |
+| [`codex-observer`](electron/plugins/codexObserver/README.md) | Codex 已提交提示词增量观察，只入队 | `sessionsDir`、`projects`、`interval_ms`、`observationTtlMs` |
 | [`audio-output-perception`](electron/plugins/audioOutputPerception/README.md) | 多声音源语音转写：电脑播放 / 麦克风（Linux） | `sources`、分段参数、`asr` |
 | [`rss`](electron/plugins/rss/README.md) | RSS / Atom 更新感知 | `feeds`、`interval_ms`、`emitOnFirstFetch` |
 | [`gitlab`](electron/plugins/gitlab/README.md) | GitLab 流水线状态感知 | `baseUrl`、`token` / `tokenEnv`、`projects`、`interval_ms` |

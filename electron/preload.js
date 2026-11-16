@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("petDesktop", {
   isElectron: true,
+  setIgnoreMouseEvents: ignore => ipcRenderer.send("pet:set-ignore-mouse-events", ignore),
   moveWindow: (dx, dy) => {
     ipcRenderer.send("pet:move-window", dx, dy);
   },

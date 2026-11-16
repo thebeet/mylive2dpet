@@ -27,7 +27,7 @@ async function harness(t, { rotatable = true } = {}) {
   const root = new Element();
   const window = new EventTarget();
   const document = { getElementById: () => root, createElement: () => new Element() };
-  const calls = { rotations: [], resets: 0, moves: [], menus: [], taps: 0, chats: 0 };
+  const calls = { rotations: [], resets: 0, moves: [], menus: [], taps: 0, chats: 0, ignored: [] };
   const renderer = {
     hitTest: ({ x, y }) => x >= 100 && x <= 300 && y >= 200 && y <= 500,
     dispose() {}, focus() {}, resize() {}, getHeadAnchor() { return null; },
@@ -43,6 +43,7 @@ async function harness(t, { rotatable = true } = {}) {
   const listen = name => fn => { callbacks[name] = fn; return () => {}; };
   window.petDesktop = {
     isElectron: true,
+    setIgnoreMouseEvents: ignore => calls.ignored.push(ignore),
     getAvatarConfig: async () => ({ revision: 1, avatar: { renderer: "mmd" } }),
     avatarReady: markReady, forcePaint() {},
     onAvatarChanged: listen("changed"), onAvatarCommand: listen("command"),
@@ -57,7 +58,10 @@ async function harness(t, { rotatable = true } = {}) {
   vm.runInNewContext(mainSource, { ...globals, exports: {}, require: name => {
     if (name === "./windowDrag") return dragExports;
     if (name === "./speechBubble") return { createSpeechBubble: () => ({ handle() {}, destroy() {}, placeAboveHead() {} }) };
-    if (name === "./avatars/mmd") return { createRenderer: async () => renderer };
+    if (name === "./avatars/mmd") return { createRenderer: async context => {
+      callbacks.rendered = context.onRendered;
+      return renderer;
+    } };
     if (name === "./style.css") return {};
     throw new Error(`Unexpected import: ${name}`);
   } });
@@ -70,8 +74,57 @@ async function harness(t, { rotatable = true } = {}) {
     root.dispatchEvent(event);
   };
   t.after(() => window.dispatchEvent(new Event("beforeunload")));
-  return { calls, emit, root, window, callbacks };
+  return { calls, emit, root, window, callbacks, renderer };
 }
+
+test("transparent space passes input through and cannot start avatar gestures", async t => {
+  const { calls, emit, root, callbacks } = await harness(t);
+  assert.equal(calls.ignored.at(-1), true);
+  callbacks.pointer({ x: 190, y: 310 });
+  assert.equal(calls.ignored.at(-1), false);
+  callbacks.pointer({ x: 40, y: 40 });
+  assert.equal(calls.ignored.at(-1), true);
+  for (const button of [0, 2]) {
+    emit("pointerdown", { button, clientX: 40, clientY: 40 });
+    emit("pointermove", { button, clientX: 190, clientY: 310, screenX: 220 });
+    emit("pointerup", { button });
+  }
+  assert.equal(root.hasPointerCapture(1), false);
+  assert.equal(calls.moves.length, 0);
+  assert.equal(calls.rotations.length, 0);
+  assert.equal(calls.menus.length, 0);
+  assert.equal(calls.chats, 0);
+});
+
+test("animation rechecks a stationary cursor and sends only changed input states", async t => {
+  const { calls, callbacks, renderer } = await harness(t);
+  callbacks.pointer({ x: 190, y: 310 });
+  const count = calls.ignored.length;
+  callbacks.rendered();
+  callbacks.rendered();
+  assert.equal(calls.ignored.length, count);
+  renderer.hitTest = () => false;
+  callbacks.rendered();
+  assert.equal(calls.ignored.at(-1), true);
+});
+
+test("both drag buttons retain input outside the silhouette until release or cancellation", async t => {
+  for (const button of [0, 2]) {
+    const { calls, emit, callbacks, root } = await harness(t);
+    callbacks.pointer({ x: 190, y: 310 });
+    emit("pointerdown", { button });
+    callbacks.pointer({ x: 40, y: 40 });
+    callbacks.rendered();
+    assert.equal(calls.ignored.at(-1), false);
+    assert.equal(root.hasPointerCapture(1), true);
+    emit("pointermove", { button, clientX: 40, clientY: 40, screenX: 40 });
+    emit("pointerup", { button, clientX: 40, clientY: 40 });
+    assert.equal(root.hasPointerCapture(1), false);
+    assert.equal(calls.ignored.at(-1), true);
+    assert.equal(calls.chats, 0);
+    assert.equal(calls.menus.length, 0);
+  }
+});
 
 test("right drag rotates the avatar without moving the window, chatting or opening the menu", async t => {
   const { calls, emit, root } = await harness(t);

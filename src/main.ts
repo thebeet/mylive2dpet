@@ -9,7 +9,8 @@ async function main() {
   let active: AvatarRenderer | null = null;
   const canRotate = (event: PointerEvent) => !!active?.rotate &&
     active.hitTest({ x: event.clientX, y: event.clientY });
-  const drag = setupWindowDrag(mount);
+  const hitsAvatar = (event: PointerEvent) => !!active?.hitTest({ x: event.clientX, y: event.clientY });
+  const drag = setupWindowDrag(mount, hitsAvatar);
   let controller: AbortController | null = null;
   let revision = -1;
   let latestPointer: { x: number; y: number } | null = null;
@@ -18,11 +19,20 @@ async function main() {
     pointerId: number; renderer: AvatarRenderer | null;
     startX: number; startY: number; lastX: number; lastY: number; moved: boolean;
   } | null = null;
+  let ignoringMouse: boolean | undefined;
+  function updateMouseInput() {
+    const interacting = tapPointer !== -1 || rotationDrag !== null;
+    const ignore = !interacting && !(latestPointer && active?.hitTest(latestPointer));
+    if (ignore === ignoringMouse) return;
+    ignoringMouse = ignore;
+    window.petDesktop?.setIgnoreMouseEvents(ignore);
+  }
   function endRotation() {
     const gesture = rotationDrag;
     rotationDrag = null;
     mount!.style.cursor = "";
     if (gesture && mount!.hasPointerCapture(gesture.pointerId)) mount!.releasePointerCapture(gesture.pointerId);
+    updateMouseInput();
   }
   const bubble = createSpeechBubble(mount, () => active?.getHeadAnchor() || null);
   const status = document.createElement("div");
@@ -32,12 +42,11 @@ async function main() {
   async function showAvatar(snapshot: AvatarSnapshot) {
     if (snapshot.revision <= revision) return;
     revision = snapshot.revision;
-    endRotation();
-    tapPointer = -1;
-    drag.clearDrag();
+    cancelGesture();
     controller?.abort();
     active?.dispose();
     active = null;
+    updateMouseInput();
     bubble.handle({ type: "hide" });
     status.hidden = false;
     if (!snapshot.avatar) { status.textContent = "未启用形象插件"; return; }
@@ -48,10 +57,12 @@ async function main() {
       const module = snapshot.avatar.renderer === "live2d"
         ? await import("./avatars/live2d") : await import("./avatars/mmd");
       loading.signal.throwIfAborted();
-      const instance = await module.createRenderer({ mount: mount!, descriptor: snapshot.avatar, signal: loading.signal });
+      const instance = await module.createRenderer({ mount: mount!, descriptor: snapshot.avatar, signal: loading.signal,
+        onRendered: updateMouseInput });
       if (loading.signal.aborted || revision !== snapshot.revision) { instance.dispose(); return; }
       active = instance;
       if (latestPointer) instance.focus(latestPointer);
+      updateMouseInput();
       status.hidden = true;
       window.petDesktop?.avatarReady(snapshot.revision);
       window.petDesktop?.forcePaint();
@@ -82,18 +93,25 @@ async function main() {
   const focus = (position: { x: number; y: number }) => {
     latestPointer = position;
     active?.focus(position);
+    updateMouseInput();
   };
   if (window.petDesktop) disposeListeners.push(window.petDesktop.onGlobalPointerMove(focus));
   else window.addEventListener("pointermove", event => focus({ x: event.clientX, y: event.clientY }));
 
   mount.addEventListener("contextmenu", event => event.preventDefault());
   mount.addEventListener("pointerdown", event => {
-    if (event.button === 0) tapPointer = event.pointerId;
+    if (!hitsAvatar(event)) return;
+    if (event.button === 0) {
+      tapPointer = event.pointerId;
+      mount.setPointerCapture(event.pointerId);
+      updateMouseInput();
+    }
     if (event.button !== 2) return;
     rotationDrag = { pointerId: event.pointerId, renderer: canRotate(event) ? active : null,
       startX: event.clientX, startY: event.clientY,
       lastX: event.clientX, lastY: event.clientY, moved: false };
     mount.setPointerCapture(event.pointerId);
+    updateMouseInput();
     event.preventDefault();
   }, { capture: true });
   mount.addEventListener("pointermove", event => {
@@ -122,14 +140,23 @@ async function main() {
     }
     tapPointer = -1;
     drag.clearDrag();
+    if (mount.hasPointerCapture(event.pointerId)) mount.releasePointerCapture(event.pointerId);
+    updateMouseInput();
   });
-  const cancelGesture = () => { endRotation(); tapPointer = -1; drag.clearDrag(); };
+  const cancelGesture = () => {
+    const capturedTap = tapPointer;
+    tapPointer = -1;
+    drag.clearDrag();
+    endRotation();
+    if (capturedTap !== -1 && mount.hasPointerCapture(capturedTap)) mount.releasePointerCapture(capturedTap);
+    updateMouseInput();
+  };
   mount.addEventListener("pointercancel", cancelGesture);
   mount.addEventListener("lostpointercapture", event => {
-    if (rotationDrag?.pointerId === event.pointerId) cancelGesture();
+    if (rotationDrag?.pointerId === event.pointerId || tapPointer === event.pointerId) cancelGesture();
   });
   window.addEventListener("blur", cancelGesture);
-  window.addEventListener("resize", () => { active?.resize(); bubble.placeAboveHead(); });
+  window.addEventListener("resize", () => { active?.resize(); bubble.placeAboveHead(); updateMouseInput(); });
   window.addEventListener("beforeunload", () => {
     cancelGesture();
     controller?.abort();

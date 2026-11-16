@@ -28,8 +28,9 @@ function createRawLogRepository(storage, options) {
         const webSearch = storage.collection("web-search.history").clear();
         const rss = storage.collection("rss.history").clear();
         const gitlab = storage.collection("gitlab.history").clear();
+        const codex = storage.collection("codex-observer.history").clear();
         storage.collection(LOG_LIFECYCLE).set("generation", generation);
-        return { requests, screenshots, requestImages, diagnostics, webSearch, rss, gitlab, generation };
+        return { requests, screenshots, requestImages, diagnostics, webSearch, rss, gitlab, codex, generation };
       });
     },
     list: options => repository.list(options),

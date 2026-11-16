@@ -272,6 +272,8 @@ function createWindow() {
   });
 
   mainWindow = win;
+  // Start transparent to input, including while the avatar is loading.
+  win.setIgnoreMouseEvents(true, { forward: true });
   avatar.resetReady();
   placeBottomRight(win);
   win.setSkipTaskbar(true);
@@ -493,6 +495,12 @@ ipcMain.on("pet:request-global-pointer", (event) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win || win.isDestroyed()) return;
   event.sender.send("pet:global-pointer", getPointerPayload(win));
+});
+
+ipcMain.on("pet:set-ignore-mouse-events", (event, ignore) => {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return;
+  if (typeof ignore !== "boolean") return;
+  mainWindow.setIgnoreMouseEvents(ignore, { forward: true });
 });
 
 ipcMain.on("pet:force-paint", (event) => {

@@ -18,6 +18,7 @@ const { getLogGeneration } = require("../electron/storage/logLifecycle");
 const { createWebHistory } = require("../electron/plugins/webSearch/history");
 const { createRssHistory } = require("../electron/plugins/rss/history");
 const { createGitlabHistory } = require("../electron/plugins/gitlab/history");
+const { createCodexHistory } = require("../electron/plugins/codexObserver/history");
 const { createPerceptionService } = require("../electron/architecture/perceptionService");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 
@@ -441,7 +442,7 @@ test("clearing removes raw records and image stores atomically, preserves memory
   const history = storage.repository("dialogue-history");
   // Domain tables and unrelated plugin collections are outside the cleanup scope.
   const result = repository.clear();
-  assert.deepEqual(result, { requests: 1, screenshots: 1, requestImages: 1, diagnostics: 1, webSearch: 0, rss: 0, gitlab: 0, generation: 1 });
+  assert.deepEqual(result, { requests: 1, screenshots: 1, requestImages: 1, diagnostics: 1, webSearch: 0, rss: 0, gitlab: 0, codex: 0, generation: 1 });
   assert.equal(repository.list().entries.length, 0);
   assert.equal(repository.listGroups().entries.length, 0);
   assert.equal(storage.blobs("screenshots").list().entries.length, 0);
@@ -663,7 +664,7 @@ test("log plugin validates window identity and records late cancellation while s
   assert.throws(() => handlers.get("clear")({ sender: {} }), /来源无效/);
   assert.throws(() => handlers.get("listScreenshots")({ sender: {} }), /来源无效/);
   assert.throws(() => handlers.get("getScreenshot")({ sender: {} }, "any"), /来源无效/);
-  for (const method of ["listTabs", "listWebSearch", "getWebSearch", "listRss", "getRss", "listGitlab", "getGitlab"]) assert.throws(() => handlers.get(method)({ sender: {} }), /来源无效/);
+  for (const method of ["listTabs", "listWebSearch", "getWebSearch", "listRss", "getRss", "listGitlab", "getGitlab", "listCodex", "getCodex"]) assert.throws(() => handlers.get(method)({ sender: {} }), /来源无效/);
   assert.equal(handlers.get("listTabs")({ sender: win.webContents }).webSearch, false);
   assert.throws(() => handlers.get("listWebSearch")({ sender: win.webContents }), /未加载/);
   const sample = { id: "search", operation: "search", request: { query: "news" }, state: "success" };
@@ -683,6 +684,11 @@ test("log plugin validates window identity and records late cancellation while s
   gitlabHistory.update("gitlab-check", { state: "baseline" });
   assert.equal(handlers.get("listGitlab")({ sender: win.webContents }).entries[0].id, "gitlab-check");
   assert.equal(handlers.get("getGitlab")({ sender: win.webContents }, "gitlab-check").pages[0].rawBody, "[]");
+  const codexHistory = createCodexHistory(storage);
+  codexHistory.record({ id: "codex-check", state: "queued", prompt: "用户提示词", capturedAt: new Date().toISOString(),
+    observation: { source: "codex", role: "context" } }, getLogGeneration(storage));
+  assert.equal(handlers.get("listCodex")({ sender: win.webContents }).entries[0].id, "codex-check");
+  assert.equal(handlers.get("getCodex")({ sender: win.webContents }, "codex-check").prompt, "用户提示词");
   assert.equal(handlers.get("list")({ sender: win.webContents }).entries.length, 1);
   assert.equal(handlers.get("listScreenshots")({ sender: win.webContents }).entries.length, 0);
   plugin.stop(); win.emit("ready-to-show");
@@ -691,6 +697,7 @@ test("log plugin validates window identity and records late cancellation while s
   assert.throws(() => handlers.get("listScreenshots")({ sender: win.webContents }), /已关闭/);
   assert.throws(() => handlers.get("listRss")({ sender: win.webContents }), /已关闭/);
   assert.throws(() => handlers.get("listGitlab")({ sender: win.webContents }), /已关闭/);
+  assert.throws(() => handlers.get("listCodex")({ sender: win.webContents }), /已关闭/);
   await bus.notify(EVENTS.AI_REQUEST_FINISHED, { id: "pending", finishedAt: 2, error: "cancelled" });
   assert.equal(db.prepare("SELECT error FROM ai_requests WHERE id = 'pending'").get().error, "cancelled");
   plugin.start(); menu()[0].click();

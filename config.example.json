@@ -95,6 +95,15 @@
       "_comment": "RSS/Atom 感知：启动立即检查；每个 feed 可设置 interval_ms，未设置使用插件全局间隔。首次成功读取只建立基线，之后新增和修改条目提交观察队列。每个 feed 的 proxy 为独立 HTTP(S) 代理，留空直连。"
     },
     {
+      "name": "codex-observer",
+      "enabled": false,
+      "sessionsDir": "~/.codex/sessions",
+      "projects": [],
+      "interval_ms": 2000,
+      "observationTtlMs": 0,
+      "_comment": "Codex 提示词观察：首次启用跳过旧会话内容，之后增量读取已提交的用户文字，以 context 正常入队，不主动请求回应。projects 留空观察全部项目，或填写项目绝对路径（包含子目录）。自定义 CODEX_HOME 时调整 sessionsDir。"
+    },
+    {
       "name": "gitlab",
       "enabled": false,
       "baseUrl": "https://gitlab.com",

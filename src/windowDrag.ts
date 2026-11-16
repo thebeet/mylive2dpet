@@ -1,7 +1,7 @@
 const DRAG_THRESHOLD_PX = 6;
 
 /** Move the Electron frameless window; distinguish drag from tap for Live2D hits. */
-export function setupWindowDrag(root: HTMLElement): {
+export function setupWindowDrag(root: HTMLElement, canStart: (event: PointerEvent) => boolean = () => true): {
   wasDragging: () => boolean;
   clearDrag: () => void;
 } {
@@ -25,7 +25,7 @@ export function setupWindowDrag(root: HTMLElement): {
   }
 
   root.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || !canStart(e)) return;
     active = true;
     dragging = false;
     pointerId = e.pointerId;

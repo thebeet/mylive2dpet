@@ -23,7 +23,7 @@ const webListEl = document.getElementById("web-search-list");
 const webDetailEl = document.getElementById("web-search-detail");
 const webErrorEl = document.getElementById("web-search-error");
 const webMoreEl = document.getElementById("web-search-more");
-const tabNames = ["requests", "screenshots", "web-search", "rss", "gitlab"];
+const tabNames = ["requests", "screenshots", "web-search", "rss", "gitlab", "codex"];
 const webStates = { queued: "排队中", running: "进行中", success: "成功", failed: "失败", rejected: "已拦截", cancelled: "已取消", skipped: "已跳过" };
 let webEntries = [], webCursor = null, webSelectedId = null, webLoading = false, webSelectionVersion = 0;
 const rssListEl = document.getElementById("rss-list");
@@ -232,6 +232,91 @@ async function loadGitlab(mode = "update") {
   } catch (error) {
     if (epoch === viewGeneration && activeTab === "gitlab") gitlabErrorEl.textContent = `读取 GitLab 日志失败：${error.message || error}`;
   } finally { gitlabLoading = false; gitlabMoreEl.disabled = clearing; }
+}
+
+const codexListEl = document.getElementById("codex-list");
+const codexDetailEl = document.getElementById("codex-detail");
+const codexErrorEl = document.getElementById("codex-error");
+const codexMoreEl = document.getElementById("codex-more");
+const codexStates = { queued: "已入队", failed: "入队失败" };
+let codexEntries = [], codexCursor = null, codexSelectedId = null, codexLoading = false, codexSelectionVersion = 0;
+
+function renderCodexList() {
+  codexListEl.replaceChildren();
+  countEl.textContent = `已显示 ${codexEntries.length} 条 Codex 入队记录 · 每 2 秒自动更新`;
+  if (!codexEntries.length) {
+    addText(codexListEl, "div", "empty", "暂无记录。启用 Codex 观察后，新采集的提示词入队结果会显示在这里。");
+    codexDetailEl.replaceChildren();
+  }
+  for (const entry of codexEntries) {
+    const button = addText(codexListEl, "button", "request", "");
+    button.setAttribute("aria-pressed", String(entry.id === codexSelectedId));
+    addText(button, "span", "", entry.projectName || "未知项目");
+    addText(button, "span", "", entry.sessionTitle || "暂无会话标题");
+    addText(button, "span", "", codexStates[entry.state] || entry.state);
+    addText(button, "time", "muted", new Date(entry.t).toLocaleString("zh-CN"));
+    addText(button, "span", "content", entry.preview);
+    addText(button, "span", "muted", entry.projectPath || "未提供项目路径");
+    button.addEventListener("click", () => void selectCodex(entry));
+  }
+  codexMoreEl.hidden = !codexCursor;
+}
+
+async function selectCodex(entry, preserveScroll = false) {
+  const version = ++codexSelectionVersion, epoch = viewGeneration;
+  codexSelectedId = entry.id;
+  renderCodexList();
+  try {
+    const record = await window.rawLog.getCodex(entry.id);
+    if (version !== codexSelectionVersion || epoch !== viewGeneration || activeTab !== "codex") return;
+    codexErrorEl.textContent = "";
+    const main = document.querySelector("#codex-panel main"), scroll = main.scrollTop;
+    codexDetailEl.replaceChildren();
+    addText(codexDetailEl, "h2", "", `Codex 提示词 · ${codexStates[record.state] || record.state}`);
+    addText(codexDetailEl, "p", "content", `项目：${record.projectName || "未知项目"}\n会话：${record.sessionTitle || "暂无会话标题"}`);
+    addText(codexDetailEl, "p", "muted", "“已入队”表示已提交观察队列，处理和保留遵循正常队列规则。");
+    const { prompt, observation, ...metadata } = record;
+    const info = { ...metadata, capturedAt: new Date(record.capturedAt).toLocaleString("zh-CN"),
+      recordedAt: new Date(record.t).toLocaleString("zh-CN"),
+      ...(record.queuedAt != null ? { queuedAt: new Date(record.queuedAt).toLocaleString("zh-CN") } : {}) };
+    for (const [title, value] of [["提示词原文", prompt], ["入队状态与会话信息", info],
+      ["观察数据", observation], ["失败原因", record.error]]) {
+      if (value == null || value === "") continue;
+      const card = addText(codexDetailEl, "article", "message", "");
+      addText(card, "div", "role", title);
+      addText(card, "div", "content", typeof value === "string" ? value : JSON.stringify(value, null, 2));
+    }
+    main.scrollTop = preserveScroll ? scroll : 0;
+  } catch (error) {
+    if (version === codexSelectionVersion && epoch === viewGeneration && activeTab === "codex") {
+      codexErrorEl.textContent = `读取 Codex 入队记录失败：${error.message || error}`;
+    }
+  }
+}
+
+async function loadCodex(mode = "update") {
+  if (codexLoading || clearing) return;
+  const epoch = viewGeneration;
+  codexLoading = true; codexMoreEl.disabled = true;
+  try {
+    const result = await window.rawLog.listCodex({ before: mode === "more" ? codexCursor : null });
+    if (epoch !== viewGeneration || activeTab !== "codex") return;
+    const old = codexEntries.find(entry => entry.id === codexSelectedId);
+    if (mode === "reset" || !codexEntries.length) { codexEntries = result.entries; codexCursor = result.nextCursor; }
+    else {
+      const merged = new Map(codexEntries.map(entry => [entry.id, entry]));
+      for (const entry of result.entries) merged.set(entry.id, entry);
+      codexEntries = [...merged.values()].sort((a, b) => b.t - a.t || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+      if (mode === "more" || codexCursor === null) codexCursor = result.nextCursor;
+    }
+    codexErrorEl.textContent = ""; renderCodexList();
+    const selected = codexEntries.find(entry => entry.id === codexSelectedId) || codexEntries[0];
+    if (selected && (!old || JSON.stringify(old) !== JSON.stringify(selected) || ["reset", "activate"].includes(mode))) {
+      await selectCodex(selected, mode === "update" || mode === "activate");
+    }
+  } catch (error) {
+    if (epoch === viewGeneration && activeTab === "codex") codexErrorEl.textContent = `读取 Codex 日志失败：${error.message || error}`;
+  } finally { codexLoading = false; codexMoreEl.disabled = clearing; }
 }
 
 function renderWebList() {
@@ -686,6 +771,7 @@ function switchTab(tab) {
   webSelectionVersion++;
   rssSelectionVersion++;
   gitlabSelectionVersion++;
+  codexSelectionVersion++;
   for (const name of tabNames) {
     const selected = name === tab;
     const button = document.getElementById(`${name}-tab`);
@@ -697,6 +783,7 @@ function switchTab(tab) {
   else if (tab === "web-search") { renderWebList(); void loadWeb("activate"); }
   else if (tab === "rss") { renderRssList(); void loadRss("activate"); }
   else if (tab === "gitlab") { renderGitlabList(); void loadGitlab("activate"); }
+  else if (tab === "codex") { renderCodexList(); void loadCodex("activate"); }
   else { renderList(); void load("activate"); }
 }
 
@@ -715,13 +802,14 @@ for (const name of tabNames) {
   });
 }
 const refresh = mode => activeTab === "screenshots" ? loadScreenshots(mode) : activeTab === "web-search" ? loadWeb(mode)
-  : activeTab === "rss" ? loadRss(mode) : activeTab === "gitlab" ? loadGitlab(mode) : load(mode);
+  : activeTab === "rss" ? loadRss(mode) : activeTab === "gitlab" ? loadGitlab(mode) : activeTab === "codex" ? loadCodex(mode) : load(mode);
 document.getElementById("refresh").addEventListener("click", () => void refresh("reset"));
 moreEl.addEventListener("click", () => void load("more"));
 screenshotsMoreEl.addEventListener("click", () => void loadScreenshots("more"));
 webMoreEl.addEventListener("click", () => void loadWeb("more"));
 rssMoreEl.addEventListener("click", () => void loadRss("more"));
 gitlabMoreEl.addEventListener("click", () => void loadGitlab("more"));
+codexMoreEl.addEventListener("click", () => void loadCodex("more"));
 const clearDialog = document.getElementById("clear-dialog");
 const clearStatusEl = document.getElementById("clear-status");
 const clearErrorEl = document.getElementById("clear-error");
@@ -743,9 +831,10 @@ document.getElementById("clear-form").addEventListener("submit", async event => 
   webSelectionVersion++;
   rssSelectionVersion++;
   gitlabSelectionVersion++;
+  codexSelectionVersion++;
   clearConfirmEl.textContent = "清理并压缩中…";
   clearErrorEl.textContent = "";
-  const controls = ["clear", "clear-confirm", "clear-cancel", "refresh", "requests-tab", "screenshots-tab", "web-search-tab", "rss-tab", "gitlab-tab", "more", "screenshots-more", "web-search-more", "rss-more", "gitlab-more"];
+  const controls = ["clear", "clear-confirm", "clear-cancel", "refresh", "requests-tab", "screenshots-tab", "web-search-tab", "rss-tab", "gitlab-tab", "codex-tab", "more", "screenshots-more", "web-search-more", "rss-more", "gitlab-more", "codex-more"];
   for (const id of controls) document.getElementById(id).disabled = true;
   try {
     const result = await window.rawLog.clear();
@@ -754,17 +843,19 @@ document.getElementById("clear-form").addEventListener("submit", async event => 
     webEntries = []; webCursor = null; webSelectedId = null;
     rssEntries = []; rssCursor = null; rssSelectedId = null;
     gitlabEntries = []; gitlabCursor = null; gitlabSelectedId = null;
+    codexEntries = []; codexCursor = null; codexSelectedId = null;
     requestsEl.replaceChildren(); messagesEl.replaceChildren(); metaEl.replaceChildren();
     screenshotsEl.replaceChildren(); screenshotDetailEl.replaceChildren();
     webListEl.replaceChildren(); webDetailEl.replaceChildren(); webErrorEl.textContent = "";
     rssListEl.replaceChildren(); rssDetailEl.replaceChildren(); rssErrorEl.textContent = "";
     gitlabListEl.replaceChildren(); gitlabDetailEl.replaceChildren(); gitlabErrorEl.textContent = "";
+    codexListEl.replaceChildren(); codexDetailEl.replaceChildren(); codexErrorEl.textContent = "";
     errorEl.textContent = screenshotErrorEl.textContent = "";
-    moreEl.hidden = screenshotsMoreEl.hidden = webMoreEl.hidden = rssMoreEl.hidden = gitlabMoreEl.hidden = true;
+    moreEl.hidden = screenshotsMoreEl.hidden = webMoreEl.hidden = rssMoreEl.hidden = gitlabMoreEl.hidden = codexMoreEl.hidden = true;
     if (activeTab === "screenshots") renderScreenshots(); else if (activeTab === "web-search") renderWebList();
-    else if (activeTab === "rss") renderRssList(); else if (activeTab === "gitlab") renderGitlabList(); else renderList();
+    else if (activeTab === "rss") renderRssList(); else if (activeTab === "gitlab") renderGitlabList(); else if (activeTab === "codex") renderCodexList(); else renderList();
     clearStatusEl.className = result.warnings?.length ? "error" : "muted";
-    clearStatusEl.textContent = `已清理 ${result.requests} 条请求日志、${result.webSearch || 0} 条网页请求、${result.rss || 0} 条 RSS 获取记录、${result.gitlab || 0} 条 GitLab 查询记录、${result.screenshots} 张截图。` +
+    clearStatusEl.textContent = `已清理 ${result.requests} 条请求日志、${result.webSearch || 0} 条网页请求、${result.rss || 0} 条 RSS 获取记录、${result.gitlab || 0} 条 GitLab 查询记录、${result.codex || 0} 条 Codex 入队记录、${result.screenshots} 张截图。` +
       (result.compacted ? "数据库已压缩。" : "") +
       (result.legacyLogs || result.legacyScreenshots ? `另清理 ${result.legacyLogs + result.legacyScreenshots} 个旧文件。` : "") +
       (result.warnings?.length ? `\n${result.warnings.join("\n")}` : "");

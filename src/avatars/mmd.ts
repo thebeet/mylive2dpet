@@ -4,6 +4,7 @@ import type { AvatarRenderer, RendererContext } from "./types";
 import type { MmdPhysicsController } from "./mmdPhysics";
 import { loadMmdMotions, type MmdMotionPlayer } from "./mmdMotions";
 import { mmdViewport } from "./mmdViewport";
+import { createAlphaHitTest } from "./alphaHitTest";
 
 function disposeMesh(mesh: THREE.SkinnedMesh) {
   mesh.geometry.dispose();
@@ -17,7 +18,7 @@ function disposeMesh(mesh: THREE.SkinnedMesh) {
   mesh.skeleton.dispose();
 }
 
-export async function createRenderer({ mount, descriptor, signal }: RendererContext): Promise<AvatarRenderer> {
+export async function createRenderer({ mount, descriptor, signal, onRendered }: RendererContext): Promise<AvatarRenderer> {
   const manager = new THREE.LoadingManager();
   // PMX texture paths use Windows separators, including on Linux.
   manager.setURLModifier(url => url.replace(/\\/g, "/"));
@@ -103,8 +104,7 @@ export async function createRenderer({ mount, descriptor, signal }: RendererCont
   const camera = new THREE.OrthographicCamera(-10, 10, 15, -15, 0.1, 2000);
   camera.position.set(center.x, center.y, bounds.max.z + height * 3);
   camera.lookAt(center.x, center.y, center.z);
-  const raycaster = new THREE.Raycaster();
-  const pointer = new THREE.Vector2();
+  const hits = createAlphaHitTest(canvas, renderer.getContext(), () => renderer.render(scene, camera));
   const target = { x: 0, y: 0 };
   const following = { x: 0, y: 0 };
   const headOffset = new THREE.Quaternion();
@@ -142,6 +142,7 @@ export async function createRenderer({ mount, descriptor, signal }: RendererCont
     },
     onTap() { api.playMotion("wave"); },
     focus(position) {
+      hits.setPointer(position);
       target.x = THREE.MathUtils.clamp((position.x / window.innerWidth - 0.5) * 0.3, -0.18, 0.18);
       target.y = THREE.MathUtils.clamp((position.y / window.innerHeight - 0.5) * 0.18, -0.12, 0.12);
     },
@@ -153,11 +154,7 @@ export async function createRenderer({ mount, descriptor, signal }: RendererCont
       point.project(camera);
       return { x: (point.x + 1) / 2 * window.innerWidth, headTop: (1 - point.y) / 2 * window.innerHeight };
     },
-    hitTest(position) {
-      pointer.set(position.x / window.innerWidth * 2 - 1, 1 - position.y / window.innerHeight * 2);
-      raycaster.setFromCamera(pointer, camera);
-      return raycaster.intersectObject(mesh).length > 0;
-    },
+    hitTest: hits.hitTest,
     rotate(deltaX, deltaY) {
       const radiansPerPixel = Math.PI / 300;
       root.rotation.x = THREE.MathUtils.clamp(root.rotation.x + deltaY * radiansPerPixel, -Math.PI / 6, Math.PI / 6);
@@ -218,6 +215,8 @@ export async function createRenderer({ mount, descriptor, signal }: RendererCont
       else physics.update(delta);
     }
     renderer.render(scene, camera);
+    hits.afterRender();
+    onRendered?.();
   }, 1000 / 60);
   signal.addEventListener("abort", api.dispose, { once: true });
   api.resize();

@@ -7,6 +7,7 @@ module.exports = [
   require("./webSearch/definition"),
   require("./rss/definition"),
   require("./gitlab/definition"),
+  require("./codexObserver/definition"),
   require("./storageSqlite/definition"),
   require("./dialogueHistory/definition"),
   require("./rawLog/definition"),
