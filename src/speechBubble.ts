@@ -19,14 +19,33 @@ const EDGE_PAD = 12;
 export function createSpeechBubble(
   mount: HTMLElement,
   getAnchor: () => HeadAnchor | null,
+  onSizeChange: () => void = () => {},
 ) {
   const el = document.createElement("div");
   el.className = "speech-bubble";
   el.hidden = true;
+  const content = document.createElement("div");
+  content.className = "speech-bubble-content";
+  el.appendChild(content);
   mount.appendChild(el);
 
   let hideTimer = 0;
   let followRaf = 0;
+  let availableWidth = window.innerWidth;
+  let availableHeight = window.innerHeight;
+
+  const measure = (width = availableWidth, height = availableHeight) => {
+    availableWidth = width;
+    availableHeight = height;
+    if (el.hidden) return null;
+    el.style.maxWidth = `${Math.max(1, Math.min(480, width - EDGE_PAD * 2))}px`;
+    el.style.minWidth = `${Math.min(108, Math.max(1, width - EDGE_PAD * 2))}px`;
+    el.style.width = "max-content";
+    content.style.maxHeight = `${Math.max(1, Math.floor(height * 0.45) - 27)}px`;
+    el.style.height = "auto";
+    const rect = el.getBoundingClientRect();
+    return { width: rect.width, height: rect.height };
+  };
 
   const clearHide = () => {
     if (hideTimer) {
@@ -35,19 +54,13 @@ export function createSpeechBubble(
     }
   };
 
-  /** 底边钉在头顶；按内容增高，不出现滚动条 */
+  /** The host reserves space above the complete model, including its hat. */
   const placeAboveHead = () => {
     const anchor = getAnchor();
     if (!anchor) return;
     const { x, headTop } = anchor;
 
-    const maxBubbleW = Math.max(180, window.innerWidth - EDGE_PAD * 2);
-    el.style.maxWidth = `${Math.min(480, maxBubbleW)}px`;
-    el.style.width = "max-content";
-    el.style.maxHeight = "none";
-    el.style.height = "auto";
-
-    // 角色放大后头顶可能超出窗口，先量出气泡高度，再把气泡顶部夹在可视区域内。
+    measure();
     el.style.top = "auto";
     el.style.bottom = `${Math.max(
       EDGE_PAD,
@@ -103,7 +116,8 @@ export function createSpeechBubble(
     clearHide();
     el.hidden = false;
     el.dataset.kind = kind;
-    el.textContent = text;
+    content.textContent = text;
+    onSizeChange();
     placeAboveHead();
     startFollow();
   };
@@ -113,6 +127,7 @@ export function createSpeechBubble(
     hideTimer = window.setTimeout(() => {
       el.hidden = true;
       stopFollow();
+      onSizeChange();
     }, HIDE_AFTER_MS);
   };
 
@@ -121,6 +136,7 @@ export function createSpeechBubble(
       clearHide();
       el.hidden = true;
       stopFollow();
+      onSizeChange();
       return;
     }
     if (payload.type === "expression" || payload.type === "tts") {
@@ -139,6 +155,12 @@ export function createSpeechBubble(
   return {
     el,
     handle,
+    measure,
+    hitTest(position: { x: number; y: number }) {
+      if (el.hidden || content.scrollHeight <= content.clientHeight) return false;
+      const rect = el.getBoundingClientRect();
+      return position.x >= rect.left && position.x < rect.right && position.y >= rect.top && position.y < rect.bottom;
+    },
     placeAboveHead,
     destroy: () => {
       clearHide();

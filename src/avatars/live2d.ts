@@ -17,7 +17,7 @@ async function loadCore() {
   return coreLoading;
 }
 
-export async function createRenderer({ mount, descriptor, signal, onRendered }: RendererContext): Promise<AvatarRenderer> {
+export async function createRenderer({ mount, descriptor, signal, onRendered, getViewport }: RendererContext): Promise<AvatarRenderer> {
   await loadCore();
   signal.throwIfAborted();
   const { Live2DModel, MotionPriority } = await import("pixi-live2d-display/cubism4");
@@ -56,16 +56,24 @@ export async function createRenderer({ mount, descriptor, signal, onRendered }: 
   }, 1000 / 60);
   let disposed = false;
   let lastExpression = "";
+  const viewport = () => getViewport?.() || { width: window.innerWidth, height: window.innerHeight, x: 0, y: 0, scale: 1 };
   const api: AvatarRenderer = {
     resize() {
+      const view = viewport();
       // Use the unscaled model size so repeated layout does not oscillate.
       const width = model.width / model.scale.x;
       const height = model.height / model.scale.y;
-      const scale = Math.min(window.innerWidth * 0.92 / width, window.innerHeight * 0.58 / height) * descriptor.scale;
+      const scale = Math.min(view.width * 0.92 / width, view.height * 0.58 / height) * descriptor.scale * view.scale;
       app.renderer.resize(window.innerWidth, window.innerHeight);
       model.scale.set(scale);
       model.anchor.set(0.5, 1);
-      model.position.set(window.innerWidth / 2, window.innerHeight * 0.98 + descriptor.verticalOffset);
+      model.position.set(view.x + view.width / 2 * view.scale, view.y + (view.height * 0.98 + descriptor.verticalOffset) * view.scale);
+    },
+    getLayoutBounds() {
+      const bounds = model.getBounds();
+      const view = viewport();
+      return { x: (bounds.x - view.x) / view.scale, y: (bounds.y - view.y) / view.scale,
+        width: bounds.width / view.scale, height: bounds.height / view.scale };
     },
     setExpression(name) {
       if (!descriptor.expressions.includes(name) || name === lastExpression) return;
@@ -86,7 +94,7 @@ export async function createRenderer({ mount, descriptor, signal, onRendered }: 
     },
     getHeadAnchor() {
       const bounds = model.getBounds();
-      return { x: bounds.x + bounds.width / 2, headTop: bounds.y + bounds.height * 0.08 };
+      return { x: bounds.x + bounds.width / 2, headTop: bounds.y };
     },
     hitTest: hits.hitTest,
     dispose() {

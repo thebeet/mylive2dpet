@@ -14,6 +14,8 @@ declare global {
       isElectron: true;
       moveWindow: (dx: number, dy: number) => void;
       forcePaint: () => void;
+      fitWindow: (size: { width: number; height: number }) => void;
+      onViewportLimitsChanged: (callback: (limits: { maxWidth: number; maxHeight: number }) => void) => () => void;
       setIgnoreMouseEvents: (ignore: boolean) => void;
       captureScreenshot: () => Promise<{
         id: string;

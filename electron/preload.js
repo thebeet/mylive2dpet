@@ -9,6 +9,12 @@ contextBridge.exposeInMainWorld("petDesktop", {
   forcePaint: () => {
     ipcRenderer.send("pet:force-paint");
   },
+  fitWindow: size => ipcRenderer.send("pet:fit-window", size),
+  onViewportLimitsChanged: callback => {
+    const handler = (_event, limits) => callback(limits);
+    ipcRenderer.on("pet:viewport-limits", handler);
+    return () => ipcRenderer.removeListener("pet:viewport-limits", handler);
+  },
   captureScreenshot: () => ipcRenderer.invoke("pet:capture-screenshot"),
   chatNow: () => ipcRenderer.invoke("pet:chat-now"),
   openContextMenu: (pos) => {

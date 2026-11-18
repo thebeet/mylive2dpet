@@ -1,3 +1,4 @@
+// Legacy schema regression coverage; adaptive runtime tests are in adaptiveMemory*.test.js.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { workStorage } = require("./helpers/workStorage");
@@ -5,7 +6,7 @@ const { createWorkStore } = require("../electron/plugins/memory/workStore");
 const { parseWorkJson, extractWork } = require("../electron/plugins/memory/workExtractor");
 const { parseFactsJson } = require("../electron/plugins/memory/extractor");
 const { createLongTermStore } = require("../electron/plugins/memory/longTerm");
-const { createMemoryPlugin } = require("../electron/plugins/memory");
+const { createMemoryPlugin } = require("./helpers/legacyMemoryPlugin");
 const { createConversation } = require("../electron/conversation");
 const { summaryExtensions } = require("./helpers/summaryExtensions");
 const { createDecisionResult } = require("../electron/architecture/contracts");

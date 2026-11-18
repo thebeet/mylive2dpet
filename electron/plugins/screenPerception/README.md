@@ -28,7 +28,7 @@
 
 截图通过核心 Storage 的 `screenshots` 二进制命名空间保存 JPEG 原图及采集信息，不生成临时 JPG。观察释放、过期或插件重载不会删除已保存截图。
 
-通过 `systemPrompt.register()` 声明图片观察所需的 `summaries.screen` 和 `summaries.work`，订阅 `decision.completed` 将模型摘要关联到截图。多图分析记录整批摘要范围。
+通过 `systemPrompt.register()` 声明图片观察所需的 `summaries.screen` 和 `summaries.work`，订阅 `decision.completed` 将模型摘要关联到截图。多图分析记录整批摘要范围。`summaries.work` 保留历史字段名，内容已泛化为观看、游戏、学习、社交、工作等活动线索；不把角色台词或聊天作者直接归给用户。
 
 截图作为外部观察等待正常决策，入队不会立即让桌宠发言；画面不变也不会阻止已有音频或用户文字参与决策。截图查看与清理由 [原始日志插件](../rawLog/README.md) 提供。
 

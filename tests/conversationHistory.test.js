@@ -156,21 +156,21 @@ test("changed retrieval blocks are not appended again within the same conversati
   }
 });
 
-test("context is retrieved only at segment start and after a successful summary", async (t) => {
+test("providers run each turn while segment background refreshes after a successful summary", async (t) => {
   let reads = 0;
   const contextProviders = createContextProviders({ logger: quiet });
   contextProviders.register("memory", () => [{ id: "profiles", title: "人物画像", text: `profile-version-${++reads}` }]);
   const { conversation, calls } = harness(t, { contextProviders, history: { maxTurns: 3, keepTurns: 1 } });
   for (let i = 1; i <= 3; i++) await conversation.decideFromObservations([observation(`turn-${i}`)]);
-  assert.equal(reads, 1);
+  assert.equal(reads, 3);
   await conversation.decideFromObservations([observation("turn-4")]);
-  assert.equal(reads, 2);
-  assert.match(JSON.stringify(calls.at(-1).messages[1]), /profile-version-2/);
+  assert.equal(reads, 5);
+  assert.match(JSON.stringify(calls.at(-1).messages[1]), /profile-version-5/);
   assert.ok(!JSON.stringify(calls.at(-1)).includes("profile-version-1"));
   assert.equal(calls.at(-1).messages.filter((m) => JSON.stringify(m.content).includes("# 补充上下文")).length, 1);
 });
 
-test("failed summaries do not refresh retrieval or consume the existing snapshot", async (t) => {
+test("failed summaries preserve the existing segment snapshot while providers still run each turn", async (t) => {
   let reads = 0;
   const contextProviders = createContextProviders({ logger: quiet });
   contextProviders.register("memory", () => [{ id: "profiles", title: "人物画像", text: `profile-version-${++reads}` }]);
@@ -178,7 +178,7 @@ test("failed summaries do not refresh retrieval or consume the existing snapshot
     fetchImpl: async (body) => response(isSummary(body) ? 'invalid-json' : '{"response":"reply","expression":"neutral"}'),
   });
   for (let i = 1; i <= 5; i++) await conversation.decideFromObservations([observation(`turn-${i}`)]);
-  assert.equal(reads, 1);
+  assert.equal(reads, 5);
   assert.match(JSON.stringify(calls.at(-1).messages[1]), /profile-version-1/);
   assert.equal(calls.at(-1).messages.filter((m) => JSON.stringify(m.content).includes("# 补充上下文")).length, 1);
 });
@@ -223,6 +223,54 @@ test("reported input usage can trigger compaction before the turn ceiling", asyn
   assert.equal(calls.at(-1).messages.filter(({ role }) => role === "assistant").length, 1);
 });
 
+test("large turns are summarized even when history has fewer turns than keepTurns", async (t) => {
+  const { conversation, calls } = harness(t, {
+    history: { maxTurns: 20, keepTurns: 4, maxInputTokens: 20000, hardInputTokens: 35000 },
+  });
+  await conversation.decideFromObservations([observation(`first-${"x".repeat(40000)}`)]);
+  await conversation.decideFromObservations([observation(`second-${"x".repeat(40000)}`)]);
+  const summaries = calls.filter(isSummary);
+  assert.equal(summaries.length, 1);
+  assert.match(JSON.parse(summaries[0].messages[1].content).dialogue[0].content.at(-1).text, /first-/);
+  assert.equal(calls.at(-1).messages.filter(({ role }) => role === "assistant").length, 0);
+  assert.match(JSON.stringify(calls.at(-1).messages), /此前会话摘要/);
+  assert.doesNotMatch(JSON.stringify(calls.at(-1).messages), /first-/);
+  assert.match(JSON.stringify(calls.at(-1).messages), /second-/);
+});
+
+test("compaction folds more than the usual batch when retained turns exceed the token budget", async (t) => {
+  const { conversation, calls } = harness(t, {
+    history: { maxTurns: 3, keepTurns: 2, maxInputTokens: 20000, hardInputTokens: 35000 },
+  });
+  for (let i = 1; i <= 3; i++) await conversation.decideFromObservations([observation(`turn-${i}`)]);
+  await conversation.decideFromObservations([observation(`large-${"x".repeat(40000)}`)]);
+  const input = JSON.parse(calls.find(isSummary).messages[1].content);
+  assert.equal(input.dialogue.filter(({ role }) => role === "assistant").length, 3);
+  assert.equal(calls.at(-1).messages.filter(({ role }) => role === "assistant").length, 0);
+});
+
+test("an oversized refreshed snapshot cannot consume history or replace the logged segment", async (t) => {
+  const starts = [];
+  let refreshedText = "x".repeat(40000);
+  const providers = createContextProviders({ logger: quiet });
+  let reads = 0;
+  providers.register("memory", () => [{ id: "fact", title: "记忆", text: ++reads === 1 ? "original-snapshot" : refreshedText }]);
+  const { conversation, calls } = harness(t, { contextProviders: providers,
+    history: { maxTurns: 3, keepTurns: 1, maxInputTokens: 12000, hardInputTokens: 15000 },
+    onRequest: entry => starts.push(entry),
+  });
+  for (let i = 1; i <= 4; i++) await conversation.decideFromObservations([observation(`turn-${i}`)]);
+  assert.equal(calls.at(-1).messages.filter(({ role }) => role === "assistant").length, 3);
+  assert.match(JSON.stringify(calls.at(-1).messages), /original-snapshot/);
+  assert.doesNotMatch(JSON.stringify(calls.at(-1).messages), /此前会话摘要/);
+  assert.equal(new Set(starts.map(entry => entry.conversation.id)).size, 1);
+  refreshedText = "small-refreshed-snapshot";
+  await conversation.decideFromObservations([observation("turn-5")]);
+  assert.match(JSON.stringify(calls.at(-1).messages), /small-refreshed-snapshot/);
+  assert.equal(calls.at(-1).messages.filter(({ role }) => role === "assistant").length, 1);
+  assert.notEqual(starts.at(-1).conversation.id, starts[0].conversation.id);
+});
+
 test("invalid or oversized summaries leave history intact and are retried on the next turn", async (t) => {
   let summaries = 0;
   const { conversation, calls } = harness(t, { history: { maxTurns: 3, keepTurns: 1, summaryMaxChars: 256 },
@@ -246,7 +294,13 @@ test("repeated summary failures stop history growth at the hard ceiling without 
     fetchImpl: async (body) => response(isSummary(body) ? 'invalid-json' : '{"response":"reply","expression":"neutral"}'),
   });
   for (let i = 1; i <= 6; i++) await conversation.decideFromObservations([observation(`turn-${i}`)]);
-  await assert.rejects(conversation.decideFromObservations([observation("turn-7")]), /硬上限/);
+  await assert.rejects(conversation.decideFromObservations([observation("turn-7")]), error => {
+    assert.equal(error.code, "CONVERSATION_CONTEXT_LIMIT");
+    assert.equal(error.retryable, true);
+    assert.match(error.message, /硬上限.*tokens.*历史 6\/6 轮.*最近汇总失败/);
+    assert.ok(error.cause instanceof SyntaxError);
+    return true;
+  });
   assert.equal(calls.filter((body) => !isSummary(body)).length, 6);
   conversation.clearHistory();
   await conversation.decideFromObservations([observation("fresh")]);

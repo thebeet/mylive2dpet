@@ -89,20 +89,22 @@ function createCameraBackend(context, { onDevices = () => {} } = {}) {
       webPreferences: { preload: path.join(__dirname, "preload.js"), partition: "camera-perception",
         contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false },
     });
+    const contents = win.webContents;
     const record = { win, state, onToggle, ready: false, request: null };
-    records.set(win.webContents, record);
+    records.set(contents, record);
     const valid = contents => records.has(contents) && contents.getURL() === pageUrl;
-    const session = win.webContents.session;
+    const session = contents.session;
     session.setPermissionCheckHandler((contents, permission, _origin, details) =>
       valid(contents) && permission === "media" && details.mediaType === "video");
     session.setPermissionRequestHandler((contents, permission, callback, details) =>
       callback(valid(contents) && permission === "media" && details.mediaTypes?.length === 1 && details.mediaTypes[0] === "video"));
     win.on("close", event => { event.preventDefault(); win.hide(); });
-    win.webContents.on("will-navigate", event => event.preventDefault());
-    win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-    win.webContents.on("render-process-gone", () => { if (!win.isDestroyed()) win.destroy(); });
+    contents.on("will-navigate", event => event.preventDefault());
+    contents.setWindowOpenHandler(() => ({ action: "deny" }));
+    contents.on("render-process-gone", () => { if (!win.isDestroyed()) win.destroy(); });
     win.once("closed", () => {
-      records.delete(win.webContents);
+      // Electron has already destroyed the BrowserWindow when this event fires.
+      records.delete(contents);
       finish(record, new Error("摄像头采集窗口已关闭"));
       if (discovery === record) discovery = null;
     });

@@ -1,4 +1,5 @@
 const factories = {
+  "adaptive-memory": (...args) => require("./repositories/adaptiveMemory").createAdaptiveMemoryStore(...args),
   "dialogue-history": (...args) => require("./repositories/dialogueHistory").createHistoryRepository(...args),
   "raw-log": (...args) => require("./repositories/rawLog").createRawLogRepository(...args),
   memory: (...args) => require("./repositories/longTerm").createLongTermStore(...args),
@@ -7,6 +8,7 @@ const factories = {
   "memory-updates": (...args) => require("./repositories/updates").createUpdateBuffer(...args),
 };
 const tables = {
+  "adaptive-memory": "adaptive_memory_entries",
   "dialogue-history": "dialogue_turns", "raw-log": "ai_requests", memory: "memory_entries",
   "work-memory": "work_evidence", "memory-practice": "memory_practice_entries", "memory-updates": "memory_update_turns",
 };

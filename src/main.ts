@@ -2,11 +2,16 @@ import "./style.css";
 import { setupWindowDrag } from "./windowDrag";
 import { createSpeechBubble } from "./speechBubble";
 import type { AvatarRenderer, AvatarSnapshot } from "./avatars/types";
+import { fitAvatarLayout, type AvatarViewport, type ViewportLimits } from "./avatarLayout";
 
 async function main() {
   const mount = document.getElementById("app");
   if (!mount) throw new Error("#app not found");
   let active: AvatarRenderer | null = null;
+  let limits: ViewportLimits = { width: window.innerWidth, height: window.innerHeight,
+    maxWidth: window.innerWidth, maxHeight: window.innerHeight };
+  let viewport: AvatarViewport = { ...limits, x: 0, y: 0, scale: 1 };
+  let layoutSize = "";
   const canRotate = (event: PointerEvent) => !!active?.rotate &&
     active.hitTest({ x: event.clientX, y: event.clientY });
   const hitsAvatar = (event: PointerEvent) => !!active?.hitTest({ x: event.clientX, y: event.clientY });
@@ -22,7 +27,7 @@ async function main() {
   let ignoringMouse: boolean | undefined;
   function updateMouseInput() {
     const interacting = tapPointer !== -1 || rotationDrag !== null;
-    const ignore = !interacting && !(latestPointer && active?.hitTest(latestPointer));
+    const ignore = !interacting && !(latestPointer && (active?.hitTest(latestPointer) || bubble.hitTest?.(latestPointer)));
     if (ignore === ignoringMouse) return;
     ignoringMouse = ignore;
     window.petDesktop?.setIgnoreMouseEvents(ignore);
@@ -34,7 +39,22 @@ async function main() {
     if (gesture && mount!.hasPointerCapture(gesture.pointerId)) mount!.releasePointerCapture(gesture.pointerId);
     updateMouseInput();
   }
-  const bubble = createSpeechBubble(mount, () => active?.getHeadAnchor() || null);
+  const bubble = createSpeechBubble(mount, () => active?.getHeadAnchor() || null, updateLayout);
+  function updateLayout() {
+    // A running desktop host picks up the new window IPC after its next restart.
+    if (!active || !window.petDesktop?.fitWindow) return;
+    const head = active.getHeadAnchor();
+    const next = fitAvatarLayout(active.getLayoutBounds(), bubble.measure(limits.maxWidth, limits.maxHeight), limits,
+      head ? (head.headTop - viewport.y) / viewport.scale : undefined);
+    viewport = next.viewport;
+    active.resize();
+    const size = `${next.width}:${next.height}`;
+    if (layoutSize !== size) {
+      layoutSize = size;
+      window.petDesktop?.fitWindow?.({ width: next.width, height: next.height });
+    }
+    bubble.placeAboveHead();
+  }
   const status = document.createElement("div");
   status.className = "status";
   mount.appendChild(status);
@@ -46,6 +66,10 @@ async function main() {
     controller?.abort();
     active?.dispose();
     active = null;
+    limits = snapshot.viewport || { width: window.innerWidth, height: window.innerHeight,
+      maxWidth: window.innerWidth, maxHeight: window.innerHeight };
+    viewport = { width: limits.width, height: limits.height, x: 0, y: 0, scale: 1 };
+    layoutSize = "";
     updateMouseInput();
     bubble.handle({ type: "hide" });
     status.hidden = false;
@@ -58,9 +82,10 @@ async function main() {
         ? await import("./avatars/live2d") : await import("./avatars/mmd");
       loading.signal.throwIfAborted();
       const instance = await module.createRenderer({ mount: mount!, descriptor: snapshot.avatar, signal: loading.signal,
-        onRendered: updateMouseInput });
+        onRendered: updateMouseInput, getViewport: () => viewport });
       if (loading.signal.aborted || revision !== snapshot.revision) { instance.dispose(); return; }
       active = instance;
+      updateLayout();
       if (latestPointer) instance.focus(latestPointer);
       updateMouseInput();
       status.hidden = true;
@@ -73,6 +98,11 @@ async function main() {
     }
   }
   const disposeListeners = [
+    window.petDesktop?.onViewportLimitsChanged?.(next => {
+      limits = { ...limits, ...next };
+      layoutSize = "";
+      updateLayout();
+    }),
     window.petDesktop?.onAvatarChanged(snapshot => { void showAvatar(snapshot); }),
     window.petDesktop?.onAvatarCommand(command => {
       if (command.revision !== revision) return;

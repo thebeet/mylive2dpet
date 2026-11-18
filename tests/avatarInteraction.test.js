@@ -9,6 +9,8 @@ const compile = file => ts.transpileModule(fs.readFileSync(path.join(__dirname, 
 }).outputText;
 const mainSource = compile("main.ts");
 const dragSource = compile("windowDrag.ts");
+const layoutExports = {};
+vm.runInNewContext(compile("avatarLayout.ts"), { exports: layoutExports });
 
 async function harness(t, { rotatable = true } = {}) {
   class Element extends EventTarget {
@@ -26,11 +28,14 @@ async function harness(t, { rotatable = true } = {}) {
   }
   const root = new Element();
   const window = new EventTarget();
+  window.innerWidth = 380;
+  window.innerHeight = 560;
   const document = { getElementById: () => root, createElement: () => new Element() };
-  const calls = { rotations: [], resets: 0, moves: [], menus: [], taps: 0, chats: 0, ignored: [] };
+  const calls = { rotations: [], resets: 0, moves: [], menus: [], taps: 0, chats: 0, ignored: [], sizes: [] };
   const renderer = {
     hitTest: ({ x, y }) => x >= 100 && x <= 300 && y >= 200 && y <= 500,
     dispose() {}, focus() {}, resize() {}, getHeadAnchor() { return null; },
+    getLayoutBounds: () => ({ x: 100, y: 200, width: 200, height: 300 }),
     onTap() { calls.taps++; },
     ...(rotatable ? {
       rotate: (dx, dy) => calls.rotations.push([dx, dy]),
@@ -46,20 +51,33 @@ async function harness(t, { rotatable = true } = {}) {
     setIgnoreMouseEvents: ignore => calls.ignored.push(ignore),
     getAvatarConfig: async () => ({ revision: 1, avatar: { renderer: "mmd" } }),
     avatarReady: markReady, forcePaint() {},
+    fitWindow: size => calls.sizes.push(size),
     onAvatarChanged: listen("changed"), onAvatarCommand: listen("command"),
     onBubble: listen("bubble"), onGlobalPointerMove: listen("pointer"),
+    onViewportLimitsChanged: listen("limits"),
     moveWindow: (...args) => calls.moves.push(args),
     openContextMenu: position => calls.menus.push(position),
     chatNow: async () => { calls.chats++; },
   };
   const globals = { window, document, Event, AbortController, console };
   const dragExports = {};
+  let bubbleSize = null;
   vm.runInNewContext(dragSource, { ...globals, exports: dragExports });
   vm.runInNewContext(mainSource, { ...globals, exports: {}, require: name => {
     if (name === "./windowDrag") return dragExports;
-    if (name === "./speechBubble") return { createSpeechBubble: () => ({ handle() {}, destroy() {}, placeAboveHead() {} }) };
+    if (name === "./avatarLayout") return layoutExports;
+    if (name === "./speechBubble") return { createSpeechBubble: (_mount, _anchor, changed) => ({
+      handle(payload) {
+        bubbleSize = payload.type === "hide" ? null : { width: 300, height: 100 };
+        changed();
+      },
+      measure: () => bubbleSize,
+      hitTest: () => false,
+      destroy() {}, placeAboveHead() {},
+    }) };
     if (name === "./avatars/mmd") return { createRenderer: async context => {
       callbacks.rendered = context.onRendered;
+      callbacks.viewport = context.getViewport;
       return renderer;
     } };
     if (name === "./style.css") return {};
@@ -94,6 +112,33 @@ test("transparent space passes input through and cannot start avatar gestures", 
   assert.equal(calls.rotations.length, 0);
   assert.equal(calls.menus.length, 0);
   assert.equal(calls.chats, 0);
+});
+
+test("bubble expands the canvas and hiding it restores the model canvas without changing model scale", async t => {
+  const { calls, callbacks } = await harness(t);
+  const before = calls.sizes.at(-1);
+  const scale = callbacks.viewport().scale;
+  callbacks.bubble({ type: "say", text: "A longer conversation" });
+  const during = calls.sizes.at(-1);
+  assert.ok(during.width >= 324);
+  assert.equal(during.height, before.height + 118);
+  assert.equal(callbacks.viewport().scale, scale);
+  callbacks.bubble({ type: "hide" });
+  assert.deepEqual(calls.sizes.at(-1), before);
+  for (let frame = 0; frame < 100; frame++) callbacks.rendered();
+  assert.equal(calls.sizes.length, 3);
+});
+
+test("moving to a smaller display refits content and returning restores the original scale", async t => {
+  const { calls, callbacks } = await harness(t);
+  const initial = calls.sizes.at(-1);
+  callbacks.limits({ maxWidth: 180, maxHeight: 240 });
+  assert.ok(calls.sizes.at(-1).width <= 180);
+  assert.ok(calls.sizes.at(-1).height <= 240);
+  assert.ok(callbacks.viewport().scale < 1);
+  callbacks.limits({ maxWidth: 1000, maxHeight: 1000 });
+  assert.equal(callbacks.viewport().scale, 1);
+  assert.deepEqual(calls.sizes.at(-1), initial);
 });
 
 test("animation rechecks a stationary cursor and sends only changed input states", async t => {

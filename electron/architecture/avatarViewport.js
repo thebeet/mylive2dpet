@@ -6,4 +6,14 @@ function avatarWindowSize(ui = {}, renderer, workArea = { width: 1920, height: 1
     height: Math.min(Math.max(1, workArea.height - 32), renderer === "mmd" ? Math.max(720, requestedHeight) : requestedHeight),
   };
 }
-module.exports = { avatarWindowSize };
+/** Keep the feet and horizontal center in place while making room above the model. */
+function avatarWindowBounds(previous, requested, area) {
+  const width = Math.min(Math.max(1, area.width - 32), Math.max(1, Math.ceil(requested.width)));
+  const height = Math.min(Math.max(1, area.height - 32), Math.max(1, Math.ceil(requested.height)));
+  return {
+    width, height,
+    x: Math.round(Math.max(area.x, Math.min(previous.x + (previous.width - width) / 2, area.x + area.width - width))),
+    y: Math.round(Math.max(area.y, Math.min(previous.y + previous.height - height, area.y + area.height - height))),
+  };
+}
+module.exports = { avatarWindowSize, avatarWindowBounds };

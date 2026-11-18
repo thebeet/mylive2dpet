@@ -4,6 +4,6 @@ module.exports = {
   name: "questions",
   requires: ["memory.work"],
   normalizeOptions,
-  shouldLoad: (config) => getOptions(config).enabled && memoryOptions(config).work.enabled,
+  shouldLoad: (config) => getOptions(config).enabled && memoryOptions(config).store.enabled && memoryOptions(config).questions.enabled,
   load: () => require("./index"),
 };

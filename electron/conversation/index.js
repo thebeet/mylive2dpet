@@ -140,7 +140,8 @@ function createConversation({ getConfig, getExpressions, contextProviders = crea
         }
         const refreshContext = () => settings.context ?? collectContext({ observations,
           trigger: settings.trigger, signal, conversationHistory: true });
-        const context = snapshot.history.needsContext() ? await refreshContext() : [];
+        // Providers may supply turn-scoped retrieval without mutating the stable history prefix.
+        const context = await refreshContext();
         signal.throwIfAborted();
         return snapshot.policy.decideFromObservations(observations, { ...settings, context, signal,
           history: snapshot.history, refreshContext, extensions });

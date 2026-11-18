@@ -13,7 +13,7 @@ const path = require("path");
 const { loadConfig, startConfigWatcher, stopConfigWatcher, subscribeConfig } = require("./config");
 const { getMenuContributions, setMenuRefreshHandler } = require("./menuHooks");
 const { createAvatarHost } = require("./architecture/avatar");
-const { avatarWindowSize } = require("./architecture/avatarViewport");
+const { avatarWindowSize, avatarWindowBounds } = require("./architecture/avatarViewport");
 const avatarPluginNames = new Set(require("./plugins/manifest").filter(item => item.kind === "avatar").map(item => item.name));
 const { MessageBus } = require("./architecture/messageBus");
 const EVENTS = require("./architecture/events");
@@ -60,6 +60,16 @@ function readWindowSize() {
     winSize = { ...DEFAULT_WIN };
   }
   return winSize;
+}
+
+function presentationSnapshot(snapshot) {
+  const display = mainWindow && !mainWindow.isDestroyed()
+    ? screen.getDisplayMatching(mainWindow.getBounds()) : screen.getPrimaryDisplay();
+  return { ...snapshot, viewport: {
+    ...avatarWindowSize(loadConfig().ui, snapshot.avatar?.renderer, display.workArea),
+    maxWidth: Math.max(1, display.workArea.width - 32),
+    maxHeight: Math.max(1, display.workArea.height - 32),
+  } };
 }
 
 // 防止小窗在未聚焦时被 Chromium 降帧（表现为「只有拖动才有动画」）
@@ -154,7 +164,7 @@ const avatar = createAvatarHost({
         mainWindow.setMinimumSize(size.width, size.height);
         mainWindow.setMaximumSize(size.width, size.height);
       }
-      mainWindow.webContents.send("pet:avatar-changed", snapshot);
+      mainWindow.webContents.send("pet:avatar-changed", presentationSnapshot(snapshot));
     }
     refreshTrayMenu();
     refreshTrayIcon();
@@ -281,6 +291,18 @@ function createWindow() {
   win.webContents.setBackgroundThrottling(false);
   win.webContents.setFrameRate(60);
 
+  let lastWorkArea = "";
+  win.on("move", () => {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) return;
+    const area = screen.getDisplayMatching(win.getBounds()).workArea;
+    const key = `${area.x}:${area.y}:${area.width}:${area.height}`;
+    if (key === lastWorkArea) return;
+    lastWorkArea = key;
+    win.webContents.send("pet:viewport-limits", {
+      maxWidth: Math.max(1, area.width - 32), maxHeight: Math.max(1, area.height - 32),
+    });
+  });
+
   win.webContents.on("did-start-loading", () => {
     if (mainWindow !== win) return;
     avatar.resetReady();
@@ -309,6 +331,8 @@ function createWindow() {
   );
 
   win.webContents.on("did-finish-load", () => {
+    // Model layout uses CSS pixels; keep page zoom out of window sizing.
+    win.webContents.setZoomFactor(1);
     startPointerTracking(win);
   });
 
@@ -478,6 +502,22 @@ app.on("before-quit", (event) => {
   });
 });
 
+// Resize the presentation window around measured content within the current display.
+ipcMain.on("pet:fit-window", (event, size) => {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return;
+  if (!size || !Number.isFinite(size.width) || !Number.isFinite(size.height) || size.width <= 0 || size.height <= 0) return;
+  const previous = mainWindow.getBounds();
+  const area = screen.getDisplayMatching(previous).workArea;
+  const next = avatarWindowBounds(previous, size, area);
+  winSize = { width: next.width, height: next.height };
+  if (previous.width === next.width && previous.height === next.height && previous.x === next.x && previous.y === next.y) return;
+  mainWindow.setMinimumSize(1, 1);
+  mainWindow.setMaximumSize(Math.max(previous.width, next.width), Math.max(previous.height, next.height));
+  mainWindow.setBounds(next);
+  mainWindow.setMinimumSize(next.width, next.height);
+  mainWindow.setMaximumSize(next.width, next.height);
+});
+
 // 拖动时固定宽高，避免 Windows DPI 下 setPosition 导致窗口越拖越大
 ipcMain.on("pet:move-window", (event, dx, dy) => {
   const win = BrowserWindow.fromWebContents(event.sender);
@@ -535,7 +575,7 @@ ipcMain.handle("pet:avatar-config", event => {
   if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
     throw new Error("只允许主窗口读取形象配置");
   }
-  return avatar.getSnapshot();
+  return presentationSnapshot(avatar.getSnapshot());
 });
 ipcMain.on("pet:avatar-ready", (event, revision) => {
   if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return;

@@ -22,7 +22,7 @@ context.storage.transaction(() => {
 
 命名空间互相隔离，值通过 JSON 保存；不保存函数、undefined、循环引用或原生数据库对象。跨集合、跨仓库的修改可放在同一事务中，失败全部回滚。当前契约保持现有应用的同步操作语义：集合方法、仓库方法和事务回调必须同步，Promise 返回会被拒绝。未来采用网络后端时，需要实现这一语义，或单独进行核心及消费者的异步接口迁移。
 
-业务数据使用 `repository(name, options)`，方法契约集中在 `contracts.js`。现有仓库为 `dialogue-history`、`raw-log`、`memory`、`work-memory`、`memory-practice` 和 `memory-updates`；参数与返回结构保持原有模块行为。新增插件一般使用自己的 JSON 集合，需要分页、检索或多记录不变量时可新增核心仓库契约及后端实现。
+业务数据使用 `repository(name, options)`，方法契约集中在 `contracts.js`。现有运行仓库包括 `dialogue-history`、`raw-log` 和 `adaptive-memory`。旧 `memory`、`work-memory`、`memory-practice`、`memory-updates` 保留用于记忆迁移与回归验证；新增 `adaptive-memory` 管理自由主题记忆、来源关系、全文与向量索引。新增插件一般使用自己的 JSON 集合，需要分页、检索或多记录不变量时可新增核心仓库契约及后端实现。
 
 `hasRepository(name)` 查询业务数据结构是否已初始化，不创建表；`isAvailable()` 查询后端是否已加载；`getRevision()` 与 `subscribe()` 用于观察后端变更。插件卸载或后端更换后，旧仓库和集合句柄会拒绝操作。
 

@@ -155,8 +155,8 @@ test("AI keeps system and memory snapshots stable without appending changed retr
   const system = h.requests[0].body.messages[0];
   assert.equal(system.role, "system");
   assert.match(system.content, /记忆使用说明/);
-  assert.match(system.content, /role=user 表示用户直接对你说的话，请优先回应/);
-  assert.match(system.content, /role=context 表示补充观察/);
+  assert.match(system.content, /role=user 是用户直接发言，优先回应/);
+  assert.match(system.content, /role=context.*背景数据/);
   assert.match(system.content, /只输出一个 JSON 对象/);
   for (const request of h.requests) assert.deepEqual(request.body.messages[0], system);
   for (const block of context) assert.ok(!system.content.includes(block.text));

@@ -284,12 +284,16 @@ function windowHarness() {
         session: { setPermissionCheckHandler: cb => { permissionCheck = cb; },
           setPermissionRequestHandler: cb => { permissionRequest = cb; } },
       });
-      Object.assign(win, { options, webContents: contents, destroyed: false,
+      Object.assign(win, { options, destroyed: false,
         isDestroyed() { return this.destroyed; },
         isMinimized: () => false, show() { this.visible = true; }, hide() { this.visible = false; }, focus() {},
         loadFile: async file => { win.url = pathToFileURL(file).href; },
         destroy() { this.destroyed = true; this.emit("closed"); },
       });
+      Object.defineProperty(win, "webContents", { get() {
+        if (win.destroyed) throw new TypeError("Object has been destroyed");
+        return contents;
+      } });
       windows.push(win); return win;
     } },
   };
@@ -345,6 +349,49 @@ test("camera backend validates senders and frames, and keeps hidden capture aliv
   backend.dispose();
   assert.equal(h.handlers.size, 0);
   assert.equal(win.destroyed, true);
+});
+
+test("camera shutdown rejects pending work and releases destroyed windows without reading their webContents", async t => {
+  const h = windowHarness();
+  const backend = createCameraBackend(h.context);
+  t.after(() => backend.dispose());
+  const enumeration = assert.rejects(backend.listDevices(), /卸载/);
+  const scannerContents = h.windows[0].webContents;
+  const cameras = ["front", "rear"].map(deviceId => backend.createCamera({ deviceId }, { onToggle() {} }));
+  const pending = cameras.map(camera => {
+    camera.setEnabled(true, { width: 640, height: 480 });
+    return assert.rejects(camera.capture(), /停止/);
+  });
+  const contents = h.windows.slice(1).map(win => win.webContents);
+  assert.doesNotThrow(() => backend.dispose());
+  await Promise.all([enumeration, ...pending]);
+  assert.ok(h.windows.every(win => win.isDestroyed()));
+  assert.equal(h.handlers.size, 0);
+  for (const sender of [scannerContents, ...contents]) {
+    assert.equal(h.check(sender, "media", "", { mediaType: "video" }), false);
+  }
+  assert.doesNotThrow(() => {
+    cameras.forEach(camera => { camera.stop(); camera.dispose(); });
+    backend.dispose();
+  });
+});
+
+test("camera renderer crash cancels capture and allows its window to be recreated", async t => {
+  const h = windowHarness();
+  const backend = createCameraBackend(h.context);
+  t.after(() => backend.dispose());
+  const camera = backend.createCamera({ deviceId: "front" }, { onToggle() {} });
+  camera.setEnabled(true, { width: 640, height: 480 });
+  const win = h.windows[0], contents = win.webContents;
+  const pending = assert.rejects(camera.capture(), /已关闭/);
+  assert.doesNotThrow(() => contents.emit("render-process-gone"));
+  await pending;
+  assert.ok(win.isDestroyed());
+  assert.equal(h.check(contents, "media", "", { mediaType: "video" }), false);
+  camera.show();
+  assert.equal(h.windows.length, 2);
+  assert.equal(h.windows[1].isDestroyed(), false);
+  assert.equal(h.windows[1].visible, true);
 });
 
 test("renderer accepts immediate consecutive captures, switches streams off and discards a late camera start", async () => {

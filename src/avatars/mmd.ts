@@ -3,7 +3,7 @@ import { MMDLoader } from "three/examples/jsm/loaders/MMDLoader.js";
 import type { AvatarRenderer, RendererContext } from "./types";
 import type { MmdPhysicsController } from "./mmdPhysics";
 import { loadMmdMotions, type MmdMotionPlayer } from "./mmdMotions";
-import { mmdViewport } from "./mmdViewport";
+import { mmdViewport, mmdContentBounds, extendMmdViewport } from "./mmdViewport";
 import { createAlphaHitTest } from "./alphaHitTest";
 
 function disposeMesh(mesh: THREE.SkinnedMesh) {
@@ -18,7 +18,7 @@ function disposeMesh(mesh: THREE.SkinnedMesh) {
   mesh.skeleton.dispose();
 }
 
-export async function createRenderer({ mount, descriptor, signal, onRendered }: RendererContext): Promise<AvatarRenderer> {
+export async function createRenderer({ mount, descriptor, signal, onRendered, getViewport }: RendererContext): Promise<AvatarRenderer> {
   const manager = new THREE.LoadingManager();
   // PMX texture paths use Windows separators, including on Linux.
   manager.setURLModifier(url => url.replace(/\\/g, "/"));
@@ -85,6 +85,9 @@ export async function createRenderer({ mount, descriptor, signal, onRendered }: 
   const bounds = new THREE.Box3().setFromObject(mesh, true);
   const height = bounds.max.y - bounds.min.y;
   const center = bounds.getCenter(new THREE.Vector3());
+  const headClearance = head
+    ? Math.max(0, bounds.max.y - head.getWorldPosition(new THREE.Vector3()).y) + height * 0.025
+    : 0;
   // Rotate around the body center so pitching does not swing the feet across the window.
   mesh.position.sub(center);
   root.position.copy(center);
@@ -117,13 +120,20 @@ export async function createRenderer({ mount, descriptor, signal, onRendered }: 
   const startedAt = performance.now();
   let previousFrame = startedAt;
   const point = new THREE.Vector3();
+  const viewport = () => getViewport?.() || { width: window.innerWidth, height: window.innerHeight, x: 0, y: 0, scale: 1 };
   const api: AvatarRenderer = {
     resize() {
       const width = window.innerWidth;
       const viewportHeight = window.innerHeight;
       renderer.setSize(width, viewportHeight);
-      Object.assign(camera, mmdViewport(height, width, viewportHeight, descriptor.scale, descriptor.verticalOffset));
+      const view = viewport();
+      const frame = mmdViewport(height, view.width, view.height, descriptor.scale, descriptor.verticalOffset);
+      Object.assign(camera, extendMmdViewport(frame, view, width, viewportHeight));
       camera.updateProjectionMatrix();
+    },
+    getLayoutBounds() {
+      const view = viewport();
+      return mmdContentBounds(height, view.width, view.height, descriptor.scale, descriptor.verticalOffset);
     },
     setExpression(name) {
       const weights = descriptor.expressionMorphs?.[name];
@@ -143,14 +153,15 @@ export async function createRenderer({ mount, descriptor, signal, onRendered }: 
     onTap() { api.playMotion("wave"); },
     focus(position) {
       hits.setPointer(position);
-      target.x = THREE.MathUtils.clamp((position.x / window.innerWidth - 0.5) * 0.3, -0.18, 0.18);
-      target.y = THREE.MathUtils.clamp((position.y / window.innerHeight - 0.5) * 0.18, -0.12, 0.12);
+      const view = viewport();
+      target.x = THREE.MathUtils.clamp(((position.x - view.x) / (view.width * view.scale) - 0.5) * 0.3, -0.18, 0.18);
+      target.y = THREE.MathUtils.clamp(((position.y - view.y) / (view.height * view.scale) - 0.5) * 0.18, -0.12, 0.12);
     },
     getHeadAnchor() {
       mesh.updateMatrixWorld(true);
       if (head) head.getWorldPosition(point);
       else point.set(center.x, bounds.max.y, center.z);
-      if (head) point.y += height * 0.13; // Include Furina's hat above the head bone.
+      if (head) point.y += headClearance; // Include the actual hat/hair height above the head bone.
       point.project(camera);
       return { x: (point.x + 1) / 2 * window.innerWidth, headTop: (1 - point.y) / 2 * window.innerHeight };
     },

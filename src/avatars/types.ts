@@ -1,4 +1,5 @@
 import type { HeadAnchor } from "../speechBubble";
+import type { AvatarViewport, ContentBounds, ViewportLimits } from "../avatarLayout";
 
 export type Motion = { id: string; label: string; group?: string; index?: number; url?: string; loop?: boolean };
 export type MotionReference = { group: string; index: number };
@@ -18,13 +19,14 @@ export type AvatarDescriptor = {
   physicsEnabled?: boolean;
   expressionMorphs?: Record<string, Record<string, number>>;
 };
-export type AvatarSnapshot = { revision: number; avatar: AvatarDescriptor | null };
+export type AvatarSnapshot = { revision: number; avatar: AvatarDescriptor | null; viewport?: ViewportLimits };
 export type AvatarCommand = { revision: number; type: "expression" | "motion" | "control"; id: string };
 export interface AvatarRenderer {
   setExpression(name: string): void;
   playMotion(id: string): void;
   focus(position: { x: number; y: number }): void;
   getHeadAnchor(): HeadAnchor | null;
+  getLayoutBounds(): ContentBounds;
   resize(): void;
   hitTest(position: { x: number; y: number }): boolean;
   /** Optional model rotation, in CSS pixel deltas. */
@@ -39,4 +41,5 @@ export type RendererContext = {
   signal: AbortSignal;
   /** Called while the just-rendered framebuffer is still available. */
   onRendered?: () => void;
+  getViewport?: () => AvatarViewport;
 };

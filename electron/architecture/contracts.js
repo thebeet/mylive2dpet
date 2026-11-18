@@ -79,6 +79,7 @@ function createContextBlock(block) {
     id: block.id,
     title: typeof block.title === "string" && block.title.trim() ? block.title : block.id,
     text: block.text,
+    ...(block.scope === "turn" ? { scope: "turn" } : {}),
   };
 }
 

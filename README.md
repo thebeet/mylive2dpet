@@ -8,7 +8,7 @@
 
 - 透明置顶窗口、拖动定位、视线跟随，以及模型动作和表情。
 - 手动文字对话，结合桌面截图、设备播放语音和 RSS 更新理解当前情境。
-- 近期与长期记忆、人物画像、项目状态与经验，以及画像补充提问。
+- 模型自由组织的记忆主题、每轮召回、来源与版本查看，以及可选的补充提问。
 - 气泡与 TTS 回复、网页查询、单次定时通知。
 - 历史对话搜索、模型请求与截图日志查看。
 
@@ -111,13 +111,13 @@ npm start
 | [`web-search`](electron/plugins/webSearch/README.md) | 网页搜索与正文读取 | `searchProvider`、`fetchProvider`、`providers` |
 | [`schedule`](electron/plugins/schedule/README.md) | 单次定时通知 | `observationTtlMs`、`maxRetries`、`retryDelayMs` |
 | [`tts`](electron/plugins/tts/README.md) | 系统语音 / GPT-SoVITS 输出 | `provider`、服务地址与声线资源 |
-| [`memory`](electron/plugins/memory/README.md) | 近期对话、长期事实、人物画像与项目经验 | `shortTerm`、`longTerm`、`work`、`practice` |
+| [`memory`](electron/plugins/memory/README.md) | 近期交流、自由主题记忆与来源追溯 | `shortTerm`、`longTerm`、`work`、`practice` |
 | [`questions`](electron/plugins/questions/README.md) | 画像补充提问与回答 | `auto`、`dailyLimit`、`cooldownMs` |
 | [`dialogue-history`](electron/plugins/dialogueHistory/README.md) | 历史对话分页与搜索 | `enabled`、`storageService` |
 | [`raw-log`](electron/plugins/rawLog/README.md) | 模型请求、截图与查询日志 | `enabled` |
 | [`storage-sqlite`](electron/plugins/storageSqlite/README.md) | SQLite 持久化后端 | `path`、`busyTimeoutMs` |
 
-截图、音频、RSS、GitLab 流水线状态和到期通知作为观察等待正常决策；手动输入和网页查询结果会主动请求决策。自动决策可静默处理观察。选择题提问需同时启用 `memory.work` 和 `questions`。
+截图、音频、RSS、GitLab 流水线状态和到期通知作为观察等待正常决策；手动输入和网页查询结果会主动请求决策。自动决策可静默处理观察。选择题提问需同时启用 `memory.questions.enabled` 和 `questions.enabled`。
 
 ## 架构
 

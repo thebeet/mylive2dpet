@@ -35,7 +35,7 @@ canvas {
   z-index: 2;
 }
 
-/* 头顶对话气泡：底边钉头顶，max-height 由 JS 按可用空间设置 */
+/* The window expands around the model and bubble; long dialogue remains scrollable. */
 .speech-bubble {
   position: fixed;
   z-index: 5;
@@ -46,11 +46,16 @@ canvas {
   color: #2a2430;
   background: rgba(255, 252, 248, 0.94);
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
-  pointer-events: none;
+  pointer-events: auto;
   text-align: left;
   word-break: break-word;
   white-space: pre-wrap;
   overflow: visible;
+}
+
+.speech-bubble-content {
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .speech-bubble::after {

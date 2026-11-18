@@ -51,6 +51,9 @@ function buildRequestBody(ai, systemPrompt, observations, context = [], history 
   if (context.length) {
     content.push({ type: "text", text: formatContext(context) });
   }
+  if (history.dynamic?.length) {
+    content.push({ type: "text", text: `# 本轮动态背景\n${formatContext(history.dynamic)}` });
+  }
   content.push({ type: "text", text: "# 本次输入" });
 
   observations.forEach((observation, index) => {

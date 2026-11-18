@@ -1,6 +1,7 @@
 const path = require("path");
 
-function createMemoryViewer(context, { getSnapshot, isAvailable, correctProfile, deleteQuestion, deleteAnswer }) {
+function createMemoryViewer(context, { getSnapshot, isAvailable, correctProfile, deleteQuestion, deleteAnswer,
+  readMemory, correctMemory, forgetMemory }) {
   let win = null;
   let viewTab = "recent";
   function close() {
@@ -13,9 +14,11 @@ function createMemoryViewer(context, { getSnapshot, isAvailable, correctProfile,
       throw new Error("记忆窗口已关闭或请求来源无效");
     }
   }
-  const unregisterIpc = context.ipc?.handle("snapshot", (event) => {
+  const unregisterIpc = context.ipc?.handle("snapshot", (event, input = {}) => {
     requireSender(event);
-    return { ...getSnapshot(), viewTab };
+    if (!input || typeof input !== "object" || Array.isArray(input) || input.query != null && (typeof input.query !== "string" || input.query.length > 1000) ||
+        input.topic != null && (typeof input.topic !== "string" || input.topic.length > 100) || input.offset != null && (!Number.isSafeInteger(input.offset) || input.offset < 0)) throw new Error("记忆筛选无效");
+    return { ...getSnapshot(input), viewTab };
   }) || (() => {});
   const unregisterCorrection = correctProfile ? context.ipc?.handle("correct-profile", (event, input) => {
     requireSender(event);
@@ -32,10 +35,34 @@ function createMemoryViewer(context, { getSnapshot, isAvailable, correctProfile,
     if (!input || typeof input.questionId !== "string" || typeof input.answerId !== "string" || !input.questionId || !input.answerId) throw new Error("答案 ID 无效");
     return deleteAnswer(input.questionId, input.answerId);
   }) || (() => {}) : () => {};
+  const memoryReleases = [];
+  if (readMemory) memoryReleases.push(context.ipc?.handle("read-memory", (event, id) => {
+    requireSender(event);
+    if (typeof id !== "string" || !id || id.length > 200) throw new Error("记忆 ID 无效");
+    return readMemory(id);
+  }) || (() => {}));
+  if (correctMemory) memoryReleases.push(context.ipc?.handle("correct-memory", (event, input) => {
+    requireSender(event);
+    if (!input || typeof input.id !== "string" || typeof input.text !== "string" || input.text.length > 4000 ||
+        input.pinned != null && typeof input.pinned !== "boolean") throw new Error("记忆修正内容无效");
+    return correctMemory(input.id, input.text, { pinned: input.pinned });
+  }) || (() => {}));
+  if (forgetMemory) memoryReleases.push(context.ipc?.handle("forget-memory", async (event, id) => {
+    requireSender(event);
+    if (typeof id !== "string" || !id || id.length > 200) throw new Error("记忆 ID 无效");
+    const before = readMemory(id);
+    const { response } = await context.dialogs.showMessageBox({ type: "warning", title: "忘记这条记忆", message: `忘记「${before.title}」？`,
+      detail: "将删除这条记忆、原始来源、历史版本及引用相同来源的记忆。此操作无法撤销；历史对话仍保留。",
+      buttons: ["取消", "忘记"], defaultId: 0, cancelId: 0 });
+    requireSender(event);
+    if (response !== 1) return { cancelled: true };
+    if (readMemory(id).version !== before.version) throw new Error("记忆已更新，请刷新后重试");
+    return forgetMemory(id);
+  }) || (() => {}));
 
   function show(tab) {
     if (!isAvailable()) return;
-    const explicitTab = typeof tab === "string" && ["recent", "long", "projects", "lessons", "work", "question-history"].includes(tab);
+    const explicitTab = typeof tab === "string" && ["memories", "timeline", "questions", "recent", "long", "projects", "lessons", "work", "question-history"].includes(tab);
     if (explicitTab) viewTab = tab;
     if (win && !win.isDestroyed()) {
       if (win.isMinimized()) win.restore();
@@ -46,7 +73,7 @@ function createMemoryViewer(context, { getSnapshot, isAvailable, correctProfile,
     }
     if (!explicitTab) viewTab = "recent";
     const created = context.windows.create({
-      width: 680, height: 760, minWidth: 440, minHeight: 480,
+      width: 820, height: 800, minWidth: 560, minHeight: 480,
       title: "当前记忆", show: false, autoHideMenuBar: true, backgroundColor: "#10131a",
       webPreferences: {
         preload: path.join(__dirname, "preload.js"),
@@ -64,7 +91,7 @@ function createMemoryViewer(context, { getSnapshot, isAvailable, correctProfile,
     });
   }
 
-  return { show, close, dispose() { close(); unregisterIpc(); unregisterCorrection(); unregisterDeleteQuestion(); unregisterDeleteAnswer(); } };
+  return { show, close, dispose() { close(); unregisterIpc(); unregisterCorrection(); unregisterDeleteQuestion(); unregisterDeleteAnswer(); memoryReleases.forEach(release => release()); } };
 }
 
 module.exports = { createMemoryViewer };

@@ -75,8 +75,15 @@
       "searchProvider": "deepseek",
       "fetchProvider": "deepseek",
       "providers": {
-        "deepseek": { "endpoint": "https://api.deepseek.com/v1", "apiKey": "" },
-        "openai": { "endpoint": "https://api.openai.com/v1", "apiKey": "", "model": "" }
+        "deepseek": {
+          "endpoint": "https://api.deepseek.com/v1",
+          "apiKey": ""
+        },
+        "openai": {
+          "endpoint": "https://api.openai.com/v1",
+          "apiKey": "",
+          "model": ""
+        }
       },
       "_comment": "网页搜索/读取独立 provider。启用前填所选 provider 的 key；OpenAI 搜索需指定支持 web_search 的模型，不提供独立 Fetch，可搭配 DeepSeek。"
     },
@@ -84,7 +91,12 @@
       "name": "rss",
       "enabled": false,
       "feeds": [
-        { "name": "示例订阅", "url": "https://example.com/feed.xml", "proxy": "", "interval_ms": 600000 }
+        {
+          "name": "示例订阅",
+          "url": "https://example.com/feed.xml",
+          "proxy": "",
+          "interval_ms": 600000
+        }
       ],
       "interval_ms": 300000,
       "timeoutMs": 20000,
@@ -111,7 +123,15 @@
       "tokenEnv": "GITLAB_TOKEN",
       "proxy": "",
       "projects": [
-        { "id": "group/project", "name": "示例项目", "ref": "main", "statuses": ["failed", "success"] }
+        {
+          "id": "group/project",
+          "name": "示例项目",
+          "ref": "main",
+          "statuses": [
+            "failed",
+            "success"
+          ]
+        }
       ],
       "interval_ms": 60000,
       "timeoutMs": 20000,
@@ -167,7 +187,11 @@
       "name": "camera-perception",
       "enabled": false,
       "deviceId": "",
-      "changeDetect": { "enabled": true, "hashSize": 8, "threshold": 4 },
+      "changeDetect": {
+        "enabled": true,
+        "hashSize": 8,
+        "threshold": 4
+      },
       "interval_ms": 5000,
       "width": 640,
       "height": 480,
@@ -179,8 +203,18 @@
       "name": "audio-output-perception",
       "enabled": true,
       "sources": [
-        { "type": "output", "source": "default", "label": "电脑播放", "enabled": true },
-        { "type": "microphone", "source": "default", "label": "麦克风", "enabled": false }
+        {
+          "type": "output",
+          "source": "default",
+          "label": "电脑播放",
+          "enabled": true
+        },
+        {
+          "type": "microphone",
+          "source": "default",
+          "label": "麦克风",
+          "enabled": false
+        }
       ],
       "speechThresholdDb": -40,
       "minSpeechMs": 400,
@@ -227,50 +261,55 @@
     {
       "name": "memory",
       "enabled": true,
-      "practice": {
-        "enabled": true,
-        "extractEveryNObservations": 3,
-        "flushAfterMs": 120000,
-        "maxTokens": 8192,
-        "maxInject": 3,
-        "staleAfterMs": 604800000,
-        "_comment": "项目当前状态和有来源的经验；累计3条来源或等待2分钟更新；7天未更新的项目提示重新确认。"
-      },
+      "storageService": "storage",
       "shortTerm": {
         "enabled": true,
         "maxTurns": 8,
-        "ttlMs": 1800000,
-        "_comment": "近期对话与观察缓冲，注入用户消息的补充上下文；不存旧截图"
+        "ttlMs": 1800000
       },
-      "longTerm": {
-        "maxInject": 5,
-        "extractEveryNTurns": 20,
-        "maxTokens": 16384,
-        "maxEntries": 500,
+      "store": {
         "enabled": true,
-        "_comment": "每20次非静默对话，将完整待处理对话和现有长期记忆一起更新；优先修改已有条目，新增要求高价值且有明确来源"
+        "maxEntries": 5000,
+        "eventRetentionDays": 30
       },
-      "_comment": "统一记忆插件：enabled 控制整个插件；shortTerm/longTerm 可独立关闭。",
-      "storageService": "storage",
-      "work": {
-        "enabled": true,
-        "extractEveryNObservations": 3,
-        "flushAfterMs": 120000,
+      "maintenance": {
         "batchSize": 16,
-        "maxTokens": 1800,
-        "maxEvidence": 2000,
-        "maxQuestions": 30,
-        "maxClaims": 20,
-        "maxContextChars": 8000,
-        "_comment": "从飞书截图、文档和会议转写完善人物与项目画像，允许可修正的猜测"
-      }
+        "extractEveryNEvents": 3,
+        "flushAfterMs": 60000,
+        "pollMs": 15000,
+        "maxSourceChars": 24000,
+        "maxContextChars": 32000,
+        "maxTokens": 8192,
+        "candidateLimit": 48
+      },
+      "retrieval": {
+        "maxInject": 8,
+        "maxPinned": 6,
+        "maxContextChars": 12000,
+        "minSimilarity": 0.45
+      },
+      "embedding": {
+        "enabled": false,
+        "endpoint": "",
+        "model": "",
+        "apiKey": "",
+        "proxy": "",
+        "timeoutMs": 4000,
+        "batchSize": 16,
+        "_comment": "可选：填写兼容 embeddings 的服务以启用向量与中文全文混合检索；默认不发送 embedding 请求。"
+      },
+      "questions": {
+        "enabled": false,
+        "maxQuestions": 30
+      },
+      "_comment": "模型自由组织主题、标签、别称与关联，适用于日常交流和各种活动；直接用户表达尽快维护，背景观察按批处理。"
     },
     {
       "name": "questions",
       "enabled": true,
       "auto": true,
-      "dailyLimit": 0,
-      "cooldownMs": 0,
+      "dailyLimit": 3,
+      "cooldownMs": 1800000,
       "deferMs": 1800000,
       "minIdleSeconds": 8,
       "maxIdleSeconds": 300,

@@ -86,6 +86,10 @@ function createWorkStore(storage, { now = Date.now } = {}) {
     return storage.prepare("SELECT * FROM work_evidence WHERE processed = 0 ORDER BY sequence LIMIT ?").all(limit)
       .map((r) => ({ id: r.id, source: r.source, capturedAt: r.captured_at, text: r.text, metadata: JSON.parse(r.metadata_json) }));
   }
+  function exportEvidence() {
+    return storage.prepare("SELECT * FROM work_evidence ORDER BY sequence").all().map(r => ({ id: r.id,
+      source: r.source, capturedAt: r.captured_at, text: r.text, metadata: JSON.parse(r.metadata_json), processed: Boolean(r.processed) }));
+  }
   function upsertEntity(input) {
     const subject = subjectOf(input);
     const entityKey = keyFor(subject);
@@ -347,7 +351,7 @@ function createWorkStore(storage, { now = Date.now } = {}) {
       for (const table of ["work_profile_organization_history", "work_claims", "work_entities", "work_questions", "work_question_answers", "work_evidence", "work_memory_state"]) storage.exec(`DELETE FROM ${table}`);
     });
   }
-  return { addEvidence, pending, applyExtraction, profiles, context, snapshot, clear,
+  return { addEvidence, pending, exportEvidence, applyExtraction, profiles, context, snapshot, clear,
     nextQuestion, getQuestion, markShown, answer, correctProfile, getState, setState, organize, migrateWorkDetails, deleteQuestion, deleteAnswer };
 }
 

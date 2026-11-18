@@ -1,9 +1,10 @@
 /** Backend-neutral repository capabilities used by the application. No SQL crosses this boundary. */
 const repositories = Object.freeze({
+  "adaptive-memory": ["ingest", "list", "get", "events", "snapshot", "apply", "correct", "forget", "candidates", "vectors", "saveVector", "history", "provenance", "pruneEvents", "importLegacy", "clear", "stats", "state", "setState"],
   "dialogue-history": ["append", "list", "endSessions"],
   "raw-log": ["append", "finish", "list", "get", "rewriteRequests", "listGroups", "getGroup", "clear"],
   memory: ["appendBatch", "retrieve", "list", "organize", "history", "importProfiles", "updateFromDialogue", "isDuplicate", "formatForPrompt", "clear"],
-  "work-memory": ["addEvidence", "pending", "applyExtraction", "profiles", "context", "snapshot", "clear", "nextQuestion", "getQuestion", "markShown", "answer", "correctProfile", "getState", "setState", "organize", "migrateWorkDetails", "deleteQuestion", "deleteAnswer"],
+  "work-memory": ["addEvidence", "pending", "exportEvidence", "applyExtraction", "profiles", "context", "snapshot", "clear", "nextQuestion", "getQuestion", "markShown", "answer", "correctProfile", "getState", "setState", "organize", "migrateWorkDetails", "deleteQuestion", "deleteAnswer"],
   "memory-practice": ["snapshot", "sources", "ingest", "apply", "context", "clear", "history"],
   "memory-updates": ["append", "restoreTurn", "list", "evidence", "stageEvidence", "consume", "clear"],
 });

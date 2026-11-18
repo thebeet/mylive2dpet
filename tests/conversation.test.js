@@ -159,7 +159,7 @@ test("host model capability cancels plugin requests and cleans subscriptions wit
   assert.throws(() => context.model.generateText(messages), /卸载/);
 });
 
-test("memory keeps queued dialogues and existing facts through model disable and resumes with the new core client", async (t) => {
+test("adaptive memory keeps queued sources and imported facts through model disable and resumes with the new core client", async (t) => {
   const { workStorage } = require("./helpers/workStorage");
   const { createMemoryPlugin } = require("../electron/plugins/memory");
   const { createLongTermStore } = require("../electron/plugins/memory/longTerm");
@@ -173,7 +173,7 @@ test("memory keeps queued dialogues and existing facts through model disable and
     const body = JSON.parse(init.body);
     if (body.model === "old") return new Promise((resolve) => { oldRequest = { init, resolve }; });
     batches.push(JSON.parse(body.messages[1].content));
-    return response(JSON.stringify({ update: [], add: [] }));
+    return response(JSON.stringify({ upsert: [], archive: [], forget: [], questions: [] }));
   } });
   const bus = new MessageBus({ logger: quiet });
   const plugin = createMemoryPlugin({ bus, logger: quiet, model: conversation.model,
@@ -194,18 +194,18 @@ test("memory keeps queued dialogues and existing facts through model disable and
   await conversation.reconfigure(config("new", false));
   await plugin.whenIdle();
   assert.equal(oldRequest.init.signal.aborted, true);
-  assert.equal(plugin.getState().pendingFacts.length, 20);
+  assert.equal(plugin.getState().pending, 20);
   assert.equal(repo.list()[0].text, "用户使用 TypeScript");
   assert.equal(batches.length, 0);
   await conversation.reconfigure(config("new"));
   await plugin.whenIdle();
-  assert.equal(batches.length, 1);
-  assert.equal(batches[0].turns.length, 20);
-  assert.equal(batches[0].entries[0].id, "existing");
-  assert.equal(plugin.getState().pendingFacts.length, 0);
+  assert.equal(batches.length, 2);
+  assert.equal(batches.flatMap(b => b.pending).length, 20);
+  assert.equal(batches[0].entries[0].id, "legacy:fact:existing");
+  assert.equal(plugin.getState().pending, 0);
   assert.equal(repo.list()[0].text, "用户使用 TypeScript");
-  oldRequest.resolve(response(JSON.stringify({ update: [], add: [] })));
+  oldRequest.resolve(response(JSON.stringify({ upsert: [], archive: [], forget: [], questions: [] })));
   await settle();
-  assert.equal(batches.length, 1);
+  assert.equal(batches.length, 2);
   assert.equal(repo.list().length, 1);
 });
