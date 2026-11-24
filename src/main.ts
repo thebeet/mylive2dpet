@@ -4,6 +4,8 @@ import { createSpeechBubble } from "./speechBubble";
 import type { AvatarRenderer, AvatarSnapshot } from "./avatars/types";
 import { fitAvatarLayout, type AvatarViewport, type ViewportLimits } from "./avatarLayout";
 
+const MOUSE_HIT_MISS_TOLERANCE = 4;
+
 async function main() {
   const mount = document.getElementById("app");
   if (!mount) throw new Error("#app not found");
@@ -20,14 +22,20 @@ async function main() {
   let revision = -1;
   let latestPointer: { x: number; y: number } | null = null;
   let tapPointer = -1;
+  const pressedPointers = new Set<number>();
   let rotationDrag: {
     pointerId: number; renderer: AvatarRenderer | null;
     startX: number; startY: number; lastX: number; lastY: number; moved: boolean;
   } | null = null;
   let ignoringMouse: boolean | undefined;
+  let consecutiveHitMisses = 0;
   function updateMouseInput() {
-    const interacting = tapPointer !== -1 || rotationDrag !== null;
-    const ignore = !interacting && !(latestPointer && (active?.hitTest(latestPointer) || bubble.hitTest?.(latestPointer)));
+    const interacting = pressedPointers.size > 0 || tapPointer !== -1 || rotationDrag !== null;
+    const hit = !!latestPointer && !!(active?.hitTest(latestPointer) || bubble.hitTest?.(latestPointer));
+    if (interacting || hit) consecutiveHitMisses = 0;
+    else if (ignoringMouse === false) consecutiveHitMisses++;
+    const ignore = !interacting && !hit &&
+      (ignoringMouse !== false || consecutiveHitMisses >= MOUSE_HIT_MISS_TOLERANCE);
     if (ignore === ignoringMouse) return;
     ignoringMouse = ignore;
     window.petDesktop?.setIgnoreMouseEvents(ignore);
@@ -130,13 +138,14 @@ async function main() {
 
   mount.addEventListener("contextmenu", event => event.preventDefault());
   mount.addEventListener("pointerdown", event => {
+    pressedPointers.add(event.pointerId);
     if (!hitsAvatar(event)) return;
     if (event.button === 0) {
       tapPointer = event.pointerId;
       mount.setPointerCapture(event.pointerId);
       updateMouseInput();
     }
-    if (event.button !== 2) return;
+    if (event.button !== 2) { updateMouseInput(); return; }
     rotationDrag = { pointerId: event.pointerId, renderer: canRotate(event) ? active : null,
       startX: event.clientX, startY: event.clientY,
       lastX: event.clientX, lastY: event.clientY, moved: false };
@@ -169,13 +178,21 @@ async function main() {
       void window.petDesktop?.chatNow().catch(error => console.error("[chat]", error));
     }
     tapPointer = -1;
+    pressedPointers.delete(event.pointerId);
     drag.clearDrag();
     if (mount.hasPointerCapture(event.pointerId)) mount.releasePointerCapture(event.pointerId);
     updateMouseInput();
   });
+  mount.addEventListener("pointerup", event => {
+    if (event.button === 2) {
+      pressedPointers.delete(event.pointerId);
+      updateMouseInput();
+    }
+  });
   const cancelGesture = () => {
     const capturedTap = tapPointer;
     tapPointer = -1;
+    pressedPointers.clear();
     drag.clearDrag();
     endRotation();
     if (capturedTap !== -1 && mount.hasPointerCapture(capturedTap)) mount.releasePointerCapture(capturedTap);

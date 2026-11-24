@@ -110,7 +110,7 @@ npm start
 | [`gitlab`](electron/plugins/gitlab/README.md) | GitLab 流水线状态感知 | `baseUrl`、`token` / `tokenEnv`、`projects`、`interval_ms` |
 | [`web-search`](electron/plugins/webSearch/README.md) | 网页搜索与正文读取 | `searchProvider`、`fetchProvider`、`providers` |
 | [`schedule`](electron/plugins/schedule/README.md) | 单次定时通知 | `observationTtlMs`、`maxRetries`、`retryDelayMs` |
-| [`tts`](electron/plugins/tts/README.md) | 系统语音 / GPT-SoVITS 输出 | `provider`、服务地址与声线资源 |
+| [`tts`](electron/plugins/tts/README.md) | 云端兼容 API / 自动部署本地 CosyVoice / 系统语音 / GPT-SoVITS | `provider`、API 与音色，或本地 `service` 与参考音频 |
 | [`memory`](electron/plugins/memory/README.md) | 近期交流、自由主题记忆与来源追溯 | `shortTerm`、`longTerm`、`work`、`practice` |
 | [`questions`](electron/plugins/questions/README.md) | 画像补充提问与回答 | `auto`、`dailyLimit`、`cooldownMs` |
 | [`dialogue-history`](electron/plugins/dialogueHistory/README.md) | 历史对话分页与搜索 | `enabled`、`storageService` |

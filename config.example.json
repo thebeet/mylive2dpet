@@ -241,22 +241,19 @@
     {
       "name": "tts",
       "enabled": false,
-      "provider": "gpt-sovits",
+      "provider": "openai-compatible",
       "interruptOnNewChat": true,
-      "_comment_provider": "system | gpt-sovits。gpt-sovits 需本机先启动 GPT-SoVITS api_v2.py（默认 9880）",
-      "apiBase": "http://127.0.0.1:9880",
-      "apiVersion": "v2",
-      "gptWeights": "assets/v2ProPlus/流萤/流萤-e10.ckpt",
-      "sovitsWeights": "assets/v2ProPlus/流萤/流萤_e10_s250.pth",
-      "refAudio": "assets/v2ProPlus/流萤/reference_audios/中文/emotions/【中立】…我应该会选择请求猎犬家系停止追捕。.wav",
-      "refAudioApiPath": "",
-      "_comment_refAudioApiPath": "GPT-SoVITS 服务端看到的参考音频路径；留空则发送 refAudio 解析后的本机路径",
-      "promptText": "",
-      "_comment_promptText": "留空则从 refAudio 文件名去掉【情感】后自动推断",
-      "textLang": "zh",
-      "promptLang": "zh",
-      "speedFactor": 1,
-      "rate": 0
+      "_comment_provider": "system | gpt-sovits | openai-compatible。docker 模式自动部署本地 CosyVoice；云端或自管服务使用 service.type=external 并填写 apiBase、apiKey、model、voice。详见 TTS 插件文档。",
+      "service": {
+        "type": "docker",
+        "preset": "cosyvoice"
+      },
+      "refAudio": "assets/voice/reference.wav",
+      "promptText": "参考音频对应的实际台词。",
+      "_comment_voice": "本地填写 refAudio 后自动创建并复用音色，无需手动获取 ID；也可填写已有 voice ID。",
+      "responseFormat": "wav",
+      "speed": 1,
+      "timeoutMs": 120000
     },
     {
       "name": "memory",

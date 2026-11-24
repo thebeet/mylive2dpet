@@ -101,6 +101,7 @@ test("transparent space passes input through and cannot start avatar gestures", 
   callbacks.pointer({ x: 190, y: 310 });
   assert.equal(calls.ignored.at(-1), false);
   callbacks.pointer({ x: 40, y: 40 });
+  for (let frame = 0; frame < 3; frame++) callbacks.rendered();
   assert.equal(calls.ignored.at(-1), true);
   for (const button of [0, 2]) {
     emit("pointerdown", { button, clientX: 40, clientY: 40 });
@@ -150,7 +151,40 @@ test("animation rechecks a stationary cursor and sends only changed input states
   assert.equal(calls.ignored.length, count);
   renderer.hitTest = () => false;
   callbacks.rendered();
+  assert.equal(calls.ignored.at(-1), false);
+  callbacks.rendered();
+  callbacks.rendered();
+  assert.equal(calls.ignored.at(-1), false);
+  callbacks.rendered();
   assert.equal(calls.ignored.at(-1), true);
+});
+
+test("mouse hit testing pauses while a button is held and resumes after release", async t => {
+  const { calls, emit, callbacks, renderer } = await harness(t);
+  callbacks.pointer({ x: 190, y: 310 });
+  emit("pointerdown", { button: 0 });
+  const heldStateCount = calls.ignored.length;
+  renderer.hitTest = () => false;
+  callbacks.pointer({ x: 40, y: 40 });
+  callbacks.rendered();
+  assert.equal(calls.ignored.length, heldStateCount);
+  emit("pointerup", { button: 0 });
+  for (let frame = 0; frame < 3; frame++) callbacks.rendered();
+  assert.equal(calls.ignored.at(-1), true);
+});
+
+test("right-click target survives brief alpha-hit misses during animation", async t => {
+  const { calls, emit, callbacks, renderer } = await harness(t);
+  callbacks.pointer({ x: 190, y: 310 });
+  renderer.hitTest = () => false;
+  callbacks.rendered();
+  callbacks.rendered();
+  assert.equal(calls.ignored.at(-1), false);
+  renderer.hitTest = () => true;
+  callbacks.rendered();
+  emit("pointerdown");
+  emit("pointerup");
+  assert.equal(calls.menus.length, 1);
 });
 
 test("both drag buttons retain input outside the silhouette until release or cancellation", async t => {
@@ -165,6 +199,7 @@ test("both drag buttons retain input outside the silhouette until release or can
     emit("pointermove", { button, clientX: 40, clientY: 40, screenX: 40 });
     emit("pointerup", { button, clientX: 40, clientY: 40 });
     assert.equal(root.hasPointerCapture(1), false);
+    for (let frame = 0; frame < 3; frame++) callbacks.rendered();
     assert.equal(calls.ignored.at(-1), true);
     assert.equal(calls.chats, 0);
     assert.equal(calls.menus.length, 0);
